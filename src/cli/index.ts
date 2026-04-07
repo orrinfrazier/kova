@@ -14,6 +14,7 @@ import { runAuto } from '../pipeline/auto.js';
 import { brainstorm, printBrainstormPreview } from '../pipeline/brainstorm.js';
 import { fix } from '../pipeline/fix.js';
 import { fixLoop } from '../pipeline/loop.js';
+import { runSupervised } from '../pipeline/supervised.js';
 import { approveIssues } from '../services/approval.js';
 import { detectRepoName, resolveRepoConfig } from '../services/config.js';
 import { createIssue, fetchIssue, hasExistingWork } from '../services/github.js';
@@ -202,5 +203,60 @@ program
       `\nSummary: ${created} created, ${approval.rejected} rejected, ${approval.edited} edited, ${approval.skipped} skipped`,
     );
   });
+
+program
+  .command('supervised')
+  .description('Supervised mode — brainstorm, approve, fix batch, review PRs')
+  .option('--skip-brainstorm', 'Skip brainstorm phase and use existing issues')
+  .option('--repo <path>', 'Repository path', '.')
+  .option('--threshold <n>', 'Minimum confidence score for brainstorm (0.0-1.0)', '0.7')
+  .option('--focus <areas>', 'Comma-separated focus areas (e.g., "security,performance")')
+  .option('--yes', 'Auto-approve all issues (no interactive prompts)')
+  .option('--budget <usd>', 'Maximum USD budget for fix loop')
+  .option('--max <n>', 'Maximum issues to fix', '10')
+  .action(
+    async (opts: {
+      skipBrainstorm?: boolean;
+      repo?: string;
+      threshold?: string;
+      focus?: string;
+      yes?: boolean;
+      budget?: string;
+      max?: string;
+    }) => {
+      const repoPath = resolve(opts.repo ?? '.');
+      const repoName = detectRepoName(repoPath);
+      const config = resolveRepoConfig(repoPath);
+
+      const threshold = opts.threshold ? Number.parseFloat(opts.threshold) : undefined;
+      const focus = opts.focus ? opts.focus.split(',').map((s) => s.trim()) : undefined;
+      const budgetUsd = opts.budget ? Number.parseFloat(opts.budget) : undefined;
+
+      installSignalHandlers();
+      let success = false;
+      try {
+        const result = await runSupervised({
+          repoPath,
+          repoName,
+          config,
+          ...(opts.skipBrainstorm && { skipBrainstorm: true }),
+          ...(threshold !== undefined && { threshold }),
+          ...(focus !== undefined && { focus }),
+          ...(opts.yes && { yes: true }),
+          ...(budgetUsd !== undefined && { budgetUsd }),
+        });
+        success = result.success;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        log.error(`Supervised mode failed: ${message}`);
+      }
+      removeSignalHandlers();
+
+      if (shutdownRequested()) {
+        process.exit(exitCodeForSignal(getShutdownSignal()));
+      }
+      process.exit(success ? 0 : 1);
+    },
+  );
 
 program.parse();
