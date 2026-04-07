@@ -33,7 +33,14 @@ export const RepoConfigSchema = z.object({
       quality: ModelTierSchema.default('small'),
       review: ModelTierSchema.default('large'),
     })
-    .default(() => ({ assess: 'large' as const, spec: 'large' as const, test: 'medium' as const, impl: 'medium' as const, quality: 'small' as const, review: 'large' as const })),
+    .default(() => ({
+      assess: 'large' as const,
+      spec: 'large' as const,
+      test: 'medium' as const,
+      impl: 'medium' as const,
+      quality: 'small' as const,
+      review: 'large' as const,
+    })),
   isolation: IsolationModeSchema.default('worktree'),
 });
 
