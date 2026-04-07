@@ -6,6 +6,7 @@ export type {
   KovaConfig,
   ModelTier,
   RepoConfig,
+  ReviewKnownIssue,
   WaveName,
   WaveResult,
 } from './config.js';
@@ -18,6 +19,7 @@ export type {
   ImplDiagnosis,
   ImplResult,
   QualityResult,
+  ReviewFinding,
   ReviewResult,
   SpecResult,
   TestResult,
@@ -28,6 +30,7 @@ export {
   ImplDiagnosisSchema,
   ImplResultSchema,
   QualityResultSchema,
+  ReviewFindingSchema,
   ReviewResultSchema,
   SpecResultSchema,
   TestResultSchema,

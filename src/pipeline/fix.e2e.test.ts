@@ -582,16 +582,19 @@ describe('fix — E2E with mock pi-mono', () => {
   });
 
   describe('review loop', () => {
-    it('re-runs impl + quality when review returns needs_fixes', async () => {
+    it('re-runs impl + quality + fresh review when review returns needs_fixes', async () => {
+      // New review loop flow: fix pipeline runs assess→spec→test→impl→quality,
+      // then runReviewLoop handles: review(1)→impl→quality→review(2)
       setupResponseSequence([
-        { structuredOutput: ASSESS_PASS, cost: 0.1 },
-        { structuredOutput: SPEC_RESULT, cost: 0.08 },
-        { result: 'Tests written', cost: 0.06 },
-        { structuredOutput: IMPL_PASS, cost: 0.07 },
-        { result: 'Quality OK', cost: 0.02 },
-        { structuredOutput: REVIEW_NEEDS_FIXES, cost: 0.09 },
-        { structuredOutput: IMPL_PASS, cost: 0.03 },
-        { result: 'Quality OK after fixes', cost: 0.02 },
+        { structuredOutput: ASSESS_PASS, cost: 0.1 }, // assess
+        { structuredOutput: SPEC_RESULT, cost: 0.08 }, // spec
+        { result: 'Tests written', cost: 0.06 }, // test
+        { structuredOutput: IMPL_PASS, cost: 0.07 }, // impl
+        { result: 'Quality OK', cost: 0.02 }, // quality
+        { structuredOutput: REVIEW_NEEDS_FIXES, cost: 0.09 }, // review iter 1 → needs_fixes
+        { structuredOutput: IMPL_PASS, cost: 0.03 }, // impl (mechanical fix)
+        { result: 'Quality OK after fixes', cost: 0.02 }, // quality (re-run)
+        { structuredOutput: REVIEW_PASS, cost: 0.05 }, // review iter 2 → pass
       ]);
 
       const result = await fix({
@@ -602,10 +605,11 @@ describe('fix — E2E with mock pi-mono', () => {
       });
 
       expect(result.success).toBe(true);
-      expect(mockAgentConstructor).toHaveBeenCalledTimes(8);
+      // 9 agents: assess, spec, test, impl, quality, review(1), impl(fix), quality(2), review(2)
+      expect(mockAgentConstructor).toHaveBeenCalledTimes(9);
 
-      // The 7th prompt (index 6) is the re-impl with review findings
-      expect(allPrompts[6]).toContain('Review findings');
+      // The 7th prompt (index 6) is the mechanical fix impl with review findings
+      expect(allPrompts[6]).toContain('MECHANICAL_FIX');
       expect(allPrompts[6]).toContain('Unused import');
     });
   });
