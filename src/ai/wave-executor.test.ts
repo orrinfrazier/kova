@@ -38,7 +38,12 @@ vi.mock('@mariozechner/pi-agent-core', () => {
 
 vi.mock('@mariozechner/pi-ai', () => ({
   streamSimple: vi.fn(),
-  getModel: vi.fn().mockReturnValue({ id: 'claude-sonnet-4-6', provider: 'anthropic' }),
+  getModel: vi.fn().mockReturnValue({
+    id: 'claude-sonnet-4-6',
+    provider: 'anthropic',
+    contextWindow: 200_000,
+    maxTokens: 8_192,
+  }),
   getProviders: vi.fn().mockReturnValue(['anthropic', 'openai', 'google']),
   registerBuiltInApiProviders: vi.fn(),
 }));
@@ -533,6 +538,212 @@ describe('spawnWaveAgent', () => {
       initialState: { thinkingLevel: string };
     };
     expect(agentConfig.initialState.thinkingLevel).toBe('high');
+  });
+});
+
+describe('context monitoring', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env.ANTHROPIC_API_KEY = 'test-key';
+    mockPrompt.mockResolvedValue(undefined);
+    setAgentResponse('done');
+  });
+
+  afterEach(() => {
+    delete process.env.ANTHROPIC_API_KEY;
+  });
+
+  it('aborts and throws context KovaError when usage exceeds threshold', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+    const { KovaError } = await import('./errors.js');
+
+    // Simulate subscribe callback capturing turn_end events
+    // The mock subscribe captures the callback, we invoke it with high-usage messages
+    let subscribeCb: ((event: unknown) => void) | undefined;
+    mockSubscribe.mockImplementation((cb: (event: unknown) => void) => {
+      subscribeCb = cb;
+      return vi.fn();
+    });
+
+    // Mock prompt to simulate turns with high context usage
+    mockPrompt.mockImplementation(async () => {
+      // Simulate turn_end events with usage exceeding 80% of context window
+      // claude-sonnet-4-6 has contextWindow = 200000
+      // 80% threshold = 160000 tokens
+      if (subscribeCb) {
+        subscribeCb({
+          type: 'turn_end',
+          message: {
+            role: 'assistant',
+            content: [{ type: 'text', text: 'working...' }],
+            usage: { input: 170000, output: 1000, totalTokens: 171000, cost: { total: 0.01 } },
+            stopReason: 'toolUse',
+          },
+          toolResults: [],
+        });
+      }
+    });
+
+    await expect(
+      spawnWaveAgent({
+        wave: 'impl',
+        model: 'claude-sonnet-4-6',
+        tools: [],
+        systemPrompt: 'Prompt.',
+        handoffContext: '',
+        userMessage: 'Message.',
+        cwd: '/tmp/test',
+        contextThreshold: 0.8,
+      }),
+    ).rejects.toThrow(KovaError);
+
+    expect(mockAbort).toHaveBeenCalled();
+  });
+
+  it('does not abort when usage is below threshold', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+
+    let subscribeCb: ((event: unknown) => void) | undefined;
+    mockSubscribe.mockImplementation((cb: (event: unknown) => void) => {
+      subscribeCb = cb;
+      return vi.fn();
+    });
+
+    mockPrompt.mockImplementation(async () => {
+      if (subscribeCb) {
+        subscribeCb({
+          type: 'turn_end',
+          message: {
+            role: 'assistant',
+            content: [{ type: 'text', text: 'done' }],
+            usage: { input: 50000, output: 1000, totalTokens: 51000, cost: { total: 0.01 } },
+            stopReason: 'stop',
+          },
+          toolResults: [],
+        });
+      }
+    });
+
+    const result = await spawnWaveAgent({
+      wave: 'impl',
+      model: 'claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Message.',
+      cwd: '/tmp/test',
+      contextThreshold: 0.8,
+    });
+
+    expect(result.wave).toBe('impl');
+    expect(mockAbort).not.toHaveBeenCalled();
+  });
+
+  it('uses default threshold of 0.8 when not specified', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+    const { KovaError } = await import('./errors.js');
+
+    let subscribeCb: ((event: unknown) => void) | undefined;
+    mockSubscribe.mockImplementation((cb: (event: unknown) => void) => {
+      subscribeCb = cb;
+      return vi.fn();
+    });
+
+    mockPrompt.mockImplementation(async () => {
+      if (subscribeCb) {
+        // 85% of 200000 = 170000 — above default 0.8 threshold (160000)
+        subscribeCb({
+          type: 'turn_end',
+          message: {
+            role: 'assistant',
+            content: [{ type: 'text', text: 'working...' }],
+            usage: { input: 170000, output: 1000, totalTokens: 171000, cost: { total: 0.01 } },
+            stopReason: 'toolUse',
+          },
+          toolResults: [],
+        });
+      }
+    });
+
+    await expect(
+      spawnWaveAgent({
+        wave: 'impl',
+        model: 'claude-sonnet-4-6',
+        tools: [],
+        systemPrompt: 'Prompt.',
+        handoffContext: '',
+        userMessage: 'Message.',
+        cwd: '/tmp/test',
+        // no contextThreshold — should default to 0.8
+      }),
+    ).rejects.toThrow(KovaError);
+  });
+
+  it('accepts custom contextThreshold', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+
+    let subscribeCb: ((event: unknown) => void) | undefined;
+    mockSubscribe.mockImplementation((cb: (event: unknown) => void) => {
+      subscribeCb = cb;
+      return vi.fn();
+    });
+
+    mockPrompt.mockImplementation(async () => {
+      if (subscribeCb) {
+        // 55% of 200000 = 110000 — below 0.9 but above 0.5
+        subscribeCb({
+          type: 'turn_end',
+          message: {
+            role: 'assistant',
+            content: [{ type: 'text', text: 'done' }],
+            usage: { input: 110000, output: 1000, totalTokens: 111000, cost: { total: 0.01 } },
+            stopReason: 'stop',
+          },
+          toolResults: [],
+        });
+      }
+    });
+
+    // At 0.9 threshold (180000), 110000 is fine
+    const result = await spawnWaveAgent({
+      wave: 'impl',
+      model: 'claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Message.',
+      cwd: '/tmp/test',
+      contextThreshold: 0.9,
+    });
+
+    expect(result.wave).toBe('impl');
+    expect(mockAbort).not.toHaveBeenCalled();
+  });
+
+  it('classifies context exhaustion API errors correctly', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+    const { KovaError } = await import('./errors.js');
+
+    mockSubscribe.mockImplementation(() => vi.fn());
+    mockPrompt.mockRejectedValue(new Error('context length exceeded: 210000 tokens'));
+
+    try {
+      await spawnWaveAgent({
+        wave: 'impl',
+        model: 'claude-sonnet-4-6',
+        tools: [],
+        systemPrompt: 'Prompt.',
+        handoffContext: '',
+        userMessage: 'Message.',
+        cwd: '/tmp/test',
+      });
+      expect.unreachable('Should have thrown');
+    } catch (error) {
+      expect(error).toBeInstanceOf(KovaError);
+      const kovaErr = error as InstanceType<typeof KovaError>;
+      expect(kovaErr.type).toBe('context');
+      expect(kovaErr.retryable).toBe(true);
+    }
   });
 });
 

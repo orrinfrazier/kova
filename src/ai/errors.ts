@@ -1,7 +1,7 @@
 export class KovaError extends Error {
   constructor(
     message: string,
-    readonly type: 'billing' | 'config' | 'agent' | 'git' | 'validation' | 'unknown',
+    readonly type: 'billing' | 'config' | 'agent' | 'git' | 'validation' | 'context' | 'unknown',
     readonly retryable: boolean,
     readonly context?: Record<string, unknown>,
   ) {
@@ -9,6 +9,13 @@ export class KovaError extends Error {
     this.name = 'KovaError';
   }
 }
+
+const CONTEXT_PATTERNS = [
+  /context.?length.?exceeded/i,
+  /context.?window/i,
+  /max.?context.?length/i,
+  /prompt.?(?:is\s+)?too\s+long/i,
+];
 
 const RETRYABLE_PATTERNS = [/rate.?limit/i, /timeout/i, /429/, /5\d{2}/, /billing/i, /spending.?cap/i];
 
@@ -30,6 +37,10 @@ export function classifyError(error: unknown): ErrorClassification {
 
   const message = error instanceof Error ? error.message : String(error);
 
+  for (const pattern of CONTEXT_PATTERNS) {
+    if (pattern.test(message)) return { type: 'context', retryable: true };
+  }
+
   for (const pattern of NON_RETRYABLE_PATTERNS) {
     if (pattern.test(message)) return { type: 'config', retryable: false };
   }
@@ -43,6 +54,10 @@ export function classifyError(error: unknown): ErrorClassification {
 
 export function isRetryable(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
+
+  for (const pattern of CONTEXT_PATTERNS) {
+    if (pattern.test(message)) return true;
+  }
 
   for (const pattern of NON_RETRYABLE_PATTERNS) {
     if (pattern.test(message)) return false;
