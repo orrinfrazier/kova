@@ -3,12 +3,13 @@ import type { WaveName } from '../types/index.js';
 import { DEFAULT_THINKING_LEVELS, getWaveTools, WAVE_TOOLS } from './wave-tools.js';
 
 describe('WAVE_TOOLS', () => {
-  it('defines tool sets for all seven waves', () => {
-    const waves: WaveName[] = ['assess', 'spec', 'test', 'impl', 'quality', 'review', 'ship'];
-    for (const wave of waves) {
+  it('defines tool sets for all six AI waves (ship excluded — orchestrator-only)', () => {
+    const aiWaves: Array<keyof typeof WAVE_TOOLS> = ['assess', 'spec', 'test', 'impl', 'quality', 'review'];
+    for (const wave of aiWaves) {
       expect(WAVE_TOOLS[wave]).toBeDefined();
       expect(WAVE_TOOLS[wave].length).toBeGreaterThan(0);
     }
+    expect('ship' in WAVE_TOOLS).toBe(false);
   });
 
   it('assess wave has read-only tools: read, find, grep', () => {
@@ -35,12 +36,8 @@ describe('WAVE_TOOLS', () => {
     expect(WAVE_TOOLS.review).toEqual(['read', 'grep']);
   });
 
-  it('ship wave has bash only', () => {
-    expect(WAVE_TOOLS.ship).toEqual(['bash']);
-  });
-
   it('read-only waves do not include write, edit, or bash', () => {
-    const readOnlyWaves: WaveName[] = ['assess', 'spec', 'review'];
+    const readOnlyWaves: Array<keyof typeof WAVE_TOOLS> = ['assess', 'spec', 'review'];
     const writeTools = ['write', 'edit', 'bash'];
     for (const wave of readOnlyWaves) {
       for (const tool of writeTools) {

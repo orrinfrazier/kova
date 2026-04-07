@@ -2,7 +2,7 @@
 // Read-only waves (assess, spec, review) cannot write or execute.
 // Coding waves (test, impl) get full coding tools.
 // Quality gets bash + read for running checks.
-// Ship gets bash for git operations.
+// Ship is orchestrator-only (git operations via commitAndPush) — no AI agent spawned.
 
 import type { AgentTool, ThinkingLevel } from '@mariozechner/pi-agent-core';
 import {
@@ -17,9 +17,12 @@ import type { WaveName } from '../types/index.js';
 
 type ToolName = 'read' | 'bash' | 'edit' | 'write' | 'grep' | 'find' | 'ls';
 
+/** Waves that spawn an AI agent — excludes ship (orchestrator-only, no AI). */
+export type AIWaveName = Exclude<WaveName, 'ship'>;
+
 /** Default extended thinking levels per wave type.
  *  Reasoning waves (assess, spec, review) benefit from extended thinking.
- *  Coding/mechanical waves (test, impl, quality, ship) do not. */
+ *  Coding/mechanical waves (test, impl, quality) do not. */
 export const DEFAULT_THINKING_LEVELS: Record<WaveName, ThinkingLevel> = {
   assess: 'medium',
   spec: 'medium',
@@ -30,14 +33,13 @@ export const DEFAULT_THINKING_LEVELS: Record<WaveName, ThinkingLevel> = {
   ship: 'off',
 };
 
-export const WAVE_TOOLS: Record<WaveName, ToolName[]> = {
+export const WAVE_TOOLS: Record<AIWaveName, ToolName[]> = {
   assess: ['read', 'find', 'grep'],
   spec: ['read', 'find', 'grep'],
   test: ['read', 'write', 'edit', 'bash'],
   impl: ['read', 'write', 'edit', 'bash'],
   quality: ['bash', 'read'],
   review: ['read', 'grep'],
-  ship: ['bash'],
 } as const;
 
 // biome-ignore lint/suspicious/noExplicitAny: pi-mono AgentTool uses any for tool parameter schemas
@@ -55,7 +57,7 @@ const toolCreators: Record<ToolName, (cwd: string) => AnyTool> = {
   },
 };
 
-export function getWaveTools(wave: WaveName, cwd: string): AnyTool[] {
+export function getWaveTools(wave: AIWaveName, cwd: string): AnyTool[] {
   const allowedNames = WAVE_TOOLS[wave];
   return allowedNames.map((name) => toolCreators[name](cwd));
 }
