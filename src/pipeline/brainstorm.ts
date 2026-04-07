@@ -3,6 +3,12 @@
 
 import { z } from 'zod';
 import { getWaveTools, type OutputFormat, resolveModel, resolveThinkingLevel, spawnWaveAgent } from '../ai/index.js';
+import {
+  appendCycle,
+  type DiminishingReturnsReport,
+  detectDiminishingReturns,
+  loadHistory,
+} from '../services/brainstorm-history.js';
 import type { BrainstormIssue, BrainstormResult, RepoConfig } from '../types/index.js';
 import { BrainstormResultSchema } from '../types/index.js';
 import { log } from '../utils/logger.js';
@@ -29,6 +35,7 @@ export interface BrainstormReturn {
   cost: number;
   model: string;
   error?: string;
+  diminishingReturns?: DiminishingReturnsReport;
 }
 
 export async function brainstorm(options: BrainstormOptions): Promise<BrainstormReturn> {
@@ -71,12 +78,25 @@ export async function brainstorm(options: BrainstormOptions): Promise<Brainstorm
     }
 
     const artifact = handoff.artifact;
+
+    // Diminishing returns detection
+    const history = await loadHistory(repoPath);
+    const report = detectDiminishingReturns(artifact.issues, history);
+
+    // Persist this cycle for future comparison
+    await appendCycle(repoPath, {
+      timestamp: new Date().toISOString(),
+      issues: artifact.issues.map((i) => ({ title: i.title, category: i.category })),
+      summary: artifact.summary,
+    });
+
     return {
       success: true,
       issues: artifact.issues,
       summary: artifact.summary,
       cost: handoff.cost,
       model: handoff.model,
+      diminishingReturns: report,
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -115,4 +135,17 @@ export function printBrainstormPreview(result: BrainstormReturn): void {
   }
 
   console.log(`Cost: $${result.cost.toFixed(4)} | Model: ${result.model}`);
+
+  // Diminishing returns warnings
+  if (result.diminishingReturns) {
+    const dr = result.diminishingReturns;
+    if (dr.isStale) {
+      console.log(
+        `\nWarning: ${dr.overlapPercent}% overlap with previous brainstorm cycles (${dr.duplicateIssues.length} duplicate(s))`,
+      );
+    }
+    if (dr.shouldStop) {
+      console.log(`Suggestion: Only ${dr.novelCount} novel issue(s) generated. Consider stopping brainstorm cycles.`);
+    }
+  }
 }
