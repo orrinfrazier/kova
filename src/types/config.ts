@@ -3,6 +3,9 @@ import { z } from 'zod';
 export const ModelTierSchema = z.enum(['small', 'medium', 'large']);
 export type ModelTier = z.infer<typeof ModelTierSchema>;
 
+export const ThinkingLevelSchema = z.enum(['off', 'minimal', 'low', 'medium', 'high', 'xhigh']);
+export type ThinkingLevel = z.infer<typeof ThinkingLevelSchema>;
+
 export const IsolationModeSchema = z.enum(['worktree', 'docker', 'none']);
 export type IsolationMode = z.infer<typeof IsolationModeSchema>;
 
@@ -34,6 +37,16 @@ export const RepoConfigSchema = z.object({
       impl: ModelTierSchema.default('medium'),
       quality: ModelTierSchema.default('small'),
       review: ModelTierSchema.default('large'),
+      thinking: z
+        .object({
+          assess: ThinkingLevelSchema.optional(),
+          spec: ThinkingLevelSchema.optional(),
+          test: ThinkingLevelSchema.optional(),
+          impl: ThinkingLevelSchema.optional(),
+          quality: ThinkingLevelSchema.optional(),
+          review: ThinkingLevelSchema.optional(),
+        })
+        .optional(),
     })
     .default(() => ({
       assess: 'large' as const,

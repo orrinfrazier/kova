@@ -13,7 +13,7 @@ import {
   createReadTool,
   createWriteTool,
 } from '@mariozechner/pi-coding-agent';
-import type { WaveName } from '../types/index.js';
+import type { RepoConfig, WaveName } from '../types/index.js';
 
 type ToolName = 'read' | 'bash' | 'edit' | 'write' | 'grep' | 'find' | 'ls';
 
@@ -56,6 +56,12 @@ const toolCreators: Record<ToolName, (cwd: string) => AnyTool> = {
     throw new Error(`ls tool requested but not wired — add createLsTool import (cwd=${cwd})`);
   },
 };
+
+/** Resolve the thinking level for a wave — config override takes precedence over defaults. */
+export function resolveThinkingLevel(config: RepoConfig, wave: WaveName): ThinkingLevel {
+  const override = config.model.thinking?.[wave as Exclude<WaveName, 'ship'>];
+  return override ?? DEFAULT_THINKING_LEVELS[wave];
+}
 
 export function getWaveTools(wave: AIWaveName, cwd: string): AnyTool[] {
   const allowedNames = WAVE_TOOLS[wave];
