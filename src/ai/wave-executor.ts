@@ -4,7 +4,6 @@
 import {
   AuthStorage,
   createAgentSession,
-  createCodingTools,
   DefaultResourceLoader,
   ModelRegistry,
   SessionManager,
@@ -14,6 +13,7 @@ import type { ModelTier, WaveName } from '../types/index.js';
 import { log } from '../utils/logger.js';
 import { isSpendingCapBehavior, KovaError } from './errors.js';
 import { resolveModel } from './models.js';
+import { getWaveTools } from './wave-tools.js';
 
 export interface OutputFormat {
   type: 'json_schema';
@@ -68,7 +68,7 @@ export async function executeWave(options: WaveOptions): Promise<WaveExecutionRe
     cwd,
     model,
     thinkingLevel: 'off',
-    tools: createCodingTools(cwd),
+    tools: getWaveTools(wave, cwd),
     sessionManager: SessionManager.inMemory(),
     settingsManager: SettingsManager.inMemory({ compaction: { enabled: false } }),
     authStorage,

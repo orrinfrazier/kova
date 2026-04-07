@@ -7,3 +7,4 @@ export {
   type WaveExecutionResult,
   type WaveOptions,
 } from './wave-executor.js';
+export { getWaveTools, WAVE_TOOLS } from './wave-tools.js';
