@@ -19,7 +19,14 @@ vi.mock('./prompts.js', () => ({
   loadPrompt: vi.fn().mockResolvedValue('mock system prompt'),
 }));
 
-const { runTILoop, runReviewLoop, resolveTestCommand } = await import('./loops.js');
+const {
+  runTILoop,
+  runReviewLoop,
+  resolveTestCommand,
+  normalizeTestOutput,
+  extractFailingTestNames,
+  classifyDiagnosis,
+} = await import('./loops.js');
 const { executeWaveWithRetry } = await import('../ai/index.js');
 const { detectTooling } = await import('../services/language-detect.js');
 
@@ -220,12 +227,51 @@ describe('runTILoop', () => {
     expect(result.testsPassing).toBe(false);
   });
 
-  it('returns SPEC_WRONG diagnosis when all failures have similar output', async () => {
-    const sameError = 'FAIL: expected true, got false\n  at token.test.ts:10';
+  it('returns SPEC_WRONG diagnosis when same test names fail across attempts', async () => {
+    const attempt1 = [
+      ' FAIL  src/auth.test.ts > AuthService > validates expired tokens',
+      '   AssertionError: expected true to be false',
+      '     at src/auth.test.ts:42:10',
+      '   Duration: 123ms',
+      ' FAIL  src/auth.test.ts > AuthService > rejects invalid signatures',
+      '   Error: token verification failed',
+      '     at src/auth.test.ts:58:5',
+      '   Duration: 45ms',
+      '',
+      ' Tests: 2 failed, 8 passed',
+      ' Time:  1.234s',
+    ].join('\n');
+    const attempt2 = [
+      ' FAIL  src/auth.test.ts > AuthService > validates expired tokens',
+      '   AssertionError: expected true to be false',
+      '     at src/auth.test.ts:42:10',
+      '   Duration: 187ms',
+      ' FAIL  src/auth.test.ts > AuthService > rejects invalid signatures',
+      '   Error: token verification failed',
+      '     at src/auth.test.ts:58:5',
+      '   Duration: 31ms',
+      '',
+      ' Tests: 2 failed, 8 passed',
+      ' Time:  1.891s',
+    ].join('\n');
+    const attempt3 = [
+      ' FAIL  src/auth.test.ts > AuthService > validates expired tokens',
+      '   AssertionError: expected true to be false',
+      '     at src/auth.test.ts:42:10',
+      '   Duration: 99ms',
+      ' FAIL  src/auth.test.ts > AuthService > rejects invalid signatures',
+      '   Error: token verification failed',
+      '     at src/auth.test.ts:58:5',
+      '   Duration: 67ms',
+      '',
+      ' Tests: 2 failed, 8 passed',
+      ' Time:  0.987s',
+    ].join('\n');
+
     vi.mocked(mockTestRunner)
-      .mockResolvedValueOnce({ passed: false, output: sameError, exitCode: 1 })
-      .mockResolvedValueOnce({ passed: false, output: sameError, exitCode: 1 })
-      .mockResolvedValueOnce({ passed: false, output: sameError, exitCode: 1 });
+      .mockResolvedValueOnce({ passed: false, output: attempt1, exitCode: 1 })
+      .mockResolvedValueOnce({ passed: false, output: attempt2, exitCode: 1 })
+      .mockResolvedValueOnce({ passed: false, output: attempt3, exitCode: 1 });
 
     const result = await runTILoop({
       issue: makeIssue(),
@@ -240,23 +286,30 @@ describe('runTILoop', () => {
     expect(result.diagnosis).toBe('SPEC_WRONG');
   });
 
-  it('returns APPROACH_WRONG diagnosis when failures differ across attempts', async () => {
+  it('returns APPROACH_WRONG diagnosis when different test names fail across attempts', async () => {
+    const attempt1 = [
+      ' FAIL  src/auth.test.ts > AuthService > validates expired tokens',
+      '   TypeError: cannot read undefined',
+      '     at src/auth.ts:5:12',
+      '   Duration: 44ms',
+    ].join('\n');
+    const attempt2 = [
+      ' FAIL  src/parser.test.ts > Parser > handles nested expressions',
+      '   RangeError: maximum call stack exceeded',
+      '     at src/parser.ts:99:3',
+      '   Duration: 201ms',
+    ].join('\n');
+    const attempt3 = [
+      ' FAIL  src/config.test.ts > Config > loads YAML files',
+      '   SyntaxError: unexpected token',
+      '     at src/config.ts:1:1',
+      '   Duration: 12ms',
+    ].join('\n');
+
     vi.mocked(mockTestRunner)
-      .mockResolvedValueOnce({
-        passed: false,
-        output: 'FAIL: TypeError: cannot read undefined\n  at auth.ts:5',
-        exitCode: 1,
-      })
-      .mockResolvedValueOnce({
-        passed: false,
-        output: 'FAIL: RangeError: maximum call stack exceeded\n  at parser.ts:99',
-        exitCode: 1,
-      })
-      .mockResolvedValueOnce({
-        passed: false,
-        output: 'FAIL: SyntaxError: unexpected token\n  at config.ts:1',
-        exitCode: 1,
-      });
+      .mockResolvedValueOnce({ passed: false, output: attempt1, exitCode: 1 })
+      .mockResolvedValueOnce({ passed: false, output: attempt2, exitCode: 1 })
+      .mockResolvedValueOnce({ passed: false, output: attempt3, exitCode: 1 });
 
     const result = await runTILoop({
       issue: makeIssue(),
@@ -285,6 +338,34 @@ describe('runTILoop', () => {
     });
 
     expect(result.diagnosis).toBe('STUCK');
+  });
+
+  it('returns MISSING_CONTEXT when impl output contains "cannot find" patterns', async () => {
+    const missingCtxOutput = [
+      "error TS2307: Cannot find module './missing-service' or its corresponding type declarations.",
+      '  at src/handler.ts:3:1',
+      '',
+      ' FAIL  src/handler.test.ts > Handler > processes requests',
+      "   Error: Cannot find module './missing-service'",
+      '   Duration: 5ms',
+    ].join('\n');
+
+    vi.mocked(mockTestRunner)
+      .mockResolvedValueOnce({ passed: false, output: missingCtxOutput, exitCode: 1 })
+      .mockResolvedValueOnce({ passed: false, output: missingCtxOutput, exitCode: 1 })
+      .mockResolvedValueOnce({ passed: false, output: missingCtxOutput, exitCode: 1 });
+
+    const result = await runTILoop({
+      issue: makeIssue(),
+      workDir: '/tmp/test',
+      repoConfig: makeConfig(),
+      waveResults: {},
+      testRunner: mockTestRunner,
+      testCommand: 'npm test',
+    });
+
+    expect(result.testsPassing).toBe(false);
+    expect(result.diagnosis).toBe('MISSING_CONTEXT');
   });
 
   it('tracks cost across all attempts', async () => {
@@ -475,6 +556,193 @@ describe('resolveTestCommand', () => {
   });
 });
 
+// --- normalizeTestOutput tests ---
+
+describe('normalizeTestOutput', () => {
+  it('strips timestamps from output lines', () => {
+    const input = '2026-04-07T12:34:56.789Z  FAIL  src/auth.test.ts > test name';
+    const normalized = normalizeTestOutput(input);
+    expect(normalized).not.toContain('2026-04-07T12:34:56.789Z');
+    expect(normalized).toContain('FAIL');
+  });
+
+  it('strips duration values', () => {
+    const input = '   Duration: 1234ms\n   Duration: 0.5s\n   Time:  3.456s';
+    const normalized = normalizeTestOutput(input);
+    expect(normalized).not.toMatch(/\d+ms/);
+    expect(normalized).not.toMatch(/\d+\.\d+s/);
+  });
+
+  it('strips line numbers from stack traces', () => {
+    const input = '    at src/auth.ts:42:10\n    at src/handler.ts:99:3';
+    const normalized = normalizeTestOutput(input);
+    expect(normalized).not.toContain(':42:10');
+    expect(normalized).not.toContain(':99:3');
+  });
+
+  it('preserves test names and failure messages', () => {
+    const input =
+      ' FAIL  src/auth.test.ts > AuthService > validates expired tokens\n   AssertionError: expected true to be false';
+    const normalized = normalizeTestOutput(input);
+    expect(normalized).toContain('validates expired tokens');
+    expect(normalized).toContain('AssertionError');
+  });
+
+  it('strips vitest/jest summary line counts', () => {
+    const input = ' Tests: 2 failed, 8 passed\n Time:  1.234s';
+    const normalized = normalizeTestOutput(input);
+    expect(normalized).not.toMatch(/\d+ failed/);
+    expect(normalized).not.toMatch(/\d+ passed/);
+  });
+});
+
+// --- extractFailingTestNames tests ---
+
+describe('extractFailingTestNames', () => {
+  it('extracts vitest-style failing test names', () => {
+    const output = [
+      ' FAIL  src/auth.test.ts > AuthService > validates expired tokens',
+      '   AssertionError: expected true to be false',
+      '     at src/auth.test.ts:42:10',
+      ' FAIL  src/auth.test.ts > AuthService > rejects invalid signatures',
+      '   Error: token verification failed',
+    ].join('\n');
+
+    const names = extractFailingTestNames(output);
+    expect(names).toEqual(['AuthService > validates expired tokens', 'AuthService > rejects invalid signatures']);
+  });
+
+  it('extracts jest-style failing test names', () => {
+    const output = [
+      '  ● AuthService › validates expired tokens',
+      '',
+      '    expect(received).toBe(expected)',
+      '',
+      '  ● AuthService › rejects invalid signatures',
+      '',
+      '    Error: token verification failed',
+    ].join('\n');
+
+    const names = extractFailingTestNames(output);
+    expect(names).toEqual(['AuthService › validates expired tokens', 'AuthService › rejects invalid signatures']);
+  });
+
+  it('extracts cargo test failing test names', () => {
+    const output = [
+      'test auth::tests::validates_expired_tokens ... FAILED',
+      'test auth::tests::rejects_invalid_signatures ... FAILED',
+      '',
+      'failures:',
+      '    auth::tests::validates_expired_tokens',
+      '    auth::tests::rejects_invalid_signatures',
+    ].join('\n');
+
+    const names = extractFailingTestNames(output);
+    expect(names).toContain('auth::tests::validates_expired_tokens');
+    expect(names).toContain('auth::tests::rejects_invalid_signatures');
+  });
+
+  it('extracts pytest failing test names', () => {
+    const output = [
+      'FAILED tests/test_auth.py::TestAuth::test_validates_expired_tokens',
+      'FAILED tests/test_auth.py::TestAuth::test_rejects_invalid_signatures',
+    ].join('\n');
+
+    const names = extractFailingTestNames(output);
+    expect(names).toContain('test_validates_expired_tokens');
+    expect(names).toContain('test_rejects_invalid_signatures');
+  });
+
+  it('extracts go test failing test names', () => {
+    const output = [
+      '--- FAIL: TestValidatesExpiredTokens (0.00s)',
+      '    auth_test.go:42: expected true, got false',
+      '--- FAIL: TestRejectsInvalidSignatures (0.00s)',
+      '    auth_test.go:58: token verification failed',
+    ].join('\n');
+
+    const names = extractFailingTestNames(output);
+    expect(names).toContain('TestValidatesExpiredTokens');
+    expect(names).toContain('TestRejectsInvalidSignatures');
+  });
+
+  it('returns empty array when no test names found', () => {
+    const output = 'some random error output with no test names';
+    const names = extractFailingTestNames(output);
+    expect(names).toEqual([]);
+  });
+
+  it('deduplicates test names', () => {
+    const output = [
+      ' FAIL  src/auth.test.ts > AuthService > validates expired tokens',
+      '   AssertionError: expected true to be false',
+      ' FAIL  src/auth.test.ts > AuthService > validates expired tokens',
+      '   AssertionError: expected true to be false',
+    ].join('\n');
+
+    const names = extractFailingTestNames(output);
+    expect(names).toEqual(['AuthService > validates expired tokens']);
+  });
+});
+
+// --- classifyDiagnosis unit tests ---
+
+describe('classifyDiagnosis', () => {
+  it('returns STUCK when fewer than 2 outputs', () => {
+    expect(classifyDiagnosis(['single failure'])).toBe('STUCK');
+    expect(classifyDiagnosis([])).toBe('STUCK');
+  });
+
+  it('returns SPEC_WRONG when same test names fail across all attempts', () => {
+    const attempt1 = ' FAIL  src/a.test.ts > suite > test one\n   Error: fail\n   Duration: 100ms';
+    const attempt2 = ' FAIL  src/a.test.ts > suite > test one\n   Error: fail\n   Duration: 200ms';
+    expect(classifyDiagnosis([attempt1, attempt2])).toBe('SPEC_WRONG');
+  });
+
+  it('returns APPROACH_WRONG when different test names fail across attempts', () => {
+    const attempt1 = ' FAIL  src/a.test.ts > suite > test one\n   Error: fail';
+    const attempt2 = ' FAIL  src/b.test.ts > suite > test two\n   Error: fail';
+    expect(classifyDiagnosis([attempt1, attempt2])).toBe('APPROACH_WRONG');
+  });
+
+  it('returns MISSING_CONTEXT when output contains "cannot find module" patterns', () => {
+    const attempt1 = "error TS2307: Cannot find module './missing'\n FAIL  src/a.test.ts > test\n   Duration: 5ms";
+    const attempt2 = "error TS2307: Cannot find module './missing'\n FAIL  src/a.test.ts > test\n   Duration: 8ms";
+    expect(classifyDiagnosis([attempt1, attempt2])).toBe('MISSING_CONTEXT');
+  });
+
+  it('returns MISSING_CONTEXT when output contains "no such file" pattern', () => {
+    const attempt1 = "Error: ENOENT: no such file or directory, open '/tmp/data.json'\n FAIL  src/a.test.ts > test";
+    const attempt2 = "Error: ENOENT: no such file or directory, open '/tmp/data.json'\n FAIL  src/a.test.ts > test";
+    expect(classifyDiagnosis([attempt1, attempt2])).toBe('MISSING_CONTEXT');
+  });
+
+  it('returns MISSING_CONTEXT when output contains "not provided" pattern', () => {
+    const attempt1 = 'Configuration not provided for database connection\n FAIL  src/a.test.ts > test';
+    const attempt2 = 'Configuration not provided for database connection\n FAIL  src/a.test.ts > test';
+    expect(classifyDiagnosis([attempt1, attempt2])).toBe('MISSING_CONTEXT');
+  });
+
+  it('MISSING_CONTEXT takes priority over SPEC_WRONG when both match', () => {
+    const attempt1 = "Cannot find module './service'\n FAIL  src/a.test.ts > test one\n   Error: fail";
+    const attempt2 = "Cannot find module './service'\n FAIL  src/a.test.ts > test one\n   Error: fail";
+    expect(classifyDiagnosis([attempt1, attempt2])).toBe('MISSING_CONTEXT');
+  });
+
+  it('falls back to normalized line overlap when no test names extracted', () => {
+    // No recognizable test name patterns, but similar output
+    const attempt1 = 'error: compilation failed\nsrc/lib.rs: missing semicolon';
+    const attempt2 = 'error: compilation failed\nsrc/lib.rs: missing semicolon';
+    expect(classifyDiagnosis([attempt1, attempt2])).toBe('SPEC_WRONG');
+  });
+
+  it('falls back to APPROACH_WRONG for dissimilar output without test names', () => {
+    const attempt1 = 'error: compilation failed\nsrc/lib.rs: missing semicolon';
+    const attempt2 = 'error: linking failed\nld: undefined symbol _main';
+    expect(classifyDiagnosis([attempt1, attempt2])).toBe('APPROACH_WRONG');
+  });
+});
+
 // --- runReviewLoop tests ---
 
 type FileWriter = (filePath: string, content: string) => Promise<void>;
@@ -603,13 +871,12 @@ describe('runReviewLoop', () => {
     expect(result.knownIssues).toHaveLength(0);
   });
 
-  it('handles MECHANICAL_FIX path: runs impl then verifies tests', async () => {
+  it('handles MECHANICAL_FIX path: runs impl, verifies tests, skips quality', async () => {
     // Iteration 1: review finds mechanical_fix
     mockExecute.mockResolvedValueOnce(reviewExecResult('needs_fixes', [mechanicalFixFinding]));
     // Impl agent for mechanical fix
     mockExecute.mockResolvedValueOnce(implWaveExecResult());
-    // Quality gates
-    mockExecute.mockResolvedValueOnce(qualityExecResult());
+    // NO quality — tests pass, only mechanical fixes
     // Iteration 2: fresh review passes
     mockExecute.mockResolvedValueOnce(reviewExecResult('pass'));
 
@@ -633,8 +900,39 @@ describe('runReviewLoop', () => {
     expect(mockTestRunner).toHaveBeenCalledTimes(1);
 
     const waveCalls = mockExecute.mock.calls.map((c) => c[0].wave);
+    expect(waveCalls).toEqual(['review', 'impl', 'review']);
+    expect(result.iterations).toBe(2);
+    expect(result.qualityWaveResult).toBeUndefined();
+    expect(result.knownIssues).toHaveLength(0);
+  });
+
+  it('re-runs quality when mechanical fix breaks tests', async () => {
+    // Iteration 1: review finds only mechanical fixes
+    mockExecute.mockResolvedValueOnce(reviewExecResult('needs_fixes', [mechanicalFixFinding]));
+    // Impl agent for mechanical fix
+    mockExecute.mockResolvedValueOnce(implWaveExecResult());
+    // Quality gates (needed because tests broke)
+    mockExecute.mockResolvedValueOnce(qualityExecResult());
+    // Iteration 2: fresh review passes
+    mockExecute.mockResolvedValueOnce(reviewExecResult('pass'));
+
+    // After mechanical fix impl: tests FAIL (quality re-run needed)
+    vi.mocked(mockTestRunner).mockResolvedValueOnce({ passed: false, output: 'FAIL: broke something', exitCode: 1 });
+
+    const result = await runReviewLoop({
+      issue: makeIssue(),
+      workDir: '/tmp/test',
+      repoConfig: makeConfig(),
+      waveResults: {},
+      testRunner: mockTestRunner,
+      fileWriter: mockFileWriter,
+      testCommand: 'npm test',
+    });
+
+    const waveCalls = mockExecute.mock.calls.map((c) => c[0].wave);
     expect(waveCalls).toEqual(['review', 'impl', 'quality', 'review']);
     expect(result.iterations).toBe(2);
+    expect(result.qualityWaveResult).toBeDefined();
     expect(result.knownIssues).toHaveLength(0);
   });
 
@@ -677,13 +975,11 @@ describe('runReviewLoop', () => {
   });
 
   it('caps at maxIterations and collects known issues', async () => {
-    // Both iterations return needs_fixes
+    // Both iterations return needs_fixes (mechanical only, tests pass → no quality)
     mockExecute.mockResolvedValueOnce(reviewExecResult('needs_fixes', [mechanicalFixFinding]));
     mockExecute.mockResolvedValueOnce(implWaveExecResult());
-    mockExecute.mockResolvedValueOnce(qualityExecResult());
     mockExecute.mockResolvedValueOnce(reviewExecResult('needs_fixes', [mechanicalFixFinding]));
     mockExecute.mockResolvedValueOnce(implWaveExecResult());
-    mockExecute.mockResolvedValueOnce(qualityExecResult());
 
     vi.mocked(mockTestRunner).mockResolvedValue({ passed: true, output: 'ok', exitCode: 0 });
 
@@ -709,7 +1005,7 @@ describe('runReviewLoop', () => {
   it('each review iteration uses a fresh agent call', async () => {
     mockExecute.mockResolvedValueOnce(reviewExecResult('needs_fixes', [mechanicalFixFinding]));
     mockExecute.mockResolvedValueOnce(implWaveExecResult());
-    mockExecute.mockResolvedValueOnce(qualityExecResult());
+    // No quality — mechanical only, tests pass
     mockExecute.mockResolvedValueOnce(reviewExecResult('pass'));
 
     vi.mocked(mockTestRunner).mockResolvedValue({ passed: true, output: 'ok', exitCode: 0 });
@@ -733,7 +1029,7 @@ describe('runReviewLoop', () => {
   it('tracks cost across all loop iterations', async () => {
     mockExecute.mockResolvedValueOnce(reviewExecResult('needs_fixes', [mechanicalFixFinding], { cost: 0.1 }));
     mockExecute.mockResolvedValueOnce(implWaveExecResult({ cost: 0.2 }));
-    mockExecute.mockResolvedValueOnce(qualityExecResult({ cost: 0.03 }));
+    // No quality — mechanical only, tests pass
     mockExecute.mockResolvedValueOnce(reviewExecResult('pass', [], { cost: 0.08 }));
 
     vi.mocked(mockTestRunner).mockResolvedValue({ passed: true, output: 'ok', exitCode: 0 });
@@ -748,7 +1044,7 @@ describe('runReviewLoop', () => {
       testCommand: 'npm test',
     });
 
-    expect(result.totalCost).toBeCloseTo(0.41);
+    expect(result.totalCost).toBeCloseTo(0.38);
   });
 
   it('skips impl when ratchet check passes (tests already pass with new test code)', async () => {
@@ -816,13 +1112,11 @@ describe('runReviewLoop', () => {
   });
 
   it('defaults to maxIterations of 2', async () => {
-    // 3 iterations of needs_fixes — should only do 2
+    // 3 iterations of needs_fixes — should only do 2 (mechanical only, tests pass → no quality)
     mockExecute.mockResolvedValueOnce(reviewExecResult('needs_fixes', [mechanicalFixFinding]));
     mockExecute.mockResolvedValueOnce(implWaveExecResult());
-    mockExecute.mockResolvedValueOnce(qualityExecResult());
     mockExecute.mockResolvedValueOnce(reviewExecResult('needs_fixes', [mechanicalFixFinding]));
     mockExecute.mockResolvedValueOnce(implWaveExecResult());
-    mockExecute.mockResolvedValueOnce(qualityExecResult());
 
     vi.mocked(mockTestRunner).mockResolvedValue({ passed: true, output: 'ok', exitCode: 0 });
 
@@ -842,12 +1136,15 @@ describe('runReviewLoop', () => {
   });
 
   it('uses correct model tiers from config', async () => {
-    mockExecute.mockResolvedValueOnce(reviewExecResult('needs_fixes', [mechanicalFixFinding]));
+    // Use NEEDS_NEW_TESTS so quality runs (needed to verify quality model tier)
+    mockExecute.mockResolvedValueOnce(reviewExecResult('needs_fixes', [needsNewTestsFinding]));
     mockExecute.mockResolvedValueOnce(implWaveExecResult());
     mockExecute.mockResolvedValueOnce(qualityExecResult());
     mockExecute.mockResolvedValueOnce(reviewExecResult('pass'));
 
-    vi.mocked(mockTestRunner).mockResolvedValue({ passed: true, output: 'ok', exitCode: 0 });
+    vi.mocked(mockTestRunner)
+      .mockResolvedValueOnce({ passed: false, output: 'FAIL', exitCode: 1 })
+      .mockResolvedValueOnce({ passed: true, output: 'ok', exitCode: 0 });
 
     await runReviewLoop({
       issue: makeIssue(),
