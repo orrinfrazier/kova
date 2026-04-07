@@ -1,6 +1,7 @@
 import { getModel, getProviders, type Model, registerBuiltInApiProviders } from '@mariozechner/pi-ai';
 import type { ModelTier, OllamaProvider } from '../types/index.js';
 import { KovaError } from './errors.js';
+import { createOllamaModel, isOllamaProvider } from './ollama.js';
 
 const DEFAULT_MODELS: Readonly<Record<ModelTier, string>> = {
   small: 'claude-haiku-4-5-20251001',
@@ -87,7 +88,8 @@ export function parseModelSpec(modelString: string): ModelSpec {
   const colonIndex = modelString.indexOf(':');
   if (colonIndex > 0) {
     const candidate = modelString.slice(0, colonIndex);
-    if (knownProviders().has(candidate)) {
+    // Ollama is not a pi-ai built-in provider — handle it explicitly
+    if (isOllamaProvider(candidate) || knownProviders().has(candidate)) {
       return { provider: candidate, modelId: modelString.slice(colonIndex + 1) };
     }
   }
@@ -102,6 +104,12 @@ export function resolveModelFromString(modelString: string): Model<string> {
 
   ensureProviders();
   const { provider, modelId } = parseModelSpec(modelString);
+
+  // Ollama models are not in pi-ai's registry — create them directly
+  if (isOllamaProvider(provider)) {
+    return createOllamaModel(modelId);
+  }
+
   const model = getModel(provider as Parameters<typeof getModel>[0], modelId as Parameters<typeof getModel>[1]);
   if (!model) {
     throw new KovaError(`Unknown model: ${provider}:${modelId}`, 'config', false);
