@@ -220,6 +220,9 @@ function makeEpisodeConfig(overrides?: Partial<EpisodicMemoryConfig>): EpisodicM
     enabled: true,
     endpoint: ENDPOINT,
     max_episodes: 3,
+    cross_repo: true,
+    same_repo_weight: 1.5,
+    language_filter: true,
     ...overrides,
   };
 }
@@ -247,6 +250,54 @@ describe('queryEpisodeContext', () => {
     const body = JSON.parse(init.body as string) as { query: string; top_k: number };
     expect(body.query).toBe('search query');
     expect(body.top_k).toBe(2);
+  });
+
+  it('sends repo and language when cross_repo is enabled', async () => {
+    mockFetch.mockResolvedValueOnce(mockJsonResponse({ episodes: [] }));
+
+    await queryEpisodeContext(makeEpisodeConfig({ cross_repo: true, language_filter: true }), 'search query', {
+      repo: 'my-repo',
+      language: 'typescript',
+    });
+
+    const body = JSON.parse((mockFetch.mock.calls[0] as [string, RequestInit])[1].body as string) as Record<
+      string,
+      unknown
+    >;
+    expect(body.repo).toBe('my-repo');
+    expect(body.language).toBe('typescript');
+    expect(body.cross_repo).toBe(true);
+  });
+
+  it('sends repo without cross_repo flag when cross_repo is false', async () => {
+    mockFetch.mockResolvedValueOnce(mockJsonResponse({ episodes: [] }));
+
+    await queryEpisodeContext(makeEpisodeConfig({ cross_repo: false }), 'search query', {
+      repo: 'my-repo',
+      language: 'typescript',
+    });
+
+    const body = JSON.parse((mockFetch.mock.calls[0] as [string, RequestInit])[1].body as string) as Record<
+      string,
+      unknown
+    >;
+    expect(body.repo).toBe('my-repo');
+    expect(body.cross_repo).toBe(false);
+  });
+
+  it('omits language when language_filter is false', async () => {
+    mockFetch.mockResolvedValueOnce(mockJsonResponse({ episodes: [] }));
+
+    await queryEpisodeContext(makeEpisodeConfig({ cross_repo: true, language_filter: false }), 'search query', {
+      repo: 'my-repo',
+      language: 'typescript',
+    });
+
+    const body = JSON.parse((mockFetch.mock.calls[0] as [string, RequestInit])[1].body as string) as Record<
+      string,
+      unknown
+    >;
+    expect(body.language).toBeUndefined();
   });
 
   it('returns empty array when disabled', async () => {
@@ -340,6 +391,27 @@ describe('formatEpisodes', () => {
 
     expect(highIdx).toBeLessThan(midIdx);
     expect(midIdx).toBeLessThan(lowIdx);
+  });
+
+  it('shows repo attribution when episodes have repo field and currentRepo given', () => {
+    const episodesWithRepo: EpisodeContext[] = [
+      { ...sampleEpisodes[0]!, repo: 'my-repo', score: 0.9 },
+      { ...sampleEpisodes[1]!, repo: 'other-repo', score: 0.8 },
+    ];
+
+    const result = formatEpisodes(episodesWithRepo, 'my-repo');
+
+    expect(result).toContain('[same-repo]');
+    expect(result).toContain('[cross-repo: other-repo]');
+  });
+
+  it('omits repo attribution when currentRepo is not provided', () => {
+    const episodesWithRepo: EpisodeContext[] = [{ ...sampleEpisodes[0]!, repo: 'my-repo', score: 0.9 }];
+
+    const result = formatEpisodes(episodesWithRepo);
+
+    expect(result).not.toContain('[same-repo]');
+    expect(result).not.toContain('[cross-repo');
   });
 });
 
@@ -623,6 +695,47 @@ describe('insertEpisode', () => {
 
     expect(result).toBeUndefined();
   });
+
+  it('passes language to pool.query when provided', async () => {
+    const mockPool = makeMockPool();
+    const mockEmbed = makeMockEmbed();
+    const client = { pool: mockPool, embed: mockEmbed };
+
+    await insertEpisode(client, {
+      repo: 'my-repo',
+      issue_number: 1,
+      issue_title: 'Test',
+      approach: 'approach',
+      outcome: 'success' as const,
+      files_changed: [],
+      language: 'typescript',
+    });
+
+    const queryArgs = mockPool.query.mock.calls[0] as unknown[];
+    const sql = queryArgs[0] as string;
+    const params = queryArgs[1] as unknown[];
+    expect(sql).toContain('language');
+    expect(params).toContain('typescript');
+  });
+
+  it('passes null language when not provided', async () => {
+    const mockPool = makeMockPool();
+    const mockEmbed = makeMockEmbed();
+    const client = { pool: mockPool, embed: mockEmbed };
+
+    await insertEpisode(client, {
+      repo: 'my-repo',
+      issue_number: 1,
+      issue_title: 'Test',
+      approach: 'approach',
+      outcome: 'success' as const,
+      files_changed: [],
+    });
+
+    const queryArgs = mockPool.query.mock.calls[0] as unknown[];
+    const params = queryArgs[1] as unknown[];
+    expect(params).toContain(null);
+  });
 });
 
 describe('queryEpisodes', () => {
@@ -704,6 +817,59 @@ describe('queryEpisodes', () => {
     const queryArgs = mockPool.query.mock.calls[0] as unknown[];
     const params = queryArgs[1] as unknown[];
     expect(params).toContain('special-repo');
+  });
+
+  it('uses cross-repo SQL when crossRepo option is true', async () => {
+    const mockPool = makeMockPool([]);
+    const mockEmbed = makeMockEmbed();
+    const client = { pool: mockPool, embed: mockEmbed };
+
+    await queryEpisodes(client, 'my-repo', 'query', 5, { crossRepo: true });
+
+    const queryArgs = mockPool.query.mock.calls[0] as unknown[];
+    const sql = queryArgs[0] as string;
+    // Cross-repo query should NOT have WHERE repo = $1 filter
+    expect(sql).not.toMatch(/WHERE\s+repo\s*=\s*\$1\s*$/m);
+    // Should use same-repo weighting via CASE expression
+    expect(sql).toContain('CASE');
+  });
+
+  it('filters by language when language option is provided', async () => {
+    const mockPool = makeMockPool([]);
+    const mockEmbed = makeMockEmbed();
+    const client = { pool: mockPool, embed: mockEmbed };
+
+    await queryEpisodes(client, 'my-repo', 'query', 5, { crossRepo: true, language: 'typescript' });
+
+    const queryArgs = mockPool.query.mock.calls[0] as unknown[];
+    const sql = queryArgs[0] as string;
+    const params = queryArgs[1] as unknown[];
+    expect(sql).toContain('language');
+    expect(params).toContain('typescript');
+  });
+
+  it('does not filter by language when language is not provided', async () => {
+    const mockPool = makeMockPool([]);
+    const mockEmbed = makeMockEmbed();
+    const client = { pool: mockPool, embed: mockEmbed };
+
+    await queryEpisodes(client, 'my-repo', 'query', 5, { crossRepo: true });
+
+    const queryArgs = mockPool.query.mock.calls[0] as unknown[];
+    const sql = queryArgs[0] as string;
+    expect(sql).not.toContain('language');
+  });
+
+  it('uses single-repo SQL when crossRepo option is false or omitted', async () => {
+    const mockPool = makeMockPool([]);
+    const mockEmbed = makeMockEmbed();
+    const client = { pool: mockPool, embed: mockEmbed };
+
+    await queryEpisodes(client, 'my-repo', 'query', 5, { crossRepo: false });
+
+    const queryArgs = mockPool.query.mock.calls[0] as unknown[];
+    const sql = queryArgs[0] as string;
+    expect(sql).toMatch(/WHERE\s+repo\s*=\s*\$1/);
   });
 });
 
@@ -855,14 +1021,14 @@ describe('queryPatterns', () => {
 });
 
 describe('runMigration', () => {
-  it('calls pool.query to execute the migration SQL', async () => {
+  it('calls pool.query for each migration file', async () => {
     const mockPool = makeMockPool();
     const mockEmbed = makeMockEmbed();
     const client = { pool: mockPool, embed: mockEmbed };
 
     await runMigration(client);
 
-    expect(mockPool.query).toHaveBeenCalledOnce();
+    expect(mockPool.query).toHaveBeenCalledTimes(2);
   });
 
   it('passes a non-empty SQL string to pool.query', async () => {

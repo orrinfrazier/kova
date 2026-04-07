@@ -61,6 +61,9 @@ export const EpisodicMemoryConfigSchema = z
     enabled: z.boolean(),
     endpoint: z.string().optional(),
     max_episodes: z.number().int().positive().default(3),
+    cross_repo: z.boolean().default(true),
+    same_repo_weight: z.number().default(1.5),
+    language_filter: z.boolean().default(true),
   })
   .refine((cfg) => !cfg.enabled || cfg.endpoint != null, {
     message: 'endpoint is required when episodes is enabled',

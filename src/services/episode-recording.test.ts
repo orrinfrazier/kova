@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { EpisodicMemoryConfig, FixState, WaveResult } from '../types/config.js';
+import {
+  type EpisodicMemoryConfig,
+  EpisodicMemoryConfigSchema,
+  type FixState,
+  type WaveResult,
+} from '../types/config.js';
 import { buildEpisodeRecord, type EpisodeRecord, recordEpisode } from './vectordb.js';
 
 /* ------------------------------------------------------------------ */
@@ -23,7 +28,15 @@ afterEach(() => {
 const ENDPOINT = 'http://localhost:8100/query';
 
 function makeEpisodeConfig(overrides?: Partial<EpisodicMemoryConfig>): EpisodicMemoryConfig {
-  return { enabled: true, endpoint: ENDPOINT, max_episodes: 3, ...overrides };
+  return {
+    enabled: true,
+    endpoint: ENDPOINT,
+    max_episodes: 3,
+    cross_repo: true,
+    same_repo_weight: 1.5,
+    language_filter: true,
+    ...overrides,
+  };
 }
 
 function mockJsonResponse(body: unknown, status = 200): Response {
@@ -275,5 +288,62 @@ describe('recordEpisode', () => {
   it('returns false on non-200 response', async () => {
     mockFetch.mockResolvedValueOnce(mockJsonResponse({ error: 'fail' }, 500));
     expect(await recordEpisode(makeEpisodeConfig(), sampleRecord)).toBe(false);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/*  EpisodicMemoryConfigSchema — cross-repo fields                     */
+/* ------------------------------------------------------------------ */
+
+describe('EpisodicMemoryConfigSchema cross-repo fields', () => {
+  it('defaults cross_repo to true', () => {
+    const result = EpisodicMemoryConfigSchema.parse({
+      enabled: true,
+      endpoint: 'http://localhost:8100/query',
+    });
+    expect(result.cross_repo).toBe(true);
+  });
+
+  it('defaults same_repo_weight to 1.5', () => {
+    const result = EpisodicMemoryConfigSchema.parse({
+      enabled: true,
+      endpoint: 'http://localhost:8100/query',
+    });
+    expect(result.same_repo_weight).toBe(1.5);
+  });
+
+  it('defaults language_filter to true', () => {
+    const result = EpisodicMemoryConfigSchema.parse({
+      enabled: true,
+      endpoint: 'http://localhost:8100/query',
+    });
+    expect(result.language_filter).toBe(true);
+  });
+
+  it('accepts explicit cross_repo false', () => {
+    const result = EpisodicMemoryConfigSchema.parse({
+      enabled: true,
+      endpoint: 'http://localhost:8100/query',
+      cross_repo: false,
+    });
+    expect(result.cross_repo).toBe(false);
+  });
+
+  it('accepts custom same_repo_weight', () => {
+    const result = EpisodicMemoryConfigSchema.parse({
+      enabled: true,
+      endpoint: 'http://localhost:8100/query',
+      same_repo_weight: 2.0,
+    });
+    expect(result.same_repo_weight).toBe(2.0);
+  });
+
+  it('accepts explicit language_filter false', () => {
+    const result = EpisodicMemoryConfigSchema.parse({
+      enabled: true,
+      endpoint: 'http://localhost:8100/query',
+      language_filter: false,
+    });
+    expect(result.language_filter).toBe(false);
   });
 });

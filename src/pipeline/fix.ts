@@ -15,6 +15,7 @@ import {
 } from '../ai/index.js';
 import { clearCheckpoint, loadCheckpoint, saveCheckpoint } from '../services/checkpoint.js';
 import { commentOnIssue, createPR, listOpenPRs } from '../services/github.js';
+import { detectTooling } from '../services/language-detect.js';
 import { formatPRContext, type OpenPR } from '../services/pr-context.js';
 import { shutdownRequested } from '../services/shutdown.js';
 import {
@@ -212,9 +213,13 @@ export async function fix(options: FixOptions): Promise<FixResult> {
     let episodicContext: string | undefined;
     if (config.episodes?.enabled) {
       const query = `${issue.title}\n\n${issue.body}`;
-      const episodes = await queryEpisodeContext(config.episodes, query);
+      const tooling = await detectTooling(workDir);
+      const episodes = await queryEpisodeContext(config.episodes, query, {
+        repo: repoName,
+        language: tooling.language !== 'unknown' ? tooling.language : undefined,
+      });
       if (episodes.length > 0) {
-        episodicContext = formatEpisodes(episodes);
+        episodicContext = formatEpisodes(episodes, repoName);
       }
     }
 
@@ -515,6 +520,10 @@ export async function fix(options: FixOptions): Promise<FixResult> {
     // Episodic memory: record fix outcome (success or failure)
     if (config.episodes?.enabled) {
       const episode = buildEpisodeRecord(state);
+      const recordTooling = await detectTooling(workDir).catch(() => ({ language: 'unknown' as const }));
+      if (recordTooling.language !== 'unknown') {
+        episode.language = recordTooling.language;
+      }
       await recordEpisode(config.episodes, episode).catch((err) => {
         log.warn(`Failed to record episode: ${err instanceof Error ? err.message : String(err)}`);
       });
