@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { HistoryEntry } from './history.js';
-import { correlateByPromptVersion } from './prompt-correlation.js';
+import { AB_TEST_MIN_RUNS, correlateByABTestVariant, correlateByPromptVersion } from './prompt-correlation.js';
 
 function makeEntry(overrides?: Partial<HistoryEntry>): HistoryEntry {
   return {
@@ -83,5 +83,93 @@ describe('correlateByPromptVersion', () => {
     expect(result.has('assess:a1')).toBe(true);
     expect(result.has('spec:s1')).toBe(true);
     expect(result.has('impl:i1')).toBe(true);
+  });
+});
+
+describe('correlateByABTestVariant', () => {
+  it('returns empty array for entries without abTestVariants', () => {
+    const entries: HistoryEntry[] = [makeEntry(), makeEntry()];
+    const result = correlateByABTestVariant(entries);
+    expect(result).toHaveLength(0);
+  });
+
+  it('groups entries by wave and variant', () => {
+    const entries: HistoryEntry[] = [
+      makeEntry({ abTestVariants: { assess: 'v1' }, outcome: 'success' }),
+      makeEntry({ abTestVariants: { assess: 'v1' }, outcome: 'failure' }),
+      makeEntry({ abTestVariants: { assess: 'v2' }, outcome: 'success' }),
+    ];
+
+    const result = correlateByABTestVariant(entries);
+    expect(result).toHaveLength(2);
+
+    const v1 = result.find((s) => s.variant === 'v1');
+    expect(v1).toBeDefined();
+    expect(v1?.runs).toBe(2);
+    expect(v1?.successes).toBe(1);
+    expect(v1?.successRate).toBeCloseTo(50);
+
+    const v2 = result.find((s) => s.variant === 'v2');
+    expect(v2).toBeDefined();
+    expect(v2?.runs).toBe(1);
+    expect(v2?.successRate).toBeCloseTo(100);
+  });
+
+  it('computes average cost and duration', () => {
+    const entries: HistoryEntry[] = [
+      makeEntry({ abTestVariants: { impl: 'v1' }, cost: 1.0, duration: 60000, outcome: 'success' }),
+      makeEntry({ abTestVariants: { impl: 'v1' }, cost: 3.0, duration: 120000, outcome: 'success' }),
+    ];
+
+    const result = correlateByABTestVariant(entries);
+    const v1 = result.find((s) => s.variant === 'v1');
+    expect(v1?.avgCost).toBeCloseTo(2.0);
+    expect(v1?.avgDuration).toBeCloseTo(90000);
+  });
+
+  it('marks variants as sufficient only when >= AB_TEST_MIN_RUNS', () => {
+    const entries: HistoryEntry[] = [];
+    // Create AB_TEST_MIN_RUNS entries for v1 (sufficient)
+    for (let i = 0; i < AB_TEST_MIN_RUNS; i++) {
+      entries.push(makeEntry({ abTestVariants: { assess: 'v1' }, outcome: 'success' }));
+    }
+    // Create fewer for v2 (insufficient)
+    entries.push(makeEntry({ abTestVariants: { assess: 'v2' }, outcome: 'success' }));
+
+    const result = correlateByABTestVariant(entries);
+    const v1 = result.find((s) => s.variant === 'v1');
+    const v2 = result.find((s) => s.variant === 'v2');
+    expect(v1?.sufficient).toBe(true);
+    expect(v2?.sufficient).toBe(false);
+  });
+
+  it('sorts results by wave then variant', () => {
+    const entries: HistoryEntry[] = [
+      makeEntry({ abTestVariants: { spec: 'beta' }, outcome: 'success' }),
+      makeEntry({ abTestVariants: { assess: 'v2' }, outcome: 'success' }),
+      makeEntry({ abTestVariants: { assess: 'v1' }, outcome: 'success' }),
+    ];
+
+    const result = correlateByABTestVariant(entries);
+    expect(result[0]?.wave).toBe('assess');
+    expect(result[0]?.variant).toBe('v1');
+    expect(result[1]?.wave).toBe('assess');
+    expect(result[1]?.variant).toBe('v2');
+    expect(result[2]?.wave).toBe('spec');
+    expect(result[2]?.variant).toBe('beta');
+  });
+
+  it('handles entries with multiple wave variants', () => {
+    const entries: HistoryEntry[] = [
+      makeEntry({
+        abTestVariants: { assess: 'v1', spec: 'v2' },
+        outcome: 'success',
+      }),
+    ];
+
+    const result = correlateByABTestVariant(entries);
+    expect(result).toHaveLength(2);
+    expect(result.find((s) => s.wave === 'assess' && s.variant === 'v1')).toBeDefined();
+    expect(result.find((s) => s.wave === 'spec' && s.variant === 'v2')).toBeDefined();
   });
 });
