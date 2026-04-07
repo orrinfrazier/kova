@@ -28,6 +28,7 @@ import * as metrics from '../services/metrics.js';
 import { ensureScreenshotsDir, isPlaywrightEnabled, resolvePlaywrightEnv } from '../services/playwright.js';
 import { formatPRContext, type OpenPR } from '../services/pr-context.js';
 import { ProgressTracker } from '../services/progress.js';
+import { loadProjectContext, type ProjectContext } from '../services/project-context.js';
 import { detectPromptChange, hashPrompt, recordPromptVersion } from '../services/prompt-versions.js';
 import {
   formatRepoContext,
@@ -156,6 +157,7 @@ async function spawnWave<T>(
   outputFormat?: OutputFormat,
   mcpHandles?: Map<string, MCPServerHandle>,
   playwright?: { enabled: boolean },
+  projectContext?: ProjectContext,
 ): Promise<{ handoff: WaveHandoff<T>; promptHash: string }> {
   const model = resolveWaveModel(config.model[wave]);
   const mcpTools =
@@ -163,7 +165,7 @@ async function spawnWave<T>(
       ? getMCPToolsForWave(wave, mcpHandles, config.mcp?.waves as Partial<Record<FixAIWaveName, string[]>> | undefined)
       : undefined;
   const tools = getWaveTools(wave, workDir, { customTools: config.tools, mcpTools, playwright });
-  const systemPrompt = await loadPrompt(wave, config.tools);
+  const systemPrompt = await loadPrompt(wave, config.tools, projectContext);
   const promptHash = hashPrompt(systemPrompt);
 
   // Prompt versioning: detect changes and record version
@@ -364,6 +366,9 @@ export async function fix(options: FixOptions): Promise<FixResult> {
   const promptHashes: Record<string, string> = {};
 
   try {
+    // Load project context for prompt injection (CLAUDE.md, style config, CI config)
+    const projectContext = await loadProjectContext(workDir);
+
     // Detect tooling and set up Playwright if applicable
     const tooling = await detectTooling(workDir);
     const playwrightEnabled = isPlaywrightEnabled(config, tooling);
@@ -418,6 +423,8 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         ),
         toOutputFormat(AssessResultSchema),
         mcpHandles,
+        undefined,
+        projectContext,
       );
       await saveHandoff(workDir, handoff);
       promptHashes.assess = promptHash;
@@ -480,6 +487,8 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         }),
         toOutputFormat(SpecResultSchema),
         mcpHandles,
+        undefined,
+        projectContext,
       );
       await saveHandoff(workDir, handoff);
       promptHashes.spec = promptHash;
@@ -520,6 +529,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         waveResults: state.waveResults,
         prContext,
         codebaseContext,
+        projectContext,
         ...(testRunner != null && { testRunner }),
       });
 
@@ -561,6 +571,8 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           }),
           toOutputFormat(SpecResultSchema),
           mcpHandles,
+          undefined,
+          projectContext,
         );
         await saveHandoff(workDir, specHandoff);
         promptHashes.spec = specPromptHash;
@@ -573,6 +585,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           waveResults: state.waveResults,
           prContext,
           codebaseContext,
+          projectContext,
           ...(testRunner != null && { testRunner }),
         });
         state.waveResults.test = retryTI.testWaveResult;
@@ -613,6 +626,8 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         }),
         undefined,
         mcpHandles,
+        undefined,
+        projectContext,
       );
       await saveHandoff(workDir, handoff);
       promptHashes.quality = promptHash;
@@ -649,6 +664,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         repoConfig: config,
         waveResults: state.waveResults,
         prContext,
+        projectContext,
         ...(reviewFeedbackContext != null && { reviewFeedbackContext }),
         ...(testRunner != null && { testRunner }),
         playwright: playwrightOption,
