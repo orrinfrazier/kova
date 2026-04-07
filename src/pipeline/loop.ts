@@ -1,3 +1,4 @@
+import { $ } from 'zx';
 import { fetchIssue, fetchIssues } from '../services/github.js';
 import * as metrics from '../services/metrics.js';
 import { extractPRFromResult, fetchOpenPRsDetailed, type OpenPR } from '../services/pr-context.js';
@@ -7,6 +8,8 @@ import type { Issue, RepoConfig, WaveResult } from '../types/index.js';
 import { log } from '../utils/logger.js';
 import { type FixResult, fix } from './fix.js';
 import { buildRunReport, printRunReport, writeRunReport } from './run-report.js';
+
+$.verbose = false;
 
 export interface LoopOptions {
   repoPath: string;
@@ -98,6 +101,15 @@ export async function fixLoop(options: LoopOptions): Promise<LoopResult> {
     log.info(`\n${'='.repeat(60)}`);
     log.info(`Fixing #${issue.number}: ${issue.title}`);
     log.info('='.repeat(60));
+
+    // Pull latest before each fix to stay current with default branch
+    try {
+      await $`git -C ${repoPath} fetch origin`;
+      log.debug('Fetched latest from origin before fix');
+    } catch (err) {
+      log.warn(`Failed to fetch origin: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
     const result = await fix({ issue, repoPath, repoName, config, pendingPRs });
     results.push({ issue, result });
     const waveCosts = aggregateWaveCosts(result.state.waveResults);
@@ -262,6 +274,14 @@ export async function fixByNumbers(options: FixByNumbersOptions): Promise<LoopRe
 
     log.info(`Fixing #${issue.number}: ${issue.title}`);
     log.info('='.repeat(60));
+
+    // Pull latest before each fix to stay current with default branch
+    try {
+      await $`git -C ${repoPath} fetch origin`;
+      log.debug('Fetched latest from origin before fix');
+    } catch (err) {
+      log.warn(`Failed to fetch origin: ${err instanceof Error ? err.message : String(err)}`);
+    }
 
     const result = await fix({ issue, repoPath, repoName, config, pendingPRs: [...pendingPRs] });
     results.push({ issue, result });

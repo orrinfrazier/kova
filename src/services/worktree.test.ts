@@ -8,6 +8,7 @@ import {
   createSubWorktree,
   createWorktree,
   detectDefaultBranch,
+  rebaseOnDefault,
   removeSubWorktree,
   subWorktreePath,
   worktreeExists,
@@ -424,5 +425,139 @@ describe('commitAndPush', () => {
 
     expect(result.committed).toBe(true);
     expect(result.filesStaged).toContain('src/services/deep.ts');
+  });
+});
+
+/**
+ * Creates a bare remote + cloned local + feature branch worktree
+ * with independent commit history for rebase testing.
+ */
+async function setupRebaseRepos(): Promise<{
+  remote: string;
+  local: string;
+  worktree: string;
+  branch: string;
+  base: string;
+}> {
+  const base = await mkdtemp(join(tmpdir(), 'kova-rebase-'));
+  const remote = join(base, 'remote.git');
+  const local = join(base, 'local');
+  const wt = join(base, 'worktree');
+  const branch = 'kova/fix-61';
+
+  // Set up bare remote and clone
+  await $`git init --bare ${remote}`;
+  await $`git clone ${remote} ${local}`;
+  await $`git -C ${local} config user.email "test@kova.dev"`;
+  await $`git -C ${local} config user.name "Kova Test"`;
+  await writeFile(join(local, 'README.md'), '# Test repo\n');
+  await $`git -C ${local} add README.md`;
+  await $`git -C ${local} commit -m "init"`;
+  await $`git -C ${local} push origin main`;
+
+  // Create fix branch and worktree from main
+  await $`git -C ${local} branch ${branch}`;
+  await $`git -C ${local} worktree add ${wt} ${branch}`;
+  await $`git -C ${wt} config user.email "test@kova.dev"`;
+  await $`git -C ${wt} config user.name "Kova Test"`;
+
+  return { remote, local, worktree: wt, branch, base };
+}
+
+describe('rebaseOnDefault', () => {
+  let repos: Awaited<ReturnType<typeof setupRebaseRepos>>;
+
+  beforeEach(async () => {
+    repos = await setupRebaseRepos();
+  });
+
+  afterEach(async () => {
+    try {
+      await $`git -C ${repos.local} worktree remove ${repos.worktree} --force`;
+    } catch {
+      // best effort
+    }
+    await rm(repos.base, { recursive: true, force: true }).catch(() => {});
+  });
+
+  it('rebases cleanly when main has new commits', async () => {
+    // Add a commit on the fix branch
+    await writeFile(join(repos.worktree, 'fix.ts'), 'export const fix = true;\n');
+    await $`git -C ${repos.worktree} add fix.ts`;
+    await $`git -C ${repos.worktree} commit -m "fix commit"`;
+
+    // Advance main with a non-conflicting commit and push to remote
+    await $`git -C ${repos.local} checkout main`;
+    await writeFile(join(repos.local, 'other.ts'), 'export const other = true;\n');
+    await $`git -C ${repos.local} add other.ts`;
+    await $`git -C ${repos.local} commit -m "advance main"`;
+    await $`git -C ${repos.local} push origin main`;
+    await $`git -C ${repos.local} checkout -`; // back to previous branch
+
+    const result = await rebaseOnDefault(repos.worktree);
+
+    expect(result.success).toBe(true);
+    expect(result.conflicted).toBe(false);
+
+    // Verify the fix branch now includes the main advance commit
+    const log = (await $`git -C ${repos.worktree} log --oneline`).stdout;
+    expect(log).toContain('advance main');
+    expect(log).toContain('fix commit');
+  });
+
+  it('succeeds as no-op when branch is already up to date', async () => {
+    // No new commits on main — branch is already based on latest main
+    const result = await rebaseOnDefault(repos.worktree);
+
+    expect(result.success).toBe(true);
+    expect(result.conflicted).toBe(false);
+  });
+
+  it('returns conflict info when rebase has conflicts', async () => {
+    // Create conflicting changes: modify README.md on both branches
+    await writeFile(join(repos.worktree, 'README.md'), '# Fix branch version\n');
+    await $`git -C ${repos.worktree} add README.md`;
+    await $`git -C ${repos.worktree} commit -m "fix: modify readme"`;
+
+    // Advance main with a conflicting change to the same file
+    await $`git -C ${repos.local} checkout main`;
+    await writeFile(join(repos.local, 'README.md'), '# Main branch version\n');
+    await $`git -C ${repos.local} add README.md`;
+    await $`git -C ${repos.local} commit -m "main: modify readme"`;
+    await $`git -C ${repos.local} push origin main`;
+    await $`git -C ${repos.local} checkout -`;
+
+    const result = await rebaseOnDefault(repos.worktree);
+
+    expect(result.success).toBe(false);
+    expect(result.conflicted).toBe(true);
+    expect(result.conflictFiles).toBeDefined();
+    expect(result.conflictFiles?.length).toBeGreaterThan(0);
+    expect(result.conflictFiles).toContain('README.md');
+  });
+
+  it('leaves working tree clean after conflict (rebase is aborted)', async () => {
+    // Create conflicting changes
+    await writeFile(join(repos.worktree, 'README.md'), '# Fix branch version\n');
+    await $`git -C ${repos.worktree} add README.md`;
+    await $`git -C ${repos.worktree} commit -m "fix: modify readme"`;
+
+    await $`git -C ${repos.local} checkout main`;
+    await writeFile(join(repos.local, 'README.md'), '# Main branch version\n');
+    await $`git -C ${repos.local} add README.md`;
+    await $`git -C ${repos.local} commit -m "main: modify readme"`;
+    await $`git -C ${repos.local} push origin main`;
+    await $`git -C ${repos.local} checkout -`;
+
+    await rebaseOnDefault(repos.worktree);
+
+    // Verify no rebase is in progress (git status should be clean)
+    const status = (await $`git -C ${repos.worktree} status --porcelain`).stdout.trim();
+    expect(status).toBe('');
+
+    // Verify we're not in a rebase state
+    const rebaseDir = join(repos.worktree, '.git', 'rebase-merge');
+    const { stat } = await import('node:fs/promises');
+    await expect(stat(rebaseDir)).rejects.toThrow();
   });
 });

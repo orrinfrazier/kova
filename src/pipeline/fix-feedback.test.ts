@@ -142,8 +142,13 @@ vi.mock('../services/worktree.js', async (importOriginal) => {
       filesStaged: ['src/fix.ts'],
       commitMessage: 'fix: Test issue (#42)',
     }),
+    rebaseOnDefault: vi.fn().mockResolvedValue({ success: true, conflicted: false }),
   };
 });
+
+vi.mock('../services/conflict-resolver.js', () => ({
+  resolveConflicts: vi.fn().mockResolvedValue({ resolved: true, filesResolved: [] }),
+}));
 
 // Mock the feedback collector — this is the module under test
 const mockCollectPRFeedback = vi.fn().mockResolvedValue(undefined);

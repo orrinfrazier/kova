@@ -2,11 +2,15 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import type { WaveName } from '../types/index.js';
 import {
   MetricsRegistry,
+  recordConflictDetected,
+  recordConflictFailed,
+  recordConflictResolved,
   recordFixCost,
   recordFixDuration,
   recordIssueFailed,
   recordIssueFixed,
   recordPRCreated,
+  recordRebaseAttempt,
   recordWaveCompleted,
   recordWaveDuration,
   reset,
@@ -386,6 +390,130 @@ describe('MetricsRegistry (enabled)', () => {
   });
 
   // -------------------------------------------------------------------------
+  // Piece 3: recordRebaseAttempt()
+  // -------------------------------------------------------------------------
+
+  describe('recordRebaseAttempt()', () => {
+    it('increments kova_rebase_attempts_total by 1', () => {
+      registry.recordRebaseAttempt();
+      const out = registry.serialize();
+      expect(extractMetric(out, 'kova_rebase_attempts_total')).toBe(1);
+    });
+
+    it('increments by 1 on each call', () => {
+      registry.recordRebaseAttempt();
+      registry.recordRebaseAttempt();
+      registry.recordRebaseAttempt();
+      const out = registry.serialize();
+      expect(extractMetric(out, 'kova_rebase_attempts_total')).toBe(3);
+    });
+
+    it('starts at 0 before any calls', () => {
+      const out = registry.serialize();
+      expect(extractMetric(out, 'kova_rebase_attempts_total')).toBe(0);
+    });
+
+    it('serializes with HELP and TYPE counter lines', () => {
+      const out = registry.serialize();
+      expect(hasHelp(out, 'kova_rebase_attempts_total')).toBe(true);
+      expect(hasType(out, 'kova_rebase_attempts_total', 'counter')).toBe(true);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Piece 3: recordConflictDetected()
+  // -------------------------------------------------------------------------
+
+  describe('recordConflictDetected()', () => {
+    it('increments kova_conflicts_detected_total by 1', () => {
+      registry.recordConflictDetected();
+      const out = registry.serialize();
+      expect(extractMetric(out, 'kova_conflicts_detected_total')).toBe(1);
+    });
+
+    it('increments by 1 on each call', () => {
+      registry.recordConflictDetected();
+      registry.recordConflictDetected();
+      registry.recordConflictDetected();
+      const out = registry.serialize();
+      expect(extractMetric(out, 'kova_conflicts_detected_total')).toBe(3);
+    });
+
+    it('starts at 0 before any calls', () => {
+      const out = registry.serialize();
+      expect(extractMetric(out, 'kova_conflicts_detected_total')).toBe(0);
+    });
+
+    it('serializes with HELP and TYPE counter lines', () => {
+      const out = registry.serialize();
+      expect(hasHelp(out, 'kova_conflicts_detected_total')).toBe(true);
+      expect(hasType(out, 'kova_conflicts_detected_total', 'counter')).toBe(true);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Piece 3: recordConflictResolved()
+  // -------------------------------------------------------------------------
+
+  describe('recordConflictResolved()', () => {
+    it('increments kova_conflicts_resolved_total by 1', () => {
+      registry.recordConflictResolved();
+      const out = registry.serialize();
+      expect(extractMetric(out, 'kova_conflicts_resolved_total')).toBe(1);
+    });
+
+    it('increments by 1 on each call', () => {
+      registry.recordConflictResolved();
+      registry.recordConflictResolved();
+      registry.recordConflictResolved();
+      const out = registry.serialize();
+      expect(extractMetric(out, 'kova_conflicts_resolved_total')).toBe(3);
+    });
+
+    it('starts at 0 before any calls', () => {
+      const out = registry.serialize();
+      expect(extractMetric(out, 'kova_conflicts_resolved_total')).toBe(0);
+    });
+
+    it('serializes with HELP and TYPE counter lines', () => {
+      const out = registry.serialize();
+      expect(hasHelp(out, 'kova_conflicts_resolved_total')).toBe(true);
+      expect(hasType(out, 'kova_conflicts_resolved_total', 'counter')).toBe(true);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Piece 3: recordConflictFailed()
+  // -------------------------------------------------------------------------
+
+  describe('recordConflictFailed()', () => {
+    it('increments kova_conflicts_failed_total by 1', () => {
+      registry.recordConflictFailed();
+      const out = registry.serialize();
+      expect(extractMetric(out, 'kova_conflicts_failed_total')).toBe(1);
+    });
+
+    it('increments by 1 on each call', () => {
+      registry.recordConflictFailed();
+      registry.recordConflictFailed();
+      registry.recordConflictFailed();
+      const out = registry.serialize();
+      expect(extractMetric(out, 'kova_conflicts_failed_total')).toBe(3);
+    });
+
+    it('starts at 0 before any calls', () => {
+      const out = registry.serialize();
+      expect(extractMetric(out, 'kova_conflicts_failed_total')).toBe(0);
+    });
+
+    it('serializes with HELP and TYPE counter lines', () => {
+      const out = registry.serialize();
+      expect(hasHelp(out, 'kova_conflicts_failed_total')).toBe(true);
+      expect(hasType(out, 'kova_conflicts_failed_total', 'counter')).toBe(true);
+    });
+  });
+
+  // -------------------------------------------------------------------------
   // AC10: serialize() Prometheus text exposition format
   // -------------------------------------------------------------------------
 
@@ -607,6 +735,26 @@ describe('MetricsRegistry (disabled)', () => {
     expect(registry.serialize()).toBe('');
   });
 
+  it('recordRebaseAttempt() is a no-op', () => {
+    registry.recordRebaseAttempt();
+    expect(registry.serialize()).toBe('');
+  });
+
+  it('recordConflictDetected() is a no-op', () => {
+    registry.recordConflictDetected();
+    expect(registry.serialize()).toBe('');
+  });
+
+  it('recordConflictResolved() is a no-op', () => {
+    registry.recordConflictResolved();
+    expect(registry.serialize()).toBe('');
+  });
+
+  it('recordConflictFailed() is a no-op', () => {
+    registry.recordConflictFailed();
+    expect(registry.serialize()).toBe('');
+  });
+
   it('serialize() returns empty string', () => {
     expect(registry.serialize()).toBe('');
   });
@@ -677,6 +825,26 @@ describe('module-level singleton functions', () => {
   it('recordFixCost() delegates to the default registry', () => {
     recordFixCost(0.99);
     expect(serialize()).toContain('kova_cost_per_fix_usd');
+  });
+
+  it('recordRebaseAttempt() delegates to the default registry', () => {
+    recordRebaseAttempt();
+    expect(serialize()).toContain('kova_rebase_attempts_total');
+  });
+
+  it('recordConflictDetected() delegates to the default registry', () => {
+    recordConflictDetected();
+    expect(serialize()).toContain('kova_conflicts_detected_total');
+  });
+
+  it('recordConflictResolved() delegates to the default registry', () => {
+    recordConflictResolved();
+    expect(serialize()).toContain('kova_conflicts_resolved_total');
+  });
+
+  it('recordConflictFailed() delegates to the default registry', () => {
+    recordConflictFailed();
+    expect(serialize()).toContain('kova_conflicts_failed_total');
   });
 
   it('reset() clears the default registry state', () => {

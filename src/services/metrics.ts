@@ -59,6 +59,10 @@ export class MetricsRegistry {
   private issuesFixed: CounterData;
   private issuesFailed: CounterData;
   private prsCreated: CounterData;
+  private rebaseAttempts: CounterData;
+  private conflictsDetected: CounterData;
+  private conflictsResolved: CounterData;
+  private conflictsFailed: CounterData;
 
   // Counter with wave label
   private wavesCompleted: LabeledCounterData;
@@ -79,6 +83,10 @@ export class MetricsRegistry {
     this.issuesFixed = { value: 0 };
     this.issuesFailed = { value: 0 };
     this.prsCreated = { value: 0 };
+    this.rebaseAttempts = { value: 0 };
+    this.conflictsDetected = { value: 0 };
+    this.conflictsResolved = { value: 0 };
+    this.conflictsFailed = { value: 0 };
     this.wavesCompleted = { values: new Map() };
     this.currentCostUsd = { value: 0 };
     this.activeFixes = { value: 0 };
@@ -106,6 +114,26 @@ export class MetricsRegistry {
   recordPRCreated(): void {
     if (!this.enabled) return;
     this.prsCreated.value += 1;
+  }
+
+  recordRebaseAttempt(): void {
+    if (!this.enabled) return;
+    this.rebaseAttempts.value += 1;
+  }
+
+  recordConflictDetected(): void {
+    if (!this.enabled) return;
+    this.conflictsDetected.value += 1;
+  }
+
+  recordConflictResolved(): void {
+    if (!this.enabled) return;
+    this.conflictsResolved.value += 1;
+  }
+
+  recordConflictFailed(): void {
+    if (!this.enabled) return;
+    this.conflictsFailed.value += 1;
   }
 
   setCurrentCostUsd(value: number): void {
@@ -142,6 +170,10 @@ export class MetricsRegistry {
     this.issuesFixed = { value: 0 };
     this.issuesFailed = { value: 0 };
     this.prsCreated = { value: 0 };
+    this.rebaseAttempts = { value: 0 };
+    this.conflictsDetected = { value: 0 };
+    this.conflictsResolved = { value: 0 };
+    this.conflictsFailed = { value: 0 };
     this.wavesCompleted = { values: new Map() };
     this.currentCostUsd = { value: 0 };
     this.activeFixes = { value: 0 };
@@ -166,6 +198,30 @@ export class MetricsRegistry {
       'wave',
     );
     serializeCounter(lines, 'kova_prs_created_total', 'Total pull requests created', this.prsCreated.value);
+    serializeCounter(
+      lines,
+      'kova_rebase_attempts_total',
+      'Total rebase attempts before PR creation',
+      this.rebaseAttempts.value,
+    );
+    serializeCounter(
+      lines,
+      'kova_conflicts_detected_total',
+      'Total merge conflicts detected during rebase',
+      this.conflictsDetected.value,
+    );
+    serializeCounter(
+      lines,
+      'kova_conflicts_resolved_total',
+      'Total merge conflicts automatically resolved',
+      this.conflictsResolved.value,
+    );
+    serializeCounter(
+      lines,
+      'kova_conflicts_failed_total',
+      'Total merge conflicts that could not be resolved',
+      this.conflictsFailed.value,
+    );
 
     // Gauges
     serializeGauge(lines, 'kova_current_cost_usd', 'Current cumulative cost in USD', this.currentCostUsd.value);
@@ -376,4 +432,20 @@ export function recordFixDuration(ms: number): void {
 
 export function recordFixCost(usd: number): void {
   _defaultRegistry.recordFixCost(usd);
+}
+
+export function recordRebaseAttempt(): void {
+  _defaultRegistry.recordRebaseAttempt();
+}
+
+export function recordConflictDetected(): void {
+  _defaultRegistry.recordConflictDetected();
+}
+
+export function recordConflictResolved(): void {
+  _defaultRegistry.recordConflictResolved();
+}
+
+export function recordConflictFailed(): void {
+  _defaultRegistry.recordConflictFailed();
 }
