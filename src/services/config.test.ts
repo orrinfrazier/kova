@@ -433,6 +433,78 @@ repos:
 });
 
 /* ------------------------------------------------------------------ */
+/*  providers.ollama config                                            */
+/* ------------------------------------------------------------------ */
+
+describe('providers.ollama config', () => {
+  it('loads config with ollama provider and models', async () => {
+    const yaml = `
+repos:
+  local-repo:
+    path: /tmp/local
+    providers:
+      ollama:
+        host: http://localhost:11434
+        models:
+          - id: llama3
+          - id: codellama
+            name: Code Llama 13B
+            contextWindow: 16384
+            maxTokens: 4096
+`;
+    await writeFile(join(tempDir, 'repos.yaml'), yaml);
+
+    const config = await loadConfig(join(tempDir, 'repos.yaml'));
+    const repo = config.repos['local-repo'];
+    expect(repo).toBeDefined();
+    if (!repo) return;
+
+    expect(repo.providers?.ollama).toBeDefined();
+    expect(repo.providers?.ollama?.host).toBe('http://localhost:11434');
+    expect(repo.providers?.ollama?.models).toHaveLength(2);
+    expect(repo.providers?.ollama?.models[0]?.id).toBe('llama3');
+    expect(repo.providers?.ollama?.models[1]?.name).toBe('Code Llama 13B');
+    expect(repo.providers?.ollama?.models[1]?.contextWindow).toBe(16384);
+  });
+
+  it('applies defaults for ollama model fields', async () => {
+    const yaml = `
+repos:
+  defaults-repo:
+    path: /tmp/defaults
+    providers:
+      ollama:
+        models:
+          - id: llama3
+`;
+    await writeFile(join(tempDir, 'repos.yaml'), yaml);
+
+    const config = await loadConfig(join(tempDir, 'repos.yaml'));
+    const repo = config.repos['defaults-repo'];
+    expect(repo).toBeDefined();
+    if (!repo) return;
+
+    const ollama = repo.providers?.ollama;
+    expect(ollama?.host).toBe('http://localhost:11434');
+    expect(ollama?.models[0]?.contextWindow).toBe(128000);
+    expect(ollama?.models[0]?.maxTokens).toBe(32000);
+  });
+
+  it('providers section is optional', async () => {
+    const yaml = `
+repos:
+  no-providers:
+    path: /tmp/none
+`;
+    await writeFile(join(tempDir, 'repos.yaml'), yaml);
+
+    const config = await loadConfig(join(tempDir, 'repos.yaml'));
+    const repo = config.repos['no-providers'];
+    expect(repo?.providers).toBeUndefined();
+  });
+});
+
+/* ------------------------------------------------------------------ */
 /*  detectRepoName                                                     */
 /* ------------------------------------------------------------------ */
 

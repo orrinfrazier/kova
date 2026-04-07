@@ -9,6 +9,30 @@ export type ThinkingLevel = z.infer<typeof ThinkingLevelSchema>;
 export const IsolationModeSchema = z.enum(['worktree', 'docker', 'none']);
 export type IsolationMode = z.infer<typeof IsolationModeSchema>;
 
+export const OllamaModelSchema = z.object({
+  id: z.string(),
+  name: z.string().optional(),
+  contextWindow: z.number().default(128000),
+  maxTokens: z.number().default(32000),
+});
+
+export type OllamaModel = z.infer<typeof OllamaModelSchema>;
+
+export const OllamaProviderSchema = z.object({
+  host: z.string().default('http://localhost:11434'),
+  models: z.array(OllamaModelSchema).default([]),
+});
+
+export type OllamaProvider = z.infer<typeof OllamaProviderSchema>;
+
+export const ProvidersSchema = z
+  .object({
+    ollama: OllamaProviderSchema.optional(),
+  })
+  .optional();
+
+export type Providers = z.infer<typeof ProvidersSchema>;
+
 export const RepoConfigSchema = z.object({
   path: z.string(),
   rules: z
@@ -60,6 +84,7 @@ export const RepoConfigSchema = z.object({
       brainstorm: 'large' as const,
     })),
   isolation: IsolationModeSchema.default('worktree'),
+  providers: ProvidersSchema,
 });
 
 export type RepoConfig = z.infer<typeof RepoConfigSchema>;
