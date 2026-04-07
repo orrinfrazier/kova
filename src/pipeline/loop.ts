@@ -1,8 +1,9 @@
-import { fetchIssues, hasExistingWork } from '../services/github.js';
+import { fetchIssues } from '../services/github.js';
 import { prioritizeIssues } from '../services/prioritize.js';
 import type { Issue, RepoConfig, WaveResult } from '../types/index.js';
 import { log } from '../utils/logger.js';
 import { type FixResult, fix } from './fix.js';
+import { buildRunReport, printRunReport, writeRunReport } from './run-report.js';
 
 export interface LoopOptions {
   repoPath: string;
@@ -11,7 +12,6 @@ export interface LoopOptions {
   filter?: string | undefined;
   maxIssues?: number | undefined;
   budgetUsd?: number | undefined;
-  force?: boolean | undefined;
 }
 
 export interface LoopResult {
@@ -23,6 +23,7 @@ export interface LoopResult {
   totalTurns: number;
   totalDuration: number;
   budgetExceeded: boolean;
+  startedAt: string;
   results: Array<{ issue: Issue; result: FixResult }>;
 }
 
@@ -45,7 +46,8 @@ function aggregateWaveCosts(waveResults: Partial<Record<string, WaveResult>>): {
 }
 
 export async function fixLoop(options: LoopOptions): Promise<LoopResult> {
-  const { repoPath, repoName, config, filter, maxIssues, budgetUsd, force } = options;
+  const { repoPath, repoName, config, filter, maxIssues, budgetUsd } = options;
+  const startedAt = new Date().toISOString();
   const limit = maxIssues ?? config.auto?.max_per_run ?? config.rules.max_issues_per_run;
   const budget = budgetUsd ?? config.rules.budget_usd;
   log.info('Fetching open issues for ' + repoName + '...');
@@ -64,6 +66,7 @@ export async function fixLoop(options: LoopOptions): Promise<LoopResult> {
       totalTurns: 0,
       totalDuration: 0,
       budgetExceeded: false,
+      startedAt,
       results: [],
     };
   }
@@ -74,20 +77,12 @@ export async function fixLoop(options: LoopOptions): Promise<LoopResult> {
   const results: Array<{ issue: Issue; result: FixResult }> = [];
   let succeeded = 0;
   let failed = 0;
-  let skipped = 0;
+  const skipped = 0;
   let totalCost = 0;
   let totalTurns = 0;
   let totalDuration = 0;
   let budgetExceeded = false;
   for (const issue of toFix) {
-    if (!force) {
-      const existing = await hasExistingWork(repoPath, issue.number);
-      if (existing) {
-        skipped++;
-        log.info(`Skipping #${issue.number}: ${existing.reason}`);
-        continue;
-      }
-    }
     log.info('\n' + '='.repeat(60));
     log.info('Fixing #' + issue.number + ': ' + issue.title);
     log.info('='.repeat(60));
@@ -135,7 +130,7 @@ export async function fixLoop(options: LoopOptions): Promise<LoopResult> {
       Math.floor(totalDuration / 1000) +
       's',
   );
-  return {
+  const loopResult: LoopResult = {
     total: results.length,
     succeeded,
     failed,
@@ -144,6 +139,15 @@ export async function fixLoop(options: LoopOptions): Promise<LoopResult> {
     totalTurns,
     totalDuration,
     budgetExceeded,
+    startedAt,
     results,
   };
+
+  const runReport = buildRunReport(loopResult);
+  printRunReport(runReport);
+  await writeRunReport(repoPath, runReport).catch((err) => {
+    log.warn('Failed to write run report: ' + (err instanceof Error ? err.message : String(err)));
+  });
+
+  return loopResult;
 }
