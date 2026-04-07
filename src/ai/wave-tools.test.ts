@@ -121,6 +121,7 @@ describe('resolveThinkingLevel', () => {
       impl: 'medium',
       quality: 'small',
       review: 'large',
+      brainstorm: 'large',
     },
     isolation: 'worktree',
   };
@@ -129,6 +130,7 @@ describe('resolveThinkingLevel', () => {
     expect(resolveThinkingLevel(baseConfig, 'assess')).toBe('medium');
     expect(resolveThinkingLevel(baseConfig, 'spec')).toBe('medium');
     expect(resolveThinkingLevel(baseConfig, 'review')).toBe('medium');
+    expect(resolveThinkingLevel(baseConfig, 'brainstorm')).toBe('medium');
     expect(resolveThinkingLevel(baseConfig, 'test')).toBe('off');
     expect(resolveThinkingLevel(baseConfig, 'impl')).toBe('off');
     expect(resolveThinkingLevel(baseConfig, 'quality')).toBe('off');

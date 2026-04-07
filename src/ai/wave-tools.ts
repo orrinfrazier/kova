@@ -64,7 +64,7 @@ const toolCreators: Record<ToolName, (cwd: string) => AnyTool> = {
 
 /** Resolve the thinking level for a wave — config override takes precedence over defaults. */
 export function resolveThinkingLevel(config: RepoConfig, wave: WaveName): ThinkingLevel {
-  const override = config.model.thinking?.[wave as FixAIWaveName];
+  const override = config.model.thinking?.[wave as AIWaveName];
   return override ?? DEFAULT_THINKING_LEVELS[wave];
 }
 

@@ -33,7 +33,15 @@ function makeRepoConfig(
   return {
     path: '/tmp/test',
     rules: { coverage: 80, auto_merge: false, max_issues_per_run: 10 },
-    model: { assess: 'large', spec: 'large', test: 'medium', impl: 'medium', quality: 'small', review: 'large' },
+    model: {
+      assess: 'large',
+      spec: 'large',
+      test: 'medium',
+      impl: 'medium',
+      quality: 'small',
+      review: 'large',
+      brainstorm: 'large',
+    },
     isolation: 'none',
     ...overrides,
     auto: makeAutoConfig(overrides?.auto),
@@ -114,7 +122,15 @@ describe('runAuto', () => {
     const config: RepoConfig = {
       path: '/tmp/test',
       rules: { coverage: 80, auto_merge: false, max_issues_per_run: 10 },
-      model: { assess: 'large', spec: 'large', test: 'medium', impl: 'medium', quality: 'small', review: 'large' },
+      model: {
+        assess: 'large',
+        spec: 'large',
+        test: 'medium',
+        impl: 'medium',
+        quality: 'small',
+        review: 'large',
+        brainstorm: 'large',
+      },
       isolation: 'none',
     };
 

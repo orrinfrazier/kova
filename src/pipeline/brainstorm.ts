@@ -47,7 +47,7 @@ export interface BrainstormReturn {
 export async function brainstorm(options: BrainstormOptions): Promise<BrainstormReturn> {
   const { repoPath, config, threshold = DEFAULT_CONFIDENCE_THRESHOLD, focus, kovaConfig } = options;
 
-  const model = resolveModel('large');
+  const model = resolveModel(config.model.brainstorm);
   const tools = getWaveTools('brainstorm', repoPath);
   const systemPrompt = await loadPrompt('brainstorm');
   const thinkingLevel = resolveThinkingLevel(config, 'brainstorm');

@@ -37,6 +37,7 @@ export const RepoConfigSchema = z.object({
       impl: ModelTierSchema.default('medium'),
       quality: ModelTierSchema.default('small'),
       review: ModelTierSchema.default('large'),
+      brainstorm: ModelTierSchema.default('large'),
       thinking: z
         .object({
           assess: ThinkingLevelSchema.optional(),
@@ -45,6 +46,7 @@ export const RepoConfigSchema = z.object({
           impl: ThinkingLevelSchema.optional(),
           quality: ThinkingLevelSchema.optional(),
           review: ThinkingLevelSchema.optional(),
+          brainstorm: ThinkingLevelSchema.optional(),
         })
         .optional(),
     })
@@ -55,6 +57,7 @@ export const RepoConfigSchema = z.object({
       impl: 'medium' as const,
       quality: 'small' as const,
       review: 'large' as const,
+      brainstorm: 'large' as const,
     })),
   isolation: IsolationModeSchema.default('worktree'),
 });
