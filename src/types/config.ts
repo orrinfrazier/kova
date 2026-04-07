@@ -46,6 +46,7 @@ export const VectorDBConfigSchema = z
   .object({
     enabled: z.boolean(),
     endpoint: z.string().optional(),
+    reindex_endpoint: z.string().optional(),
     top_k: z.number().default(10),
   })
   .refine((cfg) => !cfg.enabled || cfg.endpoint != null, {

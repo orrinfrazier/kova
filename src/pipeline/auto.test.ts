@@ -3,10 +3,14 @@ import type { KovaConfig, RepoConfig } from '../types/index.js';
 
 const mockFixLoop = vi.fn();
 const mockFetchIssues = vi.fn();
+const mockCollectChangedFilesFromPRs = vi.fn();
+const mockReindexFiles = vi.fn();
 
 beforeEach(() => {
   mockFixLoop.mockReset();
   mockFetchIssues.mockReset();
+  mockCollectChangedFilesFromPRs.mockReset();
+  mockReindexFiles.mockReset();
 });
 
 vi.mock('../services/github.js', () => ({
@@ -15,6 +19,11 @@ vi.mock('../services/github.js', () => ({
 
 vi.mock('./loop.js', () => ({
   fixLoop: (...args: unknown[]) => mockFixLoop(...args),
+}));
+
+vi.mock('../services/reindex.js', () => ({
+  collectChangedFilesFromPRs: (...args: unknown[]) => mockCollectChangedFilesFromPRs(...args),
+  reindexFiles: (...args: unknown[]) => mockReindexFiles(...args),
 }));
 
 const { runAuto, runAutoMultiRepo } = await import('./auto.js');
@@ -57,7 +66,41 @@ function makeLoopResult(overrides?: { failed?: number; succeeded?: number }) {
     totalCost: 1.0,
     totalTurns: 50,
     totalDuration: 30000,
+    budgetExceeded: false,
+    startedAt: '2026-01-01T00:00:00Z',
     results: [],
+  };
+}
+
+function makeLoopResultWithPRs(fixes: Array<{ success: boolean; prUrl?: string }>) {
+  const succeeded = fixes.filter((f) => f.success).length;
+  const failed = fixes.filter((f) => !f.success).length;
+  return {
+    total: fixes.length,
+    succeeded,
+    failed,
+    skipped: 0,
+    totalCost: 1.0,
+    totalTurns: 50,
+    totalDuration: 30000,
+    budgetExceeded: false,
+    startedAt: '2026-01-01T00:00:00Z',
+    results: fixes.map((f, i) => ({
+      issue: { number: i + 1, title: `Issue ${i + 1}`, body: '', labels: [], url: '' },
+      result: {
+        success: f.success,
+        prUrl: f.prUrl,
+        state: {
+          issue: { number: i + 1, title: `Issue ${i + 1}`, body: '', labels: [], url: '' },
+          repo: 'test-repo',
+          repoPath: '/tmp/test',
+          startedAt: '2026-01-01T00:00:00Z',
+          completedWaves: [],
+          waveResults: {},
+          status: f.success ? 'completed' : 'failed',
+        },
+      },
+    })),
   };
 }
 
@@ -147,6 +190,60 @@ describe('runAuto', () => {
     const result = await runAuto({ repoPath: '/tmp/test', repoName: 'test-repo', config: makeRepoConfig() });
 
     expect(result.loopResult).toEqual(loopResult);
+  });
+
+  it('triggers reindex when vectordb is enabled and fixes succeed', async () => {
+    const loopResult = makeLoopResultWithPRs([
+      { success: true, prUrl: 'https://github.com/o/r/pull/1' },
+      { success: false },
+      { success: true, prUrl: 'https://github.com/o/r/pull/3' },
+    ]);
+    mockFixLoop.mockResolvedValue(loopResult);
+    mockCollectChangedFilesFromPRs.mockResolvedValue(['src/a.ts', 'src/b.ts']);
+    mockReindexFiles.mockResolvedValue({ success: true, filesSubmitted: 2, apiCalls: 2, duration: 100 });
+
+    const config = makeRepoConfig({
+      vectordb: {
+        enabled: true,
+        endpoint: 'http://localhost:8100/query',
+        reindex_endpoint: 'http://localhost:8100/reindex',
+        top_k: 10,
+      },
+    });
+
+    await runAuto({ repoPath: '/tmp/test', repoName: 'test-repo', config });
+
+    expect(mockCollectChangedFilesFromPRs).toHaveBeenCalledWith('/tmp/test', [
+      'https://github.com/o/r/pull/1',
+      'https://github.com/o/r/pull/3',
+    ]);
+    expect(mockReindexFiles).toHaveBeenCalledWith(config.vectordb, '/tmp/test', ['src/a.ts', 'src/b.ts']);
+  });
+
+  it('skips reindex when vectordb is not enabled', async () => {
+    mockFixLoop.mockResolvedValue(makeLoopResult({ succeeded: 1 }));
+
+    await runAuto({ repoPath: '/tmp/test', repoName: 'test-repo', config: makeRepoConfig() });
+
+    expect(mockCollectChangedFilesFromPRs).not.toHaveBeenCalled();
+    expect(mockReindexFiles).not.toHaveBeenCalled();
+  });
+
+  it('skips reindex when no fixes succeeded', async () => {
+    mockFixLoop.mockResolvedValue(makeLoopResult({ succeeded: 0, failed: 2 }));
+
+    const config = makeRepoConfig({
+      vectordb: {
+        enabled: true,
+        endpoint: 'http://localhost:8100/query',
+        reindex_endpoint: 'http://localhost:8100/reindex',
+        top_k: 10,
+      },
+    });
+
+    await runAuto({ repoPath: '/tmp/test', repoName: 'test-repo', config });
+
+    expect(mockCollectChangedFilesFromPRs).not.toHaveBeenCalled();
   });
 });
 
