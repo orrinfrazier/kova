@@ -132,6 +132,7 @@ const mockCreateAgentSession = vi.fn();
 // Track all user messages passed to session.prompt() across waves
 const allPrompts: string[] = [];
 
+const mockTool = (name: string) => ({ name, execute: vi.fn() });
 vi.mock('@mariozechner/pi-coding-agent', () => ({
   createAgentSession: (...args: unknown[]) => mockCreateAgentSession(...args),
   AuthStorage: { create: () => ({ setRuntimeApiKey: vi.fn() }) },
@@ -142,6 +143,13 @@ vi.mock('@mariozechner/pi-coding-agent', () => ({
   SessionManager: { inMemory: () => ({}) },
   SettingsManager: { inMemory: () => ({}) },
   createCodingTools: () => [],
+  createReadTool: () => mockTool('read'),
+  createBashTool: () => mockTool('bash'),
+  createEditTool: () => mockTool('edit'),
+  createWriteTool: () => mockTool('write'),
+  createGrepTool: () => mockTool('grep'),
+  createFindTool: () => mockTool('find'),
+  createLsTool: () => mockTool('ls'),
 }));
 
 const mockCreatePR = vi.fn().mockResolvedValue('https://github.com/test/repo/pull/42');
