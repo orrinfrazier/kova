@@ -32,6 +32,8 @@ export {
 } from './config.js';
 export type { WaveHandoff } from './handoffs.js';
 export { loadAllHandoffs, loadHandoff, saveHandoff, WaveHandoffSchema } from './handoffs.js';
+export type { CodeEmbeddingInsert, EpisodeInsert, PatternInsert } from './vectordb.js';
+export { CodeEmbeddingInsertSchema, EpisodeInsertSchema, PatternInsertSchema } from './vectordb.js';
 export type {
   AssessResult,
   BrainstormIssue,

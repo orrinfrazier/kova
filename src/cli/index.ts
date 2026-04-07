@@ -15,6 +15,7 @@ import { Command } from 'commander';
 import { runAuto, runAutoMultiRepo } from '../pipeline/auto.js';
 import { brainstorm, printBrainstormPreview } from '../pipeline/brainstorm.js';
 import { fix } from '../pipeline/fix.js';
+import { indexCodebase } from '../pipeline/index-codebase.js';
 import { fixLoop } from '../pipeline/loop.js';
 import { gatherStatus, printStatusDashboard } from '../pipeline/status.js';
 import { runSupervised } from '../pipeline/supervised.js';
@@ -380,6 +381,28 @@ program
       log.error(`Reindex failed: ${result.error}`);
       process.exit(1);
     }
+  });
+
+program
+  .command('index')
+  .description('Index codebase into vectordb for semantic search')
+  .option('--full', 'Full re-index (ignore incremental SHA tracking)')
+  .option('--connection <url>', 'VectorDB connection URL')
+  .option('--repo <name-or-path>', 'Repository name (from config) or path', '.')
+  .action(async (opts: { full?: boolean; connection?: string; repo?: string }) => {
+    const kovaConfig = await tryLoadConfig(program.opts().config);
+    const { repoPath } = resolveRepo(opts.repo ?? '.', kovaConfig);
+
+    log.info('Indexing codebase...');
+    const result = await indexCodebase({
+      repoPath,
+      full: opts.full ?? false,
+      connectionUrl: opts.connection,
+    });
+
+    log.info(
+      `Done: ${result.filesIndexed} file(s) indexed, ${result.chunksUpserted} chunk(s) upserted in ${result.duration}ms (${result.incremental ? 'incremental' : 'full'})`,
+    );
   });
 
 program.parse();
