@@ -6,7 +6,7 @@ import type { JsonSchemaOutputFormat } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import { executeWaveWithRetry, type WaveExecutionResult } from '../ai/index.js';
 import { clearCheckpoint, loadCheckpoint, saveCheckpoint } from '../services/checkpoint.js';
-import { createPR, listOpenPRs } from '../services/github.js';
+import { commentOnIssue, createPR, listOpenPRs } from '../services/github.js';
 import {
   commitAndPush,
   createWorktree,
@@ -32,6 +32,7 @@ export interface FixOptions {
   repoName: string;
   config: RepoConfig;
   fresh?: boolean | undefined;
+  noComment?: boolean | undefined;
 }
 
 export interface FixResult {
@@ -42,7 +43,7 @@ export interface FixResult {
 }
 
 export async function fix(options: FixOptions): Promise<FixResult> {
-  const { issue, repoPath, repoName, config, fresh } = options;
+  const { issue, repoPath, repoName, config, fresh, noComment } = options;
 
   // 1. Handle --fresh: clear existing checkpoint and worktree before starting
   if (fresh) {
@@ -91,6 +92,12 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       const assess = result.structuredOutput as AssessResult | undefined;
       if (assess && !assess.should_proceed) {
         log.warn(`[assess] Grade ${assess.grade} — not proceeding: ${assess.reasoning}`);
+
+        if (!noComment) {
+          const comment = formatSkipComment(assess);
+          await commentOnIssue(repoPath, issue.number, comment);
+        }
+
         state.status = 'completed';
         return { success: false, error: `Issue graded ${assess.grade}, skipped`, state };
       }
@@ -291,5 +298,31 @@ function formatIssueContext(issue: Issue): string {
     issue.body,
     ``,
     `Labels: ${issue.labels.join(', ') || 'none'}`,
+  ].join('\n');
+}
+
+function formatSkipComment(assess: AssessResult): string {
+  const files = assess.surface_area.files.length > 0 ? assess.surface_area.files.join(', ') : 'N/A';
+  const recommendation =
+    assess.grade === 'F'
+      ? 'Break this issue into smaller, independently fixable pieces.'
+      : 'Consider rescoping this issue to reduce surface area.';
+
+  return [
+    '## Kova Assessment — Skipped',
+    '',
+    '| Field | Value |',
+    '|-------|-------|',
+    `| **Grade** | ${assess.grade} |`,
+    `| **Risk** | ${assess.risk} |`,
+    `| **Estimated lines** | ${assess.surface_area.estimated_lines} |`,
+    `| **Files** | ${files} |`,
+    `| **Modules** | ${assess.surface_area.modules_affected.join(', ') || 'N/A'} |`,
+    '',
+    '### Reasoning',
+    assess.reasoning,
+    '',
+    '### Recommendation',
+    recommendation,
   ].join('\n');
 }
