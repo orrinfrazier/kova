@@ -3,6 +3,7 @@ import {
   type EpisodicMemoryConfig,
   EpisodicMemoryConfigSchema,
   type FixState,
+  type WaveName,
   type WaveResult,
 } from '../types/config.js';
 import { buildEpisodeRecord, type EpisodeRecord, recordEpisode } from './vectordb.js';
@@ -158,11 +159,15 @@ describe('buildEpisodeRecord', () => {
   });
 
   it('sets outcome to failed when state.status is failed', () => {
+    const baseWaveResults = makeFixState().waveResults;
+    const waveResults: Partial<Record<WaveName, WaveResult>> = {};
+    if (baseWaveResults.assess) waveResults.assess = baseWaveResults.assess;
+    if (baseWaveResults.spec) waveResults.spec = baseWaveResults.spec;
     const record = buildEpisodeRecord(
       makeFixState({
         status: 'failed',
         completedWaves: ['assess', 'spec'],
-        waveResults: { assess: makeFixState().waveResults.assess!, spec: makeFixState().waveResults.spec! },
+        waveResults,
       }),
     );
     expect(record.outcome).toBe('failed');
@@ -217,16 +222,17 @@ describe('buildEpisodeRecord', () => {
   });
 
   it('failed_at_wave points to wave after last completed on failure', () => {
+    const baseWaveResults = makeFixState().waveResults;
+    const waveResults: Partial<Record<WaveName, WaveResult>> = {};
+    if (baseWaveResults.assess) waveResults.assess = baseWaveResults.assess;
+    if (baseWaveResults.spec) waveResults.spec = baseWaveResults.spec;
+    if (baseWaveResults.test) waveResults.test = baseWaveResults.test;
+    if (baseWaveResults.impl) waveResults.impl = baseWaveResults.impl;
     const record = buildEpisodeRecord(
       makeFixState({
         status: 'failed',
         completedWaves: ['assess', 'spec', 'test', 'impl'],
-        waveResults: {
-          assess: makeFixState().waveResults.assess!,
-          spec: makeFixState().waveResults.spec!,
-          test: makeFixState().waveResults.test!,
-          impl: makeFixState().waveResults.impl!,
-        },
+        waveResults,
       }),
     );
     expect(record.failed_at_wave).toBe('quality');
