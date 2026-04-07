@@ -1,14 +1,9 @@
-// Core wave executor — wraps pi-mono createAgentSession for each pipeline wave.
-// Each wave creates a fresh in-memory session, sends a prompt, and collects results.
+// Core wave executor — wraps pi-mono Agent for each pipeline wave.
+// Each wave creates a fresh Agent instance, sends a prompt, and collects results.
 
-import {
-  AuthStorage,
-  createAgentSession,
-  DefaultResourceLoader,
-  ModelRegistry,
-  SessionManager,
-  SettingsManager,
-} from '@mariozechner/pi-coding-agent';
+import { Agent } from '@mariozechner/pi-agent-core';
+import { streamSimple } from '@mariozechner/pi-ai';
+import { convertToLlm } from '@mariozechner/pi-coding-agent';
 import type { ModelTier, WaveName } from '../types/index.js';
 import { log } from '../utils/logger.js';
 import { classifyError, isSpendingCapBehavior, KovaError } from './errors.js';
@@ -48,39 +43,29 @@ export async function executeWave(options: WaveOptions): Promise<WaveExecutionRe
 
   log.info(`[${wave}] Starting wave — model=${model.id}, cwd=${cwd}`);
 
-  const authStorage = AuthStorage.create();
   const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (apiKey) {
-    authStorage.setRuntimeApiKey('anthropic', apiKey);
-  }
 
   const effectiveSystemPrompt = outputFormat
     ? `${systemPrompt}\n\n${buildStructuredOutputInstructions(outputFormat.schema)}`
     : systemPrompt;
 
-  const loader = new DefaultResourceLoader({
-    cwd,
-    systemPromptOverride: () => effectiveSystemPrompt,
-  });
-  await loader.reload();
-
-  const { session } = await createAgentSession({
-    cwd,
-    model,
-    thinkingLevel: 'off',
-    tools: getWaveTools(wave, cwd),
-    sessionManager: SessionManager.inMemory(),
-    settingsManager: SettingsManager.inMemory({ compaction: { enabled: false } }),
-    authStorage,
-    modelRegistry: ModelRegistry.inMemory(authStorage),
-    resourceLoader: loader,
+  const agent = new Agent({
+    initialState: {
+      systemPrompt: effectiveSystemPrompt,
+      model,
+      thinkingLevel: 'off',
+      tools: getWaveTools(wave, cwd),
+    },
+    streamFn: streamSimple,
+    convertToLlm,
+    getApiKey: () => apiKey,
   });
 
   let turnCount = 0;
   let aborted = false;
   let lastErrorMessage: string | undefined;
 
-  const unsubscribe = session.subscribe((event) => {
+  const unsubscribe = agent.subscribe((event) => {
     if (event.type === 'turn_end') {
       turnCount++;
       if (turnCount % 50 === 0) {
@@ -103,7 +88,7 @@ export async function executeWave(options: WaveOptions): Promise<WaveExecutionRe
     if (event.type === 'turn_end' && turnCount >= maxTurns && !aborted) {
       aborted = true;
       log.warn(`[${wave}] Max turns (${maxTurns}) reached, aborting`);
-      session.abort().catch(() => {});
+      agent.abort();
     }
   });
 
@@ -112,10 +97,10 @@ export async function executeWave(options: WaveOptions): Promise<WaveExecutionRe
   let structuredOutput: unknown | undefined;
 
   try {
-    await session.prompt(userMessage);
+    await agent.prompt(userMessage);
 
     // Extract cost from all assistant messages
-    const messages = session.agent.state.messages;
+    const messages = agent.state.messages;
     for (const msg of messages) {
       if (msg.role === 'assistant') {
         const assistantMsg = msg as {
@@ -148,8 +133,7 @@ export async function executeWave(options: WaveOptions): Promise<WaveExecutionRe
     }
 
     // Detect pi-mono errors reported via state or event subscription
-    const stateError = (session.agent.state as { errorMessage?: string }).errorMessage;
-    const piMonoError = stateError ?? lastErrorMessage;
+    const piMonoError = agent.state.errorMessage ?? lastErrorMessage;
     if (piMonoError) {
       const classified = classifyError(piMonoError);
       throw new KovaError(
@@ -204,7 +188,6 @@ export async function executeWave(options: WaveOptions): Promise<WaveExecutionRe
     };
   } finally {
     unsubscribe();
-    session.dispose();
   }
 }
 

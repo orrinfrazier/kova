@@ -1,5 +1,5 @@
 // End-to-end test with mock pi-mono — verifies the full pipeline without hitting the API.
-// Mocks createAgentSession at the pi-coding-agent level, lets real wave-executor, checkpoint, and pipeline run.
+// Mocks Agent at the pi-agent-core level, lets real wave-executor, checkpoint, and pipeline run.
 
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -63,7 +63,7 @@ const REVIEW_NEEDS_FIXES = {
 };
 
 // ---------------------------------------------------------------------------
-// Mock pi-mono session — creates mock sessions with canned responses
+// Mock pi-mono agent — creates mock Agent instances with canned responses
 // ---------------------------------------------------------------------------
 
 interface WaveResponse {
@@ -71,23 +71,19 @@ interface WaveResponse {
   cost?: number;
   model?: string;
   structuredOutput?: unknown;
-  /** Legacy: throw an Error from session.prompt() */
   error?: string;
-  /** Pi-mono style: encode error in AssistantMessage stopReason/errorMessage and state.errorMessage */
   piMonoError?: string;
 }
 
-function createMockSession(response: WaveResponse) {
-  const subscribers: Array<(event: unknown) => void> = [];
+function createMockAgent(response: WaveResponse) {
+  const subscribers: Array<(event: unknown, signal: AbortSignal) => void> = [];
 
-  // For structured output, the agent returns JSON as text; for plain results, just the text
   const textResult = response.structuredOutput
     ? JSON.stringify(response.structuredOutput)
     : (response.result ?? 'completed');
 
   const hasError = response.error ?? response.piMonoError;
 
-  // Pi-mono error shape: assistant message with stopReason "error" and errorMessage
   const assistantMessage = response.piMonoError
     ? {
         role: 'assistant' as const,
@@ -103,12 +99,11 @@ function createMockSession(response: WaveResponse) {
       };
 
   const messages = hasError
-    ? (response.piMonoError
-        ? [{ role: 'user' as const, content: [{ type: 'text', text: 'prompt' }] }, assistantMessage]
-        : [])
+    ? response.piMonoError
+      ? [{ role: 'user' as const, content: [{ type: 'text', text: 'prompt' }] }, assistantMessage]
+      : []
     : [{ role: 'user' as const, content: [{ type: 'text', text: 'prompt' }] }, assistantMessage];
 
-  // State mirrors pi-mono: errorMessage is set when the last turn had an error
   const state: Record<string, unknown> = { messages };
   if (response.piMonoError) {
     state.errorMessage = response.piMonoError;
@@ -118,20 +113,20 @@ function createMockSession(response: WaveResponse) {
     if (response.error) {
       throw new Error(response.error);
     }
+    const ac = new AbortController();
     for (const sub of subscribers) {
-      sub({ type: 'turn_end', message: assistantMessage, toolResults: [] });
+      sub({ type: 'turn_end', message: assistantMessage, toolResults: [] }, ac.signal);
     }
   });
 
   return {
-    subscribe: vi.fn((listener: (event: unknown) => void) => {
+    subscribe: vi.fn((listener: (event: unknown, signal: AbortSignal) => void) => {
       subscribers.push(listener);
       return () => {};
     }),
     prompt: mockPrompt,
-    agent: { state },
-    abort: vi.fn(async () => {}),
-    dispose: vi.fn(),
+    state,
+    abort: vi.fn(),
   };
 }
 
@@ -150,29 +145,32 @@ function happyPathResponses(): WaveResponse[] {
 // Module mocks
 // ---------------------------------------------------------------------------
 
-const mockCreateAgentSession = vi.fn();
-// Track all user messages passed to session.prompt() across waves
+const mockAgentConstructor = vi.fn();
+// Track all user messages passed to agent.prompt() across waves
 const allPrompts: string[] = [];
 
-const mockTool = (name: string) => ({ name, execute: vi.fn() });
-vi.mock('@mariozechner/pi-coding-agent', () => ({
-  createAgentSession: (...args: unknown[]) => mockCreateAgentSession(...args),
-  AuthStorage: { create: () => ({ setRuntimeApiKey: vi.fn() }) },
-  DefaultResourceLoader: class {
-    async reload() {}
-  },
-  ModelRegistry: { inMemory: () => ({}) },
-  SessionManager: { inMemory: () => ({}) },
-  SettingsManager: { inMemory: () => ({}) },
-  createCodingTools: () => [],
-  createReadTool: () => mockTool('read'),
-  createBashTool: () => mockTool('bash'),
-  createEditTool: () => mockTool('edit'),
-  createWriteTool: () => mockTool('write'),
-  createGrepTool: () => mockTool('grep'),
-  createFindTool: () => mockTool('find'),
-  createLsTool: () => mockTool('ls'),
+// Mock the Agent class from pi-agent-core — vi.fn() works as constructor with `new`
+vi.mock('@mariozechner/pi-agent-core', () => ({
+  Agent: mockAgentConstructor,
 }));
+
+// Mock streamSimple (passed to Agent but never called since Agent is mocked)
+vi.mock('@mariozechner/pi-ai', async (importOriginal) => {
+  const original = await importOriginal<typeof import('@mariozechner/pi-ai')>();
+  return {
+    ...original,
+    streamSimple: vi.fn(),
+  };
+});
+
+// Mock only convertToLlm from pi-coding-agent; keep real tool creators for wave-tools.ts
+vi.mock('@mariozechner/pi-coding-agent', async (importOriginal) => {
+  const original = await importOriginal<typeof import('@mariozechner/pi-coding-agent')>();
+  return {
+    ...original,
+    convertToLlm: (msgs: unknown[]) => msgs,
+  };
+});
 
 const mockCreatePR = vi.fn().mockResolvedValue('https://github.com/test/repo/pull/42');
 const mockListOpenPRs = vi.fn().mockResolvedValue(['#10: Other fix (kova/fix-10)']);
@@ -237,21 +235,21 @@ function setupResponseSequence(responses: WaveResponse[]): void {
   let callIndex = 0;
   allPrompts.length = 0;
 
-  mockCreateAgentSession.mockImplementation(async () => {
+  mockAgentConstructor.mockImplementation((options: unknown) => {
     const response = responses[callIndex++];
     if (!response) {
       throw new Error(
-        `Unexpected createAgentSession call #${callIndex} — only ${responses.length} responses configured`,
+        `Unexpected Agent constructor call #${callIndex} — only ${responses.length} responses configured`,
       );
     }
-    const session = createMockSession(response);
-    // Intercept prompt calls to track user messages
-    const originalPrompt = session.prompt;
-    session.prompt = vi.fn(async (userMessage: string) => {
+    const agent = createMockAgent(response);
+    const originalPrompt = agent.prompt;
+    agent.prompt = vi.fn(async (userMessage: string) => {
       allPrompts.push(userMessage);
       return originalPrompt(userMessage);
     });
-    return { session, extensionsResult: { extensions: [], errors: [], runtime: {} } };
+    (agent as Record<string, unknown>)._options = options;
+    return agent;
   });
 }
 
@@ -284,14 +282,14 @@ describe('fix — E2E with mock pi-mono', () => {
 
       expect(result.success).toBe(true);
       expect(result.prUrl).toBe('https://github.com/test/repo/pull/42');
-      expect(mockCreateAgentSession).toHaveBeenCalledTimes(6);
+      expect(mockAgentConstructor).toHaveBeenCalledTimes(6);
 
       const allWaves: WaveName[] = ['assess', 'spec', 'test', 'impl', 'quality', 'review', 'ship'];
       expect(result.state.completedWaves).toEqual(allWaves);
       expect(result.state.status).toBe('completed');
     });
 
-    it('passes wave-specific user messages through to session.prompt()', async () => {
+    it('passes wave-specific user messages through to agent.prompt()', async () => {
       setupResponseSequence(happyPathResponses());
 
       await fix({
@@ -317,8 +315,8 @@ describe('fix — E2E with mock pi-mono', () => {
         config: makeConfig(),
       });
 
-      const models = mockCreateAgentSession.mock.calls.map(
-        (c: unknown[]) => (c[0] as { model: { id: string } }).model.id,
+      const models = mockAgentConstructor.mock.calls.map(
+        (c: unknown[]) => (c[0] as { initialState: { model: { id: string } } }).initialState.model.id,
       );
       expect(models[0]).toBe('claude-opus-4-6');
       expect(models[1]).toBe('claude-opus-4-6');
@@ -567,7 +565,7 @@ describe('fix — E2E with mock pi-mono', () => {
 
       expect(result.success).toBe(false);
       expect(result.error).toContain('graded F');
-      expect(mockCreateAgentSession).toHaveBeenCalledTimes(1);
+      expect(mockAgentConstructor).toHaveBeenCalledTimes(1);
       expect(result.state.completedWaves).toEqual(['assess']);
       expect(mockCommitAndPush).not.toHaveBeenCalled();
       expect(mockCreatePR).not.toHaveBeenCalled();
@@ -595,7 +593,7 @@ describe('fix — E2E with mock pi-mono', () => {
       });
 
       expect(result.success).toBe(true);
-      expect(mockCreateAgentSession).toHaveBeenCalledTimes(8);
+      expect(mockAgentConstructor).toHaveBeenCalledTimes(8);
 
       // The 7th prompt (index 6) is the re-impl with review findings
       expect(allPrompts[6]).toContain('review findings');
