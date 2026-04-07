@@ -237,6 +237,31 @@ describe('fallback tracking in cost report', () => {
   });
 });
 
+describe('sandbox resource usage in cost report', () => {
+  it('includes sandbox usage when present in state', () => {
+    const state = makeState({
+      sandboxResourceUsage: {
+        peakMemoryMB: 1024,
+        cpuSeconds: 45.2,
+        wallTimeMs: 120000,
+        containerName: 'kova-sandbox-test-42',
+        limitsApplied: { cpus: 2, memory: '4g', timeout: '30m' },
+      },
+    });
+    const report = buildCostReport(state);
+    expect(report.sandboxResourceUsage).toBeDefined();
+    expect(report.sandboxResourceUsage?.peakMemoryMB).toBe(1024);
+    expect(report.sandboxResourceUsage?.cpuSeconds).toBeCloseTo(45.2);
+    expect(report.sandboxResourceUsage?.wallTimeMs).toBe(120000);
+    expect(report.sandboxResourceUsage?.limitsApplied.cpus).toBe(2);
+  });
+
+  it('omits sandbox usage when not present', () => {
+    const report = buildCostReport(makeState());
+    expect(report.sandboxResourceUsage).toBeUndefined();
+  });
+});
+
 describe('printRunSummary', () => {
   it('logs total cost, per-wave breakdown, turns, and duration', () => {
     const report: CostReport = {

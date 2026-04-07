@@ -29,6 +29,7 @@ import {
 } from '../services/config.js';
 import { createIssue, fetchIssue, hasExistingWork } from '../services/github.js';
 import { collectChangedFiles, reindexFiles } from '../services/reindex.js';
+import { buildSandboxImage } from '../services/sandbox.js';
 import {
   exitCodeForSignal,
   getShutdownSignal,
@@ -403,6 +404,29 @@ program
     log.info(
       `Done: ${result.filesIndexed} file(s) indexed, ${result.chunksUpserted} chunk(s) upserted in ${result.duration}ms (${result.incremental ? 'incremental' : 'full'})`,
     );
+  });
+
+const sandbox = program.command('sandbox').description('Manage sandbox Docker images');
+
+sandbox
+  .command('build')
+  .description('Build the sandbox Docker image for a repository')
+  .option('--repo <name-or-path>', 'Repository name (from config) or path', '.')
+  .action(async (opts: { repo?: string }) => {
+    const kovaConfig = await tryLoadConfig(program.opts().config);
+    const { repoName, config } = resolveRepo(opts.repo ?? '.', kovaConfig);
+
+    const result = await buildSandboxImage({
+      repoName,
+      config: config.sandbox,
+    });
+
+    if (result.success) {
+      log.info(`Sandbox image ready: ${result.tag} (${result.duration}ms)`);
+    } else {
+      log.error(`Sandbox build failed: ${result.error}`);
+      process.exit(1);
+    }
   });
 
 program.parse();
