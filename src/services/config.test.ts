@@ -765,6 +765,91 @@ repos:
 });
 
 /* ------------------------------------------------------------------ */
+/*  repo_intel config                                                  */
+/* ------------------------------------------------------------------ */
+
+describe('repo_intel config', () => {
+  it('loads config with repo_intel enabled', async () => {
+    const yaml = `
+repos:
+  intel-repo:
+    path: /tmp/intel
+    repo_intel:
+      enabled: true
+      endpoint: http://localhost:9999/repo-intel
+      limit: 10
+`;
+    await writeFile(join(tempDir, 'repos.yaml'), yaml);
+
+    const config = await loadConfig(join(tempDir, 'repos.yaml'));
+    const repo = config.repos['intel-repo'];
+    expect(repo).toBeDefined();
+    if (!repo) return;
+
+    expect(repo.repo_intel?.enabled).toBe(true);
+    expect(repo.repo_intel?.endpoint).toBe('http://localhost:9999/repo-intel');
+    expect(repo.repo_intel?.limit).toBe(10);
+  });
+
+  it('applies default limit when not specified', async () => {
+    const yaml = `
+repos:
+  intel-defaults:
+    path: /tmp/intel
+    repo_intel:
+      enabled: true
+      endpoint: http://localhost:9999/repo-intel
+`;
+    await writeFile(join(tempDir, 'repos.yaml'), yaml);
+
+    const config = await loadConfig(join(tempDir, 'repos.yaml'));
+    const repo = config.repos['intel-defaults'];
+    expect(repo?.repo_intel?.limit).toBe(5);
+  });
+
+  it('repo_intel section is optional', async () => {
+    const yaml = `
+repos:
+  no-intel:
+    path: /tmp/none
+`;
+    await writeFile(join(tempDir, 'repos.yaml'), yaml);
+
+    const config = await loadConfig(join(tempDir, 'repos.yaml'));
+    const repo = config.repos['no-intel'];
+    expect(repo?.repo_intel).toBeUndefined();
+  });
+
+  it('rejects repo_intel with missing endpoint when enabled', async () => {
+    const yaml = `
+repos:
+  bad-intel:
+    path: /tmp/bad
+    repo_intel:
+      enabled: true
+`;
+    await writeFile(join(tempDir, 'repos.yaml'), yaml);
+
+    await expect(loadConfig(join(tempDir, 'repos.yaml'))).rejects.toThrow(ZodError);
+  });
+
+  it('allows repo_intel disabled without endpoint', async () => {
+    const yaml = `
+repos:
+  disabled-intel:
+    path: /tmp/disabled
+    repo_intel:
+      enabled: false
+`;
+    await writeFile(join(tempDir, 'repos.yaml'), yaml);
+
+    const config = await loadConfig(join(tempDir, 'repos.yaml'));
+    const repo = config.repos['disabled-intel'];
+    expect(repo?.repo_intel?.enabled).toBe(false);
+  });
+});
+
+/* ------------------------------------------------------------------ */
 /*  sandbox resource limits config                                     */
 /* ------------------------------------------------------------------ */
 
