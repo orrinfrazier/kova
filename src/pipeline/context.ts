@@ -41,6 +41,8 @@ export interface ContextOptions {
   repoSearchText?: string;
   /** Pre-formatted repo-intel standards — project conventions (only for quality wave). */
   repoStandardsText?: string;
+  /** Pre-formatted past reviewer feedback context (only for review wave). */
+  reviewFeedbackContext?: string;
 }
 
 export interface PieceContextOptions {
@@ -72,7 +74,7 @@ export function buildWaveContext(
     test: () => buildTestContext(handoffs),
     impl: () => buildImplContext(handoffs, options),
     quality: () => buildQualityContext(options),
-    review: () => buildReviewContext(handoffs),
+    review: () => buildReviewContext(handoffs, options),
   };
 
   const builder = builders[wave];
@@ -249,7 +251,7 @@ function buildQualityContext(options: ContextOptions): string {
   return sections.join('\n\n');
 }
 
-function buildReviewContext(handoffs: Handoffs): string {
+function buildReviewContext(handoffs: Handoffs, options: ContextOptions = {}): string {
   const sections: string[] = [];
 
   const spec = handoffs.spec?.artifact;
@@ -260,6 +262,10 @@ function buildReviewContext(handoffs: Handoffs): string {
   const quality = handoffs.quality?.artifact;
   if (isQualityResult(quality)) {
     sections.push(formatQualitySection(quality));
+  }
+
+  if (options.reviewFeedbackContext) {
+    sections.push(options.reviewFeedbackContext);
   }
 
   return sections.join('\n\n');

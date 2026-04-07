@@ -1030,7 +1030,7 @@ describe('runMigration', () => {
 
     await runMigration(client);
 
-    expect(mockPool.query).toHaveBeenCalledTimes(2);
+    expect(mockPool.query).toHaveBeenCalledTimes(3);
   });
 
   it('passes a non-empty SQL string to pool.query', async () => {
