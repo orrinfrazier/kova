@@ -23,6 +23,8 @@ export const SpecPieceSchema = z.object({
   wiring: z.array(z.string()),
 });
 
+export type SpecPiece = z.infer<typeof SpecPieceSchema>;
+
 export const SpecResultSchema = z.object({
   summary: z.string(),
   pieces: z.array(SpecPieceSchema),
