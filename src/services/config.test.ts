@@ -1,9 +1,16 @@
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { homedir, tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ZodError } from 'zod';
-import { detectRepoName, loadConfig, resolveRepoConfig } from './config.js';
+import {
+  detectRepoName,
+  findRepoByName,
+  loadConfig,
+  resolveConfigPath,
+  resolveRepoConfig,
+  resolveTilde,
+} from './config.js';
 
 /* ------------------------------------------------------------------ */
 /*  Temp directory management                                          */
@@ -156,6 +163,134 @@ repos:
   it('includes file path in not-found error message', async () => {
     const missingPath = join(tempDir, 'missing.yaml');
     await expect(loadConfig(missingPath)).rejects.toThrow(missingPath);
+  });
+
+  it('resolves ~ in repo paths to home directory', async () => {
+    const yaml = `repos:\n  tilde-repo:\n    path: ~/projects/my-app\n`;
+    await writeFile(join(tempDir, 'repos.yaml'), yaml);
+
+    const config = await loadConfig(join(tempDir, 'repos.yaml'));
+    const repo = config.repos['tilde-repo'];
+    expect(repo).toBeDefined();
+    expect(repo?.path).toBe(join(homedir(), 'projects/my-app'));
+  });
+
+  it('resolves relative paths to absolute paths', async () => {
+    const yaml = `repos:\n  rel-repo:\n    path: ./my-project\n`;
+    await writeFile(join(tempDir, 'repos.yaml'), yaml);
+
+    const config = await loadConfig(join(tempDir, 'repos.yaml'));
+    const repo = config.repos['rel-repo'];
+    expect(repo).toBeDefined();
+    // Relative paths resolved from cwd
+    expect(repo?.path).toBe(resolve('./my-project'));
+  });
+
+  it('preserves absolute paths unchanged', async () => {
+    const yaml = `repos:\n  abs-repo:\n    path: /opt/repos/abs\n`;
+    await writeFile(join(tempDir, 'repos.yaml'), yaml);
+
+    const config = await loadConfig(join(tempDir, 'repos.yaml'));
+    const repo = config.repos['abs-repo'];
+    expect(repo?.path).toBe('/opt/repos/abs');
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/*  resolveTilde                                                       */
+/* ------------------------------------------------------------------ */
+
+describe('resolveTilde', () => {
+  it('expands ~ at the start of a path', () => {
+    expect(resolveTilde('~/projects')).toBe(join(homedir(), 'projects'));
+  });
+
+  it('expands ~/nested/deep paths', () => {
+    expect(resolveTilde('~/a/b/c')).toBe(join(homedir(), 'a/b/c'));
+  });
+
+  it('does not expand ~ in the middle of a path', () => {
+    expect(resolveTilde('/home/~user/foo')).toBe('/home/~user/foo');
+  });
+
+  it('returns absolute paths unchanged', () => {
+    expect(resolveTilde('/opt/repos')).toBe('/opt/repos');
+  });
+
+  it('returns relative paths unchanged (not its job)', () => {
+    expect(resolveTilde('./foo/bar')).toBe('./foo/bar');
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/*  resolveConfigPath                                                  */
+/* ------------------------------------------------------------------ */
+
+describe('resolveConfigPath', () => {
+  it('returns explicit path when provided', () => {
+    expect(resolveConfigPath('/custom/repos.yaml')).toBe('/custom/repos.yaml');
+  });
+
+  it('defaults to ~/.kova/repos.yaml when no path given', () => {
+    expect(resolveConfigPath()).toBe(join(homedir(), '.kova', 'repos.yaml'));
+  });
+
+  it('resolves tilde in explicit config path', () => {
+    expect(resolveConfigPath('~/.config/kova/repos.yaml')).toBe(join(homedir(), '.config/kova/repos.yaml'));
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/*  findRepoByName                                                     */
+/* ------------------------------------------------------------------ */
+
+describe('findRepoByName', () => {
+  const makeConfig = () => ({
+    repos: {
+      onexos: {
+        path: '/home/user/dev/onexos',
+        rules: { coverage: 80, auto_merge: false, max_issues_per_run: 10 },
+        model: {
+          assess: 'large' as const,
+          spec: 'large' as const,
+          test: 'medium' as const,
+          impl: 'medium' as const,
+          quality: 'small' as const,
+          review: 'large' as const,
+        },
+        isolation: 'worktree' as const,
+      },
+      kova: {
+        path: '/home/user/dev/kova',
+        rules: { coverage: 80, auto_merge: false, max_issues_per_run: 10 },
+        model: {
+          assess: 'large' as const,
+          spec: 'large' as const,
+          test: 'medium' as const,
+          impl: 'medium' as const,
+          quality: 'small' as const,
+          review: 'large' as const,
+        },
+        isolation: 'worktree' as const,
+      },
+    },
+  });
+
+  it('finds a repo by its config key name', () => {
+    const result = findRepoByName(makeConfig(), 'onexos');
+    expect(result).toBeDefined();
+    expect(result?.name).toBe('onexos');
+    expect(result?.config.path).toBe('/home/user/dev/onexos');
+  });
+
+  it('returns undefined for unknown repo name', () => {
+    const result = findRepoByName(makeConfig(), 'nonexistent');
+    expect(result).toBeUndefined();
+  });
+
+  it('returns the correct repo when multiple exist', () => {
+    const result = findRepoByName(makeConfig(), 'kova');
+    expect(result?.config.path).toBe('/home/user/dev/kova');
   });
 });
 
