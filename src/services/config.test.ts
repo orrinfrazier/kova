@@ -3,6 +3,8 @@ import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ZodError } from 'zod';
+import type { PlaywrightConfig } from '../types/index.js';
+import { PlaywrightConfigSchema } from '../types/index.js';
 import {
   detectRepoName,
   findRepoByName,
@@ -1048,5 +1050,137 @@ repos:
     await writeFile(join(tempDir, 'repos.yaml'), yaml);
 
     await expect(loadConfig(join(tempDir, 'repos.yaml'))).rejects.toThrow(ZodError);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/*  playwright MCP config                                              */
+/* ------------------------------------------------------------------ */
+
+describe('playwright config', () => {
+  it('PlaywrightConfigSchema validates a full config', () => {
+    const result = PlaywrightConfigSchema.parse({
+      enabled: true,
+      screenshots_dir: '.kova/screenshots',
+      baseline_dir: '.kova/baselines',
+    });
+
+    expect(result.enabled).toBe(true);
+    expect(result.screenshots_dir).toBe('.kova/screenshots');
+    expect(result.baseline_dir).toBe('.kova/baselines');
+  });
+
+  it('PlaywrightConfigSchema applies default screenshots_dir', () => {
+    const result = PlaywrightConfigSchema.parse({
+      enabled: true,
+    });
+
+    expect(result.screenshots_dir).toBe('.kova/screenshots');
+  });
+
+  it('baseline_dir is optional and defaults to undefined', () => {
+    const result = PlaywrightConfigSchema.parse({
+      enabled: true,
+    });
+
+    expect(result.baseline_dir).toBeUndefined();
+  });
+
+  it('rejects enabled with non-boolean type', () => {
+    expect(() =>
+      PlaywrightConfigSchema.parse({
+        enabled: 'yes',
+      }),
+    ).toThrow(ZodError);
+  });
+
+  it('rejects screenshots_dir with non-string type', () => {
+    expect(() =>
+      PlaywrightConfigSchema.parse({
+        enabled: true,
+        screenshots_dir: 123,
+      }),
+    ).toThrow(ZodError);
+  });
+
+  it('PlaywrightConfig type is usable', () => {
+    const config: PlaywrightConfig = {
+      enabled: true,
+      screenshots_dir: '.kova/screenshots',
+    };
+    expect(config.enabled).toBe(true);
+  });
+
+  it('loads config from repos.yaml with playwright section', async () => {
+    const yaml = `
+repos:
+  pw-repo:
+    path: /tmp/pw
+    playwright:
+      enabled: true
+      screenshots_dir: custom/shots
+      baseline_dir: custom/baselines
+`;
+    await writeFile(join(tempDir, 'repos.yaml'), yaml);
+
+    const config = await loadConfig(join(tempDir, 'repos.yaml'));
+    const repo = config.repos['pw-repo'];
+    expect(repo).toBeDefined();
+    if (!repo) return;
+
+    expect(repo.playwright?.enabled).toBe(true);
+    expect(repo.playwright?.screenshots_dir).toBe('custom/shots');
+    expect(repo.playwright?.baseline_dir).toBe('custom/baselines');
+  });
+
+  it('playwright section is optional (existing configs still work)', async () => {
+    const yaml = `
+repos:
+  no-pw:
+    path: /tmp/no-pw
+`;
+    await writeFile(join(tempDir, 'repos.yaml'), yaml);
+
+    const config = await loadConfig(join(tempDir, 'repos.yaml'));
+    const repo = config.repos['no-pw'];
+    expect(repo).toBeDefined();
+    expect(repo?.playwright).toBeUndefined();
+  });
+
+  it('applies default screenshots_dir when loading from yaml', async () => {
+    const yaml = `
+repos:
+  defaults-pw:
+    path: /tmp/defaults-pw
+    playwright:
+      enabled: true
+`;
+    await writeFile(join(tempDir, 'repos.yaml'), yaml);
+
+    const config = await loadConfig(join(tempDir, 'repos.yaml'));
+    const repo = config.repos['defaults-pw'];
+    expect(repo).toBeDefined();
+    if (!repo) return;
+
+    expect(repo.playwright?.enabled).toBe(true);
+    expect(repo.playwright?.screenshots_dir).toBe('.kova/screenshots');
+  });
+
+  it('rejects invalid playwright config in yaml (enabled not boolean)', async () => {
+    const yaml = `
+repos:
+  bad-pw:
+    path: /tmp/bad-pw
+    playwright:
+      enabled: "not-a-bool"
+`;
+    await writeFile(join(tempDir, 'repos.yaml'), yaml);
+
+    await expect(loadConfig(join(tempDir, 'repos.yaml'))).rejects.toThrow(ZodError);
+  });
+
+  it('resolveRepoConfig has no playwright by default', () => {
+    const config = resolveRepoConfig('/tmp/repo');
+    expect(config.playwright).toBeUndefined();
   });
 });

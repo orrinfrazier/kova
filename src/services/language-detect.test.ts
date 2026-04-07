@@ -240,5 +240,168 @@ describe('detectTooling', () => {
       expect(context).toContain('Language: rust');
       expect(context).not.toContain('Package manager');
     });
+
+    it('includes repo type when set', () => {
+      const tooling: DetectedTooling = {
+        language: 'typescript',
+        testRunner: 'vitest',
+        linter: 'biome',
+        formatter: 'biome',
+        packageManager: 'npm',
+        repoType: 'frontend',
+      };
+
+      const context = formatToolingContext(tooling);
+      expect(context).toContain('Repo type: frontend');
+    });
+
+    it('omits repo type when undefined', () => {
+      const tooling: DetectedTooling = {
+        language: 'typescript',
+        testRunner: 'vitest',
+      };
+
+      const context = formatToolingContext(tooling);
+      expect(context).not.toContain('Repo type');
+    });
+  });
+
+  describe('frontend/backend repo type detection', () => {
+    it('detects Next.js project (next.config.js) as frontend', async () => {
+      await writeFile(join(workDir, 'package.json'), JSON.stringify({ name: 'test' }));
+      await writeFile(join(workDir, 'tsconfig.json'), '{}');
+      await writeFile(join(workDir, 'next.config.js'), 'module.exports = {}');
+
+      const result = await detectTooling(workDir);
+      expect(result.repoType).toBe('frontend');
+    });
+
+    it('detects Next.js project (next.config.mjs) as frontend', async () => {
+      await writeFile(join(workDir, 'package.json'), JSON.stringify({ name: 'test' }));
+      await writeFile(join(workDir, 'tsconfig.json'), '{}');
+      await writeFile(join(workDir, 'next.config.mjs'), 'export default {}');
+
+      const result = await detectTooling(workDir);
+      expect(result.repoType).toBe('frontend');
+    });
+
+    it('detects Next.js project (next.config.ts) as frontend', async () => {
+      await writeFile(join(workDir, 'package.json'), JSON.stringify({ name: 'test' }));
+      await writeFile(join(workDir, 'tsconfig.json'), '{}');
+      await writeFile(join(workDir, 'next.config.ts'), 'export default {}');
+
+      const result = await detectTooling(workDir);
+      expect(result.repoType).toBe('frontend');
+    });
+
+    it('detects Vite project (vite.config.ts) as frontend', async () => {
+      await writeFile(join(workDir, 'package.json'), JSON.stringify({ name: 'test' }));
+      await writeFile(join(workDir, 'tsconfig.json'), '{}');
+      await writeFile(join(workDir, 'vite.config.ts'), 'export default {}');
+
+      const result = await detectTooling(workDir);
+      expect(result.repoType).toBe('frontend');
+    });
+
+    it('detects Vite project (vite.config.js) as frontend', async () => {
+      await writeFile(join(workDir, 'package.json'), JSON.stringify({ name: 'test' }));
+      await writeFile(join(workDir, 'vite.config.js'), 'export default {}');
+
+      const result = await detectTooling(workDir);
+      expect(result.repoType).toBe('frontend');
+    });
+
+    it('does not treat vitest.config.ts as a Vite frontend config', async () => {
+      await writeFile(
+        join(workDir, 'package.json'),
+        JSON.stringify({ name: 'test', dependencies: { express: '^4.0.0' } }),
+      );
+      await writeFile(join(workDir, 'tsconfig.json'), '{}');
+      await writeFile(join(workDir, 'vitest.config.ts'), 'export default {}');
+
+      const result = await detectTooling(workDir);
+      expect(result.repoType).not.toBe('frontend');
+    });
+
+    it('detects react dependency in package.json as frontend', async () => {
+      await writeFile(
+        join(workDir, 'package.json'),
+        JSON.stringify({ name: 'test', dependencies: { react: '^18.0.0', 'react-dom': '^18.0.0' } }),
+      );
+      await writeFile(join(workDir, 'tsconfig.json'), '{}');
+
+      const result = await detectTooling(workDir);
+      expect(result.repoType).toBe('frontend');
+    });
+
+    it('detects vue dependency in package.json as frontend', async () => {
+      await writeFile(join(workDir, 'package.json'), JSON.stringify({ name: 'test', dependencies: { vue: '^3.0.0' } }));
+      await writeFile(join(workDir, 'tsconfig.json'), '{}');
+
+      const result = await detectTooling(workDir);
+      expect(result.repoType).toBe('frontend');
+    });
+
+    it('detects angular dependency in package.json as frontend', async () => {
+      await writeFile(
+        join(workDir, 'package.json'),
+        JSON.stringify({ name: 'test', dependencies: { '@angular/core': '^17.0.0' } }),
+      );
+      await writeFile(join(workDir, 'tsconfig.json'), '{}');
+
+      const result = await detectTooling(workDir);
+      expect(result.repoType).toBe('frontend');
+    });
+
+    it('detects svelte dependency in package.json as frontend', async () => {
+      await writeFile(
+        join(workDir, 'package.json'),
+        JSON.stringify({ name: 'test', dependencies: { svelte: '^4.0.0' } }),
+      );
+      await writeFile(join(workDir, 'tsconfig.json'), '{}');
+
+      const result = await detectTooling(workDir);
+      expect(result.repoType).toBe('frontend');
+    });
+
+    it('detects backend-only Node.js project as backend', async () => {
+      await writeFile(
+        join(workDir, 'package.json'),
+        JSON.stringify({ name: 'api-server', dependencies: { express: '^4.0.0', pg: '^8.0.0' } }),
+      );
+      await writeFile(join(workDir, 'tsconfig.json'), '{}');
+
+      const result = await detectTooling(workDir);
+      expect(result.repoType).toBe('backend');
+    });
+
+    it('detects Node.js project with no dependencies as backend', async () => {
+      await writeFile(join(workDir, 'package.json'), JSON.stringify({ name: 'cli-tool' }));
+      await writeFile(join(workDir, 'tsconfig.json'), '{}');
+
+      const result = await detectTooling(workDir);
+      expect(result.repoType).toBe('backend');
+    });
+
+    it('returns unknown repoType for Rust projects', async () => {
+      await writeFile(join(workDir, 'Cargo.toml'), '[package]\nname = "test"');
+
+      const result = await detectTooling(workDir);
+      expect(result.repoType).toBe('unknown');
+    });
+
+    it('returns unknown repoType for Go projects', async () => {
+      await writeFile(join(workDir, 'go.mod'), 'module example.com/test');
+
+      const result = await detectTooling(workDir);
+      expect(result.repoType).toBe('unknown');
+    });
+
+    it('returns unknown repoType for Python projects', async () => {
+      await writeFile(join(workDir, 'pyproject.toml'), '[project]\nname = "test"');
+
+      const result = await detectTooling(workDir);
+      expect(result.repoType).toBe('unknown');
+    });
   });
 });

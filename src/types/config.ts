@@ -132,12 +132,34 @@ export const RepoIntelConfigSchema = z
 
 export type RepoIntelConfig = z.infer<typeof RepoIntelConfigSchema>;
 
+/** screenshots_dir is optional for construction; Zod applies the default during parsing via transform. */
+export interface PlaywrightConfig {
+  enabled: boolean;
+  screenshots_dir?: string | undefined;
+  baseline_dir?: string | undefined;
+}
+
+export const PlaywrightConfigSchema = z
+  .object({
+    enabled: z.boolean(),
+    screenshots_dir: z.string().optional(),
+    baseline_dir: z.string().optional(),
+  })
+  .transform(
+    (val): PlaywrightConfig => ({
+      enabled: val.enabled,
+      screenshots_dir: val.screenshots_dir ?? '.kova/screenshots',
+      baseline_dir: val.baseline_dir,
+    }),
+  );
+
 export const RepoConfigSchema = z.object({
   path: z.string(),
   vectordb: VectorDBConfigSchema.optional(),
   episodes: EpisodicMemoryConfigSchema.optional(),
   repo_intel: RepoIntelConfigSchema.optional(),
   sandbox: SandboxConfigSchema.optional(),
+  playwright: PlaywrightConfigSchema.optional(),
   tools: z.array(CustomToolSchema).optional(),
   rules: z
     .object({
