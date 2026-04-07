@@ -9,7 +9,8 @@ export type {
   WaveResult,
 } from './config.js';
 export { IsolationModeSchema, KovaConfigSchema, ModelTierSchema, RepoConfigSchema } from './config.js';
-
+export type { WaveHandoff } from './handoffs.js';
+export { loadAllHandoffs, loadHandoff, saveHandoff, WaveHandoffSchema } from './handoffs.js';
 export type {
   AssessResult,
   ImplResult,
@@ -18,7 +19,6 @@ export type {
   SpecResult,
   TestResult,
 } from './waves.js';
-
 export {
   AssessResultSchema,
   ImplResultSchema,
