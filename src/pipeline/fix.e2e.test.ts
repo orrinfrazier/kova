@@ -1,5 +1,5 @@
-// End-to-end test with mock SDK — verifies the full pipeline without hitting the API.
-// Mocks query() at the SDK level, lets the real wave-executor, checkpoint, and pipeline run.
+// End-to-end test with mock pi-mono — verifies the full pipeline without hitting the API.
+// Mocks createAgentSession at the pi-coding-agent level, lets real wave-executor, checkpoint, and pipeline run.
 
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -63,7 +63,7 @@ const REVIEW_NEEDS_FIXES = {
 };
 
 // ---------------------------------------------------------------------------
-// Mock SDK query() — returns async generators with canned message sequences
+// Mock pi-mono session — creates mock sessions with canned responses
 // ---------------------------------------------------------------------------
 
 interface WaveResponse {
@@ -74,18 +74,42 @@ interface WaveResponse {
   error?: string;
 }
 
-async function* mockQueryGenerator(response: WaveResponse): AsyncGenerator<unknown> {
-  yield { type: 'system', subtype: 'init', model: response.model ?? 'claude-opus-4-6' };
-  if (response.error) {
-    yield { type: 'assistant', error: response.error };
-    return;
-  }
-  yield { type: 'assistant' };
-  yield {
-    type: 'result',
-    result: response.result ?? 'completed',
-    total_cost_usd: response.cost ?? 0.05,
-    ...(response.structuredOutput !== undefined && { structured_output: response.structuredOutput }),
+function createMockSession(response: WaveResponse) {
+  const subscribers: Array<(event: unknown) => void> = [];
+
+  // For structured output, the agent returns JSON as text; for plain results, just the text
+  const textResult = response.structuredOutput
+    ? JSON.stringify(response.structuredOutput)
+    : (response.result ?? 'completed');
+
+  const assistantMessage = {
+    role: 'assistant' as const,
+    content: [{ type: 'text' as const, text: textResult }],
+    usage: { cost: { total: response.cost ?? 0.05 } },
+  };
+
+  const messages = response.error
+    ? []
+    : [{ role: 'user' as const, content: [{ type: 'text', text: 'prompt' }] }, assistantMessage];
+
+  const mockPrompt = vi.fn(async (_userMessage?: string) => {
+    if (response.error) {
+      throw new Error(response.error);
+    }
+    for (const sub of subscribers) {
+      sub({ type: 'turn_end', message: assistantMessage, toolResults: [] });
+    }
+  });
+
+  return {
+    subscribe: vi.fn((listener: (event: unknown) => void) => {
+      subscribers.push(listener);
+      return () => {};
+    }),
+    prompt: mockPrompt,
+    agent: { state: { messages } },
+    abort: vi.fn(async () => {}),
+    dispose: vi.fn(),
   };
 }
 
@@ -104,9 +128,21 @@ function happyPathResponses(): WaveResponse[] {
 // Module mocks
 // ---------------------------------------------------------------------------
 
-const mockQuery = vi.fn();
-vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
-  query: (...args: unknown[]) => mockQuery(...args),
+const mockCreateAgentSession = vi.fn();
+// Track all user messages passed to session.prompt() across waves
+const allPrompts: string[] = [];
+
+vi.mock('@mariozechner/pi-coding-agent', () => ({
+  createAgentSession: (...args: unknown[]) => mockCreateAgentSession(...args),
+  AuthStorage: { create: () => ({ setRuntimeApiKey: vi.fn() }) },
+  DefaultResourceLoader: class {
+    constructor(_opts: unknown) {}
+    async reload() {}
+  },
+  ModelRegistry: { inMemory: () => ({}) },
+  SessionManager: { inMemory: () => ({}) },
+  SettingsManager: { inMemory: () => ({}) },
+  createCodingTools: () => [],
 }));
 
 const mockCreatePR = vi.fn().mockResolvedValue('https://github.com/test/repo/pull/42');
@@ -168,14 +204,25 @@ function makeConfig(overrides?: Partial<RepoConfig>): RepoConfig {
   };
 }
 
-function setupQuerySequence(responses: WaveResponse[]): void {
+function setupResponseSequence(responses: WaveResponse[]): void {
   let callIndex = 0;
-  mockQuery.mockImplementation(() => {
+  allPrompts.length = 0;
+
+  mockCreateAgentSession.mockImplementation(async () => {
     const response = responses[callIndex++];
     if (!response) {
-      throw new Error(`Unexpected query() call #${callIndex} — only ${responses.length} responses configured`);
+      throw new Error(
+        `Unexpected createAgentSession call #${callIndex} — only ${responses.length} responses configured`,
+      );
     }
-    return mockQueryGenerator(response);
+    const session = createMockSession(response);
+    // Intercept prompt calls to track user messages
+    const originalPrompt = session.prompt;
+    session.prompt = vi.fn(async (userMessage: string) => {
+      allPrompts.push(userMessage);
+      return originalPrompt(userMessage);
+    });
+    return { session, extensionsResult: { extensions: [], errors: [], runtime: {} } };
   });
 }
 
@@ -183,7 +230,7 @@ function setupQuerySequence(responses: WaveResponse[]): void {
 // Tests
 // ---------------------------------------------------------------------------
 
-describe('fix — E2E with mock SDK', () => {
+describe('fix — E2E with mock pi-mono', () => {
   let workDir: string;
 
   beforeEach(async () => {
@@ -197,7 +244,7 @@ describe('fix — E2E with mock SDK', () => {
 
   describe('full pipeline happy path', () => {
     it('runs all waves assess -> spec -> test -> impl -> quality -> review -> ship', async () => {
-      setupQuerySequence(happyPathResponses());
+      setupResponseSequence(happyPathResponses());
 
       const result = await fix({
         issue: makeIssue(7),
@@ -208,15 +255,15 @@ describe('fix — E2E with mock SDK', () => {
 
       expect(result.success).toBe(true);
       expect(result.prUrl).toBe('https://github.com/test/repo/pull/42');
-      expect(mockQuery).toHaveBeenCalledTimes(6);
+      expect(mockCreateAgentSession).toHaveBeenCalledTimes(6);
 
       const allWaves: WaveName[] = ['assess', 'spec', 'test', 'impl', 'quality', 'review', 'ship'];
       expect(result.state.completedWaves).toEqual(allWaves);
       expect(result.state.status).toBe('completed');
     });
 
-    it('passes wave-specific prompts through to query()', async () => {
-      setupQuerySequence(happyPathResponses());
+    it('passes wave-specific user messages through to session.prompt()', async () => {
+      setupResponseSequence(happyPathResponses());
 
       await fix({
         issue: makeIssue(7),
@@ -225,16 +272,14 @@ describe('fix — E2E with mock SDK', () => {
         config: makeConfig(),
       });
 
-      const firstCallPrompt = mockQuery.mock.calls[0]?.[0]?.prompt as string;
-      expect(firstCallPrompt).toContain('Issue #7');
-      expect(firstCallPrompt).toContain('Test issue 7');
+      expect(allPrompts[0]).toContain('Issue #7');
+      expect(allPrompts[0]).toContain('Test issue 7');
 
-      const secondCallPrompt = mockQuery.mock.calls[1]?.[0]?.prompt as string;
-      expect(secondCallPrompt).toContain('Assessment');
+      expect(allPrompts[1]).toContain('Assessment');
     });
 
     it('uses correct model tiers per wave', async () => {
-      setupQuerySequence(happyPathResponses());
+      setupResponseSequence(happyPathResponses());
 
       await fix({
         issue: makeIssue(7),
@@ -243,7 +288,9 @@ describe('fix — E2E with mock SDK', () => {
         config: makeConfig(),
       });
 
-      const models = mockQuery.mock.calls.map((c) => (c[0] as { options: { model: string } }).options.model);
+      const models = mockCreateAgentSession.mock.calls.map(
+        (c: unknown[]) => (c[0] as { model: { id: string } }).model.id,
+      );
       expect(models[0]).toBe('claude-opus-4-6');
       expect(models[1]).toBe('claude-opus-4-6');
       expect(models[2]).toBe('claude-sonnet-4-6');
@@ -253,7 +300,7 @@ describe('fix — E2E with mock SDK', () => {
     });
 
     it('accumulates cost across waves in state', async () => {
-      setupQuerySequence(happyPathResponses());
+      setupResponseSequence(happyPathResponses());
 
       const result = await fix({
         issue: makeIssue(7),
@@ -274,7 +321,7 @@ describe('fix — E2E with mock SDK', () => {
 
   describe('checkpoint saves after each wave', () => {
     it('persists checkpoint to disk after every AI wave', async () => {
-      setupQuerySequence(happyPathResponses());
+      setupResponseSequence(happyPathResponses());
 
       await fix({
         issue: makeIssue(7),
@@ -290,7 +337,7 @@ describe('fix — E2E with mock SDK', () => {
     });
 
     it('writes checkpoint file with correct structure', async () => {
-      setupQuerySequence(happyPathResponses());
+      setupResponseSequence(happyPathResponses());
 
       await fix({
         issue: makeIssue(7),
@@ -323,7 +370,7 @@ describe('fix — E2E with mock SDK', () => {
     });
 
     it('preserves structured output in wave artifacts', async () => {
-      setupQuerySequence(happyPathResponses());
+      setupResponseSequence(happyPathResponses());
 
       const result = await fix({
         issue: makeIssue(7),
@@ -351,7 +398,7 @@ describe('fix — E2E with mock SDK', () => {
 
   describe('worktree creation and cleanup', () => {
     it('creates worktree when isolation=worktree and cleans up on success', async () => {
-      setupQuerySequence(happyPathResponses());
+      setupResponseSequence(happyPathResponses());
       mockCreateWorktree.mockResolvedValue({ path: workDir, branch: 'kova/fix-7' });
 
       const result = await fix({
@@ -369,7 +416,7 @@ describe('fix — E2E with mock SDK', () => {
     });
 
     it('does NOT create worktree when isolation=none', async () => {
-      setupQuerySequence(happyPathResponses());
+      setupResponseSequence(happyPathResponses());
 
       await fix({
         issue: makeIssue(7),
@@ -385,12 +432,7 @@ describe('fix — E2E with mock SDK', () => {
     it('keeps worktree on failure for debugging', async () => {
       const wtDir = await mkdtemp(join(tmpdir(), 'kova-wt-'));
       try {
-        let callIndex = 0;
-        mockQuery.mockImplementation(() => {
-          const i = callIndex++;
-          if (i === 0) return mockQueryGenerator({ structuredOutput: ASSESS_PASS, cost: 0.1 });
-          return mockQueryGenerator({ error: 'authentication_failed' });
-        });
+        setupResponseSequence([{ structuredOutput: ASSESS_PASS, cost: 0.1 }, { error: 'authentication failed' }]);
         mockCreateWorktree.mockResolvedValue({ path: wtDir, branch: 'kova/fix-7' });
 
         const result = await fix({
@@ -407,12 +449,12 @@ describe('fix — E2E with mock SDK', () => {
       } finally {
         await rm(wtDir, { recursive: true, force: true });
       }
-    }, 20_000);
+    });
   });
 
   describe('PR creation', () => {
     it('creates PR with correct title, body, and branch', async () => {
-      setupQuerySequence(happyPathResponses());
+      setupResponseSequence(happyPathResponses());
 
       await fix({
         issue: makeIssue(7),
@@ -432,7 +474,7 @@ describe('fix — E2E with mock SDK', () => {
     });
 
     it('includes open PRs in PR body', async () => {
-      setupQuerySequence(happyPathResponses());
+      setupResponseSequence(happyPathResponses());
       mockListOpenPRs.mockResolvedValue(['#10: Other fix (kova/fix-10)', '#11: Another fix (kova/fix-11)']);
 
       await fix({
@@ -448,7 +490,7 @@ describe('fix — E2E with mock SDK', () => {
     });
 
     it('skips PR when no changes committed', async () => {
-      setupQuerySequence(happyPathResponses());
+      setupResponseSequence(happyPathResponses());
       mockCommitAndPush.mockResolvedValue({ committed: false, filesStaged: [] });
 
       const result = await fix({
@@ -464,7 +506,7 @@ describe('fix — E2E with mock SDK', () => {
     });
 
     it('calls commitAndPush with correct branch from worktree', async () => {
-      setupQuerySequence(happyPathResponses());
+      setupResponseSequence(happyPathResponses());
       mockCreateWorktree.mockResolvedValue({ path: workDir, branch: 'kova/fix-7' });
 
       await fix({
@@ -484,7 +526,7 @@ describe('fix — E2E with mock SDK', () => {
 
   describe('assess gate', () => {
     it('stops pipeline when assess says should_proceed=false', async () => {
-      setupQuerySequence([{ structuredOutput: ASSESS_FAIL, cost: 0.05 }]);
+      setupResponseSequence([{ structuredOutput: ASSESS_FAIL, cost: 0.05 }]);
 
       const result = await fix({
         issue: makeIssue(7),
@@ -496,7 +538,7 @@ describe('fix — E2E with mock SDK', () => {
 
       expect(result.success).toBe(false);
       expect(result.error).toContain('graded F');
-      expect(mockQuery).toHaveBeenCalledTimes(1);
+      expect(mockCreateAgentSession).toHaveBeenCalledTimes(1);
       expect(result.state.completedWaves).toEqual(['assess']);
       expect(mockCommitAndPush).not.toHaveBeenCalled();
       expect(mockCreatePR).not.toHaveBeenCalled();
@@ -505,7 +547,7 @@ describe('fix — E2E with mock SDK', () => {
 
   describe('review loop', () => {
     it('re-runs impl + quality when review returns needs_fixes', async () => {
-      setupQuerySequence([
+      setupResponseSequence([
         { structuredOutput: ASSESS_PASS, cost: 0.1 },
         { structuredOutput: SPEC_RESULT, cost: 0.08 },
         { result: 'Tests written', cost: 0.06 },
@@ -524,22 +566,17 @@ describe('fix — E2E with mock SDK', () => {
       });
 
       expect(result.success).toBe(true);
-      expect(mockQuery).toHaveBeenCalledTimes(8);
+      expect(mockCreateAgentSession).toHaveBeenCalledTimes(8);
 
-      const reimplPrompt = mockQuery.mock.calls[6]?.[0]?.prompt as string;
-      expect(reimplPrompt).toContain('review findings');
-      expect(reimplPrompt).toContain('Unused import');
+      // The 7th prompt (index 6) is the re-impl with review findings
+      expect(allPrompts[6]).toContain('review findings');
+      expect(allPrompts[6]).toContain('Unused import');
     });
   });
 
   describe('failure handling', () => {
     it('saves failed state to checkpoint when wave throws', async () => {
-      let callIndex = 0;
-      mockQuery.mockImplementation(() => {
-        const i = callIndex++;
-        if (i === 0) return mockQueryGenerator({ structuredOutput: ASSESS_PASS, cost: 0.1 });
-        return mockQueryGenerator({ error: 'authentication_failed' });
-      });
+      setupResponseSequence([{ structuredOutput: ASSESS_PASS, cost: 0.1 }, { error: 'authentication failed' }]);
 
       const result = await fix({
         issue: makeIssue(7),
@@ -554,20 +591,15 @@ describe('fix — E2E with mock SDK', () => {
       const checkpoint = await loadCheckpoint(workDir);
       expect(checkpoint?.status).toBe('failed');
       expect(checkpoint?.error).toBeDefined();
-    }, 20_000);
+    });
 
     it('records partial progress in checkpoint on mid-pipeline failure', async () => {
-      const successResponses: WaveResponse[] = [
+      setupResponseSequence([
         { structuredOutput: ASSESS_PASS },
         { structuredOutput: SPEC_RESULT },
         { result: 'Tests written' },
-      ];
-      let callIndex = 0;
-      mockQuery.mockImplementation(() => {
-        const i = callIndex++;
-        if (i < successResponses.length) return mockQueryGenerator(successResponses[i]!);
-        return mockQueryGenerator({ error: 'authentication_failed' });
-      });
+        { error: 'authentication failed' },
+      ]);
 
       const result = await fix({
         issue: makeIssue(7),
@@ -583,6 +615,6 @@ describe('fix — E2E with mock SDK', () => {
       expect(checkpoint?.completedWaves).toContain('spec');
       expect(checkpoint?.completedWaves).toContain('test');
       expect(checkpoint?.completedWaves).not.toContain('impl');
-    }, 20_000);
+    });
   });
 });
