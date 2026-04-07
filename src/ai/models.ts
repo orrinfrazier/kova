@@ -1,4 +1,4 @@
-import { getModel, type Model } from '@mariozechner/pi-ai';
+import { getModel, getProviders, type Model, registerBuiltInApiProviders } from '@mariozechner/pi-ai';
 import type { ModelTier } from '../types/index.js';
 import { KovaError } from './errors.js';
 
@@ -8,19 +8,60 @@ const DEFAULT_MODELS: Readonly<Record<ModelTier, string>> = {
   large: 'claude-opus-4-6',
 };
 
+let providersRegistered = false;
+
+function ensureProviders(): void {
+  if (!providersRegistered) {
+    registerBuiltInApiProviders();
+    providersRegistered = true;
+  }
+}
+
 export type { Model };
 
-export function resolveModel(tier: ModelTier = 'medium'): Model<string> {
-  const modelId = resolveModelId(tier);
-  // modelId may come from env vars, so cast to satisfy getModel's union type
-  const model = getModel('anthropic', modelId as Parameters<typeof getModel>[1]);
+export interface ModelSpec {
+  provider: string;
+  modelId: string;
+}
+
+let _knownProviders: Set<string> | undefined;
+function knownProviders(): Set<string> {
+  if (!_knownProviders) {
+    ensureProviders();
+    _knownProviders = new Set(getProviders());
+  }
+  return _knownProviders;
+}
+
+export function parseModelSpec(modelString: string): ModelSpec {
+  const colonIndex = modelString.indexOf(':');
+  if (colonIndex > 0) {
+    const candidate = modelString.slice(0, colonIndex);
+    if (knownProviders().has(candidate)) {
+      return { provider: candidate, modelId: modelString.slice(colonIndex + 1) };
+    }
+  }
+  // No recognized provider prefix — default to anthropic
+  return { provider: 'anthropic', modelId: modelString };
+}
+
+export function resolveModelFromString(modelString: string): Model<string> {
+  ensureProviders();
+  const { provider, modelId } = parseModelSpec(modelString);
+  const model = getModel(provider as Parameters<typeof getModel>[0], modelId as Parameters<typeof getModel>[1]);
   if (!model) {
-    throw new KovaError(`Unknown model: ${modelId} (tier=${tier})`, 'config', false);
+    throw new KovaError(`Unknown model: ${provider}:${modelId}`, 'config', false);
   }
   return model;
 }
 
-function resolveModelId(tier: ModelTier): string {
+export function resolveModel(tier: ModelTier = 'medium'): Model<string> {
+  ensureProviders();
+  const modelString = resolveModelString(tier);
+  return resolveModelFromString(modelString);
+}
+
+function resolveModelString(tier: ModelTier): string {
   switch (tier) {
     case 'small':
       return process.env.KOVA_SMALL_MODEL ?? DEFAULT_MODELS.small;
