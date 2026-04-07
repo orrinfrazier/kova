@@ -12,7 +12,7 @@ import {
 } from '@mariozechner/pi-coding-agent';
 import type { ModelTier, WaveName } from '../types/index.js';
 import { log } from '../utils/logger.js';
-import { isSpendingCapBehavior, KovaError } from './errors.js';
+import { classifyError, isSpendingCapBehavior, KovaError } from './errors.js';
 import { resolveModel } from './models.js';
 
 export interface OutputFormat {
@@ -78,12 +78,22 @@ export async function executeWave(options: WaveOptions): Promise<WaveExecutionRe
 
   let turnCount = 0;
   let aborted = false;
+  let lastErrorMessage: string | undefined;
 
   const unsubscribe = session.subscribe((event) => {
     if (event.type === 'turn_end') {
       turnCount++;
       if (turnCount % 50 === 0) {
         log.info(`[${wave}] Turn ${turnCount}...`);
+      }
+      // Detect pi-mono error events: turn_end with an assistant message carrying stopReason "error"/"aborted"
+      const msg = event.message as {
+        role?: string;
+        stopReason?: string;
+        errorMessage?: string;
+      };
+      if (msg?.role === 'assistant' && (msg.stopReason === 'error' || msg.stopReason === 'aborted')) {
+        lastErrorMessage = msg.errorMessage ?? `Agent ${msg.stopReason} during ${wave}`;
       }
     }
     if (event.type === 'tool_execution_start') {
@@ -137,6 +147,18 @@ export async function executeWave(options: WaveOptions): Promise<WaveExecutionRe
       }
     }
 
+    // Detect pi-mono errors reported via state or event subscription
+    const stateError = (session.agent.state as { errorMessage?: string }).errorMessage;
+    const piMonoError = stateError ?? lastErrorMessage;
+    if (piMonoError) {
+      const classified = classifyError(piMonoError);
+      throw new KovaError(
+        `${classified.type === 'billing' ? 'Billing/rate limit' : classified.type === 'config' ? 'Config' : 'Agent'} error during ${wave}: ${piMonoError}`,
+        classified.type,
+        classified.retryable,
+      );
+    }
+
     // Defense-in-depth: detect spending cap behavior
     if (isSpendingCapBehavior(turnCount, cost, result ?? '')) {
       throw new KovaError(`Spending cap likely reached (turns=${turnCount}, cost=$0)`, 'billing', true);
@@ -157,16 +179,17 @@ export async function executeWave(options: WaveOptions): Promise<WaveExecutionRe
       ...(structuredOutput !== undefined && { structuredOutput }),
     };
   } catch (error) {
+    // Re-throw KovaErrors (already classified from pi-mono error detection above)
+    if (error instanceof KovaError) throw error;
+
     const duration = Date.now() - startTime;
     const err = error instanceof Error ? error : new Error(String(error));
-    const errMsg = err.message.toLowerCase();
+    const classified = classifyError(err);
 
-    // Map common errors to KovaError types
-    if (/billing|rate.?limit|429|spending.?cap/i.test(errMsg)) {
-      throw new KovaError(`Billing/rate limit error during ${wave}: ${err.message}`, 'billing', true);
-    }
-    if (/authentication|401|invalid.?api.?key/i.test(errMsg)) {
-      throw new KovaError(`Authentication failed during ${wave}`, 'config', false);
+    // Throw classified retryable/config errors so callers can handle them
+    if (classified.type === 'billing' || classified.type === 'config') {
+      const label = classified.type === 'billing' ? 'Billing/rate limit' : 'Config';
+      throw new KovaError(`${label} error during ${wave}: ${err.message}`, classified.type, classified.retryable);
     }
 
     log.error(`[${wave}] Failed — ${err.message} (${(duration / 1000).toFixed(1)}s)`);

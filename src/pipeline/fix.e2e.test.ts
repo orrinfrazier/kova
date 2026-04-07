@@ -71,7 +71,10 @@ interface WaveResponse {
   cost?: number;
   model?: string;
   structuredOutput?: unknown;
+  /** Legacy: throw an Error from session.prompt() */
   error?: string;
+  /** Pi-mono style: encode error in AssistantMessage stopReason/errorMessage and state.errorMessage */
+  piMonoError?: string;
 }
 
 function createMockSession(response: WaveResponse) {
@@ -82,15 +85,34 @@ function createMockSession(response: WaveResponse) {
     ? JSON.stringify(response.structuredOutput)
     : (response.result ?? 'completed');
 
-  const assistantMessage = {
-    role: 'assistant' as const,
-    content: [{ type: 'text' as const, text: textResult }],
-    usage: { cost: { total: response.cost ?? 0.05 } },
-  };
+  const hasError = response.error ?? response.piMonoError;
 
-  const messages = response.error
-    ? []
+  // Pi-mono error shape: assistant message with stopReason "error" and errorMessage
+  const assistantMessage = response.piMonoError
+    ? {
+        role: 'assistant' as const,
+        content: [{ type: 'text' as const, text: '' }],
+        usage: { cost: { total: 0 } },
+        stopReason: 'error' as const,
+        errorMessage: response.piMonoError,
+      }
+    : {
+        role: 'assistant' as const,
+        content: [{ type: 'text' as const, text: textResult }],
+        usage: { cost: { total: response.cost ?? 0.05 } },
+      };
+
+  const messages = hasError
+    ? (response.piMonoError
+        ? [{ role: 'user' as const, content: [{ type: 'text', text: 'prompt' }] }, assistantMessage]
+        : [])
     : [{ role: 'user' as const, content: [{ type: 'text', text: 'prompt' }] }, assistantMessage];
+
+  // State mirrors pi-mono: errorMessage is set when the last turn had an error
+  const state: Record<string, unknown> = { messages };
+  if (response.piMonoError) {
+    state.errorMessage = response.piMonoError;
+  }
 
   const mockPrompt = vi.fn(async (_userMessage?: string) => {
     if (response.error) {
@@ -107,7 +129,7 @@ function createMockSession(response: WaveResponse) {
       return () => {};
     }),
     prompt: mockPrompt,
-    agent: { state: { messages } },
+    agent: { state },
     abort: vi.fn(async () => {}),
     dispose: vi.fn(),
   };
@@ -614,6 +636,90 @@ describe('fix — E2E with mock pi-mono', () => {
       expect(checkpoint?.completedWaves).toContain('spec');
       expect(checkpoint?.completedWaves).toContain('test');
       expect(checkpoint?.completedWaves).not.toContain('impl');
+    });
+  });
+
+  describe('pi-mono error handling', () => {
+    it('detects pi-mono error via state.errorMessage (billing)', async () => {
+      setupResponseSequence([
+        { structuredOutput: ASSESS_PASS, cost: 0.1 },
+        { piMonoError: 'rate limit exceeded, retry after 30s' },
+      ]);
+
+      const result = await fix({
+        issue: makeIssue(7),
+        repoPath: workDir,
+        repoName: 'test-repo',
+        config: makeConfig(),
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.state.status).toBe('failed');
+      expect(result.error).toContain('rate limit');
+    });
+
+    it('detects pi-mono error via state.errorMessage (auth)', async () => {
+      setupResponseSequence([
+        { structuredOutput: ASSESS_PASS, cost: 0.1 },
+        { piMonoError: 'authentication failed: invalid token' },
+      ]);
+
+      const result = await fix({
+        issue: makeIssue(7),
+        repoPath: workDir,
+        repoName: 'test-repo',
+        config: makeConfig(),
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.state.status).toBe('failed');
+      expect(result.error).toContain('authentication');
+    });
+
+    it('preserves partial progress with pi-mono errors', async () => {
+      setupResponseSequence([
+        { structuredOutput: ASSESS_PASS },
+        { structuredOutput: SPEC_RESULT },
+        { result: 'Tests written' },
+        { piMonoError: 'spending cap reached for workspace' },
+      ]);
+
+      const result = await fix({
+        issue: makeIssue(7),
+        repoPath: workDir,
+        repoName: 'test-repo',
+        config: makeConfig(),
+      });
+
+      expect(result.success).toBe(false);
+
+      const checkpoint = await loadCheckpoint(workDir);
+      expect(checkpoint?.completedWaves).toContain('assess');
+      expect(checkpoint?.completedWaves).toContain('spec');
+      expect(checkpoint?.completedWaves).toContain('test');
+      expect(checkpoint?.completedWaves).not.toContain('impl');
+      expect(checkpoint?.error).toContain('spending cap');
+    });
+
+    it('keeps worktree on pi-mono error for debugging', async () => {
+      const wtDir = await mkdtemp(join(tmpdir(), 'kova-wt-'));
+      try {
+        setupResponseSequence([{ structuredOutput: ASSESS_PASS, cost: 0.1 }, { piMonoError: 'authentication failed' }]);
+        mockCreateWorktree.mockResolvedValue({ path: wtDir, branch: 'kova/fix-7' });
+
+        const result = await fix({
+          issue: makeIssue(7),
+          repoPath: '/tmp/test-repo',
+          repoName: 'test-repo',
+          config: makeConfig({ isolation: 'worktree' }),
+        });
+
+        expect(result.success).toBe(false);
+        expect(result.state.status).toBe('failed');
+        expect(mockRemoveWorktree).not.toHaveBeenCalled();
+      } finally {
+        await rm(wtDir, { recursive: true, force: true });
+      }
     });
   });
 });
