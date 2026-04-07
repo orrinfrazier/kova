@@ -27,6 +27,7 @@ import {
   resolveRepoConfig,
 } from '../services/config.js';
 import { createIssue, fetchIssue, hasExistingWork } from '../services/github.js';
+import { collectChangedFiles, reindexFiles } from '../services/reindex.js';
 import {
   exitCodeForSignal,
   getShutdownSignal,
@@ -335,6 +336,49 @@ program
       console.log(JSON.stringify(result, null, 2));
     } else {
       printStatusDashboard(result);
+    }
+  });
+
+program
+  .command('reindex')
+  .description('Re-embed changed files in the vector DB')
+  .option('--repo <name-or-path>', 'Repository name or path', '.')
+  .option('--base <branch>', 'Base branch for diff', 'main')
+  .option('--full', 'Reindex all tracked files (not just changed)')
+  .action(async (opts: { repo?: string; base?: string; full?: boolean }) => {
+    const kovaConfig = await tryLoadConfig(program.opts().config);
+    const { repoPath, repoName, config } = resolveRepo(opts.repo ?? '.', kovaConfig);
+
+    if (!config.vectordb?.enabled) {
+      console.error(`Vector DB not enabled for ${repoName}. Set vectordb.enabled: true in repos.yaml`);
+      process.exit(1);
+    }
+
+    let files: string[];
+    if (opts.full) {
+      log.info(`[reindex] Full reindex for ${repoName} — collecting all tracked files...`);
+      const { $ } = await import('zx');
+      $.verbose = false;
+      const result = await $`git -C ${repoPath} ls-files`;
+      files = result.stdout.trim().split('\n').filter(Boolean);
+    } else {
+      log.info(`[reindex] Incremental reindex for ${repoName} — diffing against ${opts.base}...`);
+      files = await collectChangedFiles(repoPath, opts.base);
+    }
+
+    if (files.length === 0) {
+      log.info('No files to reindex.');
+      return;
+    }
+
+    log.info(`Reindexing ${files.length} files...`);
+    const result = await reindexFiles(config.vectordb, repoPath, files);
+
+    if (result.success) {
+      log.info(`Reindex complete: ${result.filesSubmitted} files, ${result.apiCalls} API calls (${result.duration}ms)`);
+    } else {
+      log.error(`Reindex failed: ${result.error}`);
+      process.exit(1);
     }
   });
 
