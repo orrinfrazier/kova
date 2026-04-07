@@ -18,7 +18,7 @@ vi.mock('node:fs/promises', () => ({
 }));
 
 // Dynamic import after mocks
-const { gatherRepoStatus, gatherStatus, formatStatusTable } = await import('./status.js');
+const { gatherRepoStatus, gatherStatus, formatStatusTable, formatQueueTable } = await import('./status.js');
 
 const SAMPLE_CONFIG: KovaConfig = {
   repos: {
@@ -287,5 +287,120 @@ describe('formatStatusTable', () => {
     // Should show a relative time like "0s ago", not a raw ISO string
     expect(table).not.toContain(now.toISOString());
     expect(table).toContain('ago');
+  });
+
+  it('includes queue table when queue status is provided', () => {
+    const result = {
+      repos: [],
+      totalSpend: 0,
+      queue: {
+        entries: [
+          {
+            request: { issueNumber: 5, repoPath: '/tmp', repoName: 'repo', score: 80, blockedBy: [] },
+            status: 'running' as const,
+            consecutiveFailures: 0,
+          },
+          {
+            request: { issueNumber: 10, repoPath: '/tmp', repoName: 'repo', score: 60, blockedBy: [5] },
+            status: 'blocked' as const,
+            consecutiveFailures: 0,
+          },
+        ],
+        activeSlots: 1,
+        maxSlots: 3,
+        completedCount: 2,
+        failedCount: 0,
+        skippedCount: 1,
+      },
+    };
+
+    const table = formatStatusTable(result);
+
+    expect(table).toContain('Queue (1/3 slots active)');
+    expect(table).toContain('#5');
+    expect(table).toContain('#10');
+    expect(table).toContain('running');
+    expect(table).toContain('blocked');
+    expect(table).toContain('2 completed');
+    expect(table).toContain('1 skipped');
+  });
+
+  it('does not include queue section when queue is undefined', () => {
+    const result = {
+      repos: [],
+      totalSpend: 0,
+    };
+
+    const table = formatStatusTable(result);
+
+    expect(table).not.toContain('Queue');
+  });
+});
+
+describe('formatQueueTable', () => {
+  it('shows empty message for empty queue', () => {
+    const table = formatQueueTable({
+      entries: [],
+      activeSlots: 0,
+      maxSlots: 2,
+      completedCount: 0,
+      failedCount: 0,
+      skippedCount: 0,
+    });
+
+    expect(table).toContain('(empty)');
+    expect(table).toContain('Queue (0/2 slots active)');
+  });
+
+  it('renders entries with headers', () => {
+    const table = formatQueueTable({
+      entries: [
+        {
+          request: { issueNumber: 1, repoPath: '/tmp', repoName: 'repo', score: 90, blockedBy: [] },
+          status: 'completed' as const,
+          consecutiveFailures: 0,
+        },
+        {
+          request: { issueNumber: 2, repoPath: '/tmp', repoName: 'repo', score: 50, blockedBy: [1] },
+          status: 'waiting' as const,
+          consecutiveFailures: 0,
+        },
+      ],
+      activeSlots: 0,
+      maxSlots: 2,
+      completedCount: 1,
+      failedCount: 0,
+      skippedCount: 0,
+    });
+
+    expect(table).toContain('Issue');
+    expect(table).toContain('Score');
+    expect(table).toContain('Status');
+    expect(table).toContain('Failures');
+    expect(table).toContain('Blocked By');
+    expect(table).toContain('#1');
+    expect(table).toContain('#2');
+    expect(table).toContain('1 completed');
+  });
+
+  it('shows consecutive failure count', () => {
+    const table = formatQueueTable({
+      entries: [
+        {
+          request: { issueNumber: 7, repoPath: '/tmp', repoName: 'repo', score: 40, blockedBy: [] },
+          status: 'skipped' as const,
+          consecutiveFailures: 3,
+        },
+      ],
+      activeSlots: 0,
+      maxSlots: 1,
+      completedCount: 0,
+      failedCount: 0,
+      skippedCount: 1,
+    });
+
+    expect(table).toContain('3');
+    expect(table).toContain('skipped');
+    expect(table).toContain('1 skipped');
   });
 });
