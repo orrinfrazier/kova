@@ -230,7 +230,7 @@ program
     const focus = opts.focus ? opts.focus.split(',').map((s) => s.trim()) : undefined;
 
     log.info('Brainstorming issues...');
-    const result = await brainstorm({ repoPath, config, threshold, focus });
+    const result = await brainstorm({ repoPath, config, threshold, focus, kovaConfig });
     printBrainstormPreview(result);
 
     if (!result.success) {

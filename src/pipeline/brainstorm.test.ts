@@ -16,6 +16,15 @@ vi.mock('./prompts.js', () => ({
   loadPrompt: vi.fn().mockResolvedValue('You are brainstorming issues.'),
 }));
 
+// --- Mock cross-repo issues ---
+
+const mockFetchCrossRepoIssues = vi.fn();
+const mockFormatCrossRepoContext = vi.fn();
+vi.mock('../services/cross-repo-issues.js', () => ({
+  fetchCrossRepoIssues: (...args: unknown[]) => mockFetchCrossRepoIssues(...args),
+  formatCrossRepoContext: (...args: unknown[]) => mockFormatCrossRepoContext(...args),
+}));
+
 // --- Mock brainstorm history ---
 
 const mockLoadHistory = vi.fn();
@@ -93,10 +102,15 @@ describe('brainstorm', () => {
     mockLoadHistory.mockReset();
     mockAppendCycle.mockReset();
     mockDetectDiminishingReturns.mockReset();
+    mockFetchCrossRepoIssues.mockReset();
+    mockFormatCrossRepoContext.mockReset();
     // Default: empty history, no overlap
     mockLoadHistory.mockResolvedValue(EMPTY_HISTORY);
     mockAppendCycle.mockResolvedValue(undefined);
     mockDetectDiminishingReturns.mockReturnValue(NO_OVERLAP_REPORT);
+    // Default: no cross-repo issues
+    mockFetchCrossRepoIssues.mockResolvedValue([]);
+    mockFormatCrossRepoContext.mockReturnValue('');
   });
 
   it('spawns a single agent wave with opus (large) model', async () => {
@@ -331,5 +345,72 @@ describe('brainstorm', () => {
 
     expect(mockLoadHistory).not.toHaveBeenCalled();
     expect(mockAppendCycle).not.toHaveBeenCalled();
+  });
+
+  // --- Cross-repo issue awareness ---
+
+  describe('cross-repo issue awareness', () => {
+    const MULTI_REPO_CONFIG = {
+      repos: {
+        current: { path: '/tmp/repo' },
+        sibling: { path: '/tmp/sibling' },
+      },
+    };
+
+    it('fetches cross-repo issues when kovaConfig is provided', async () => {
+      mockSpawnWaveAgent.mockResolvedValueOnce(makeBrainstormHandoff(SAMPLE_ISSUES));
+      mockFetchCrossRepoIssues.mockResolvedValue([]);
+      mockFormatCrossRepoContext.mockReturnValue('');
+
+      await brainstorm({ repoPath: '/tmp/repo', config: DEFAULT_CONFIG, kovaConfig: MULTI_REPO_CONFIG });
+
+      expect(mockFetchCrossRepoIssues).toHaveBeenCalledWith('/tmp/repo', MULTI_REPO_CONFIG);
+    });
+
+    it('injects cross-repo context into the agent user message', async () => {
+      const crossRepoContext = '\n\nThese issues already exist in related repos:\n- repo-b: Fix auth bug [bug]';
+      mockFormatCrossRepoContext.mockReturnValue(crossRepoContext);
+      mockFetchCrossRepoIssues.mockResolvedValue([
+        { repo: 'repo-b', issues: [{ title: 'Fix auth bug', labels: ['bug'] }] },
+      ]);
+      mockSpawnWaveAgent.mockResolvedValueOnce(makeBrainstormHandoff(SAMPLE_ISSUES));
+
+      await brainstorm({ repoPath: '/tmp/repo', config: DEFAULT_CONFIG, kovaConfig: MULTI_REPO_CONFIG });
+
+      const callConfig = mockSpawnWaveAgent.mock.calls[0]?.[0] as Record<string, unknown>;
+      const userMessage = callConfig.userMessage as string;
+      expect(userMessage).toContain('already exist in related repos');
+      expect(userMessage).toContain('Fix auth bug');
+    });
+
+    it('does not inject context when there are no cross-repo issues', async () => {
+      mockFetchCrossRepoIssues.mockResolvedValue([]);
+      mockFormatCrossRepoContext.mockReturnValue('');
+      mockSpawnWaveAgent.mockResolvedValueOnce(makeBrainstormHandoff(SAMPLE_ISSUES));
+
+      await brainstorm({ repoPath: '/tmp/repo', config: DEFAULT_CONFIG, kovaConfig: MULTI_REPO_CONFIG });
+
+      const callConfig = mockSpawnWaveAgent.mock.calls[0]?.[0] as Record<string, unknown>;
+      const userMessage = callConfig.userMessage as string;
+      expect(userMessage).not.toContain('already exist in related repos');
+    });
+
+    it('does not fetch cross-repo issues when no kovaConfig provided', async () => {
+      mockSpawnWaveAgent.mockResolvedValueOnce(makeBrainstormHandoff(SAMPLE_ISSUES));
+
+      await brainstorm({ repoPath: '/tmp/repo', config: DEFAULT_CONFIG });
+
+      expect(mockFetchCrossRepoIssues).not.toHaveBeenCalled();
+    });
+
+    it('still succeeds when cross-repo fetch fails', async () => {
+      mockFetchCrossRepoIssues.mockRejectedValue(new Error('network error'));
+      mockSpawnWaveAgent.mockResolvedValueOnce(makeBrainstormHandoff(SAMPLE_ISSUES));
+
+      const result = await brainstorm({ repoPath: '/tmp/repo', config: DEFAULT_CONFIG, kovaConfig: MULTI_REPO_CONFIG });
+
+      expect(result.success).toBe(true);
+      expect(result.issues).toHaveLength(1);
+    });
   });
 });
