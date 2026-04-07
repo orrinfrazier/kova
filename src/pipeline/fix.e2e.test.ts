@@ -48,6 +48,13 @@ const REVIEW_PASS = {
   summary: 'Looks good',
 };
 
+const IMPL_PASS = {
+  files_modified: ['src/handler.ts'],
+  files_created: [],
+  tests_passing: true,
+  approach_notes: 'Implementation complete, all tests passing',
+};
+
 const REVIEW_NEEDS_FIXES = {
   verdict: 'needs_fixes',
   findings: [
@@ -135,7 +142,7 @@ function happyPathResponses(): WaveResponse[] {
     { structuredOutput: ASSESS_PASS, cost: 0.1 },
     { structuredOutput: SPEC_RESULT, cost: 0.08 },
     { result: 'Tests written: 3 test files', cost: 0.06 },
-    { result: 'Implementation complete, all tests passing', cost: 0.07 },
+    { structuredOutput: IMPL_PASS, cost: 0.07 },
     { result: 'All quality gates pass', cost: 0.02 },
     { structuredOutput: REVIEW_PASS, cost: 0.09 },
   ];
@@ -419,7 +426,9 @@ describe('fix — E2E with mock pi-mono', () => {
       expect(review.verdict).toBe('pass');
 
       expect(result.state.waveResults.test?.artifact).toBe('Tests written: 3 test files');
-      expect(result.state.waveResults.impl?.artifact).toBe('Implementation complete, all tests passing');
+      const implArtifact = result.state.waveResults.impl?.artifact as typeof IMPL_PASS;
+      expect(implArtifact.tests_passing).toBe(true);
+      expect(implArtifact.files_modified).toContain('src/handler.ts');
     });
   });
 
@@ -578,10 +587,10 @@ describe('fix — E2E with mock pi-mono', () => {
         { structuredOutput: ASSESS_PASS, cost: 0.1 },
         { structuredOutput: SPEC_RESULT, cost: 0.08 },
         { result: 'Tests written', cost: 0.06 },
-        { result: 'Implemented', cost: 0.07 },
+        { structuredOutput: IMPL_PASS, cost: 0.07 },
         { result: 'Quality OK', cost: 0.02 },
         { structuredOutput: REVIEW_NEEDS_FIXES, cost: 0.09 },
-        { result: 'Fixed unused import', cost: 0.03 },
+        { structuredOutput: IMPL_PASS, cost: 0.03 },
         { result: 'Quality OK after fixes', cost: 0.02 },
       ]);
 
