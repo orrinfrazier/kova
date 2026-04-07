@@ -137,6 +137,8 @@ export interface WaveResult {
   turns: number;
   model?: string | undefined;
   provider?: string | undefined;
+  fallback_used?: boolean | undefined;
+  local_attempt_cost?: number | undefined;
 }
 
 export interface FailedPiece {

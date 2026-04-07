@@ -17,6 +17,8 @@ export const WaveHandoffSchema = z.object({
   confidence: z.enum(['high', 'medium', 'low']),
   artifact: z.unknown(),
   approach_notes: z.string(),
+  fallback_used: z.boolean().optional(),
+  local_attempt_cost: z.number().optional(),
 });
 
 export type WaveHandoff<T = unknown> = Omit<z.infer<typeof WaveHandoffSchema>, 'artifact'> & {
