@@ -1,12 +1,24 @@
-// Core wave executor — wraps Agent SDK query() for each pipeline wave.
-// Based on Shannon's claude-executor.ts pattern: stream messages, handle errors,
-// detect billing issues, return typed results.
+// Core wave executor — wraps pi-mono createAgentSession for each pipeline wave.
+// Each wave creates a fresh in-memory session, sends a prompt, and collects results.
 
-import { type JsonSchemaOutputFormat, query } from '@anthropic-ai/claude-agent-sdk';
+import {
+  AuthStorage,
+  createAgentSession,
+  createCodingTools,
+  DefaultResourceLoader,
+  ModelRegistry,
+  SessionManager,
+  SettingsManager,
+} from '@mariozechner/pi-coding-agent';
 import type { ModelTier, WaveName } from '../types/index.js';
 import { log } from '../utils/logger.js';
 import { isSpendingCapBehavior, KovaError } from './errors.js';
 import { resolveModel } from './models.js';
+
+export interface OutputFormat {
+  type: 'json_schema';
+  schema: Record<string, unknown>;
+}
 
 export interface WaveOptions {
   wave: WaveName;
@@ -14,7 +26,7 @@ export interface WaveOptions {
   userMessage: string;
   cwd: string;
   modelTier: ModelTier;
-  outputFormat?: JsonSchemaOutputFormat;
+  outputFormat?: OutputFormat;
   maxTurns?: number;
 }
 
@@ -34,73 +46,98 @@ export async function executeWave(options: WaveOptions): Promise<WaveExecutionRe
   const model = resolveModel(modelTier);
   const startTime = Date.now();
 
-  log.info(`[${wave}] Starting wave — model=${model}, cwd=${cwd}`);
+  log.info(`[${wave}] Starting wave — model=${model.id}, cwd=${cwd}`);
 
-  const sdkOptions = {
-    model,
-    maxTurns,
+  const authStorage = AuthStorage.create();
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (apiKey) {
+    authStorage.setRuntimeApiKey('anthropic', apiKey);
+  }
+
+  const effectiveSystemPrompt = outputFormat
+    ? `${systemPrompt}\n\n${buildStructuredOutputInstructions(outputFormat.schema)}`
+    : systemPrompt;
+
+  const loader = new DefaultResourceLoader({
     cwd,
-    permissionMode: 'bypassPermissions' as const,
-    allowDangerouslySkipPermissions: true,
-    settingSources: ['user'] as ('user' | 'project' | 'local')[],
-    env: buildEnv(),
-    ...(outputFormat && { outputFormat }),
-  };
+    systemPromptOverride: () => effectiveSystemPrompt,
+  });
+  await loader.reload();
 
-  const fullPrompt = `${systemPrompt}\n\n${userMessage}`;
+  const { session } = await createAgentSession({
+    cwd,
+    model,
+    thinkingLevel: 'off',
+    tools: createCodingTools(cwd),
+    sessionManager: SessionManager.inMemory(),
+    settingsManager: SettingsManager.inMemory({ compaction: { enabled: false } }),
+    authStorage,
+    modelRegistry: ModelRegistry.inMemory(authStorage),
+    resourceLoader: loader,
+  });
 
   let turnCount = 0;
+  let aborted = false;
+
+  const unsubscribe = session.subscribe((event) => {
+    if (event.type === 'turn_end') {
+      turnCount++;
+      if (turnCount % 50 === 0) {
+        log.info(`[${wave}] Turn ${turnCount}...`);
+      }
+    }
+    if (event.type === 'tool_execution_start') {
+      log.debug(`[${wave}] Tool: ${event.toolName}`);
+    }
+    // Enforce max turns
+    if (event.type === 'turn_end' && turnCount >= maxTurns && !aborted) {
+      aborted = true;
+      log.warn(`[${wave}] Max turns (${maxTurns}) reached, aborting`);
+      session.abort().catch(() => {});
+    }
+  });
+
   let result: string | null = null;
   let cost = 0;
-  let detectedModel: string | undefined;
   let structuredOutput: unknown | undefined;
 
   try {
-    for await (const message of query({ prompt: fullPrompt, options: sdkOptions })) {
-      const msg = message as {
-        type: string;
-        subtype?: string;
-        result?: string;
-        total_cost_usd?: number;
-        model?: string;
-        stop_reason?: string | null;
-        structured_output?: unknown;
-        error?: string;
-        message?: { content: unknown };
-      };
+    await session.prompt(userMessage);
 
-      if (msg.type === 'assistant') {
-        turnCount++;
-        if (turnCount % 50 === 0) {
-          log.info(`[${wave}] Turn ${turnCount}...`);
-        }
-
-        // Check for SDK-reported errors on assistant messages
-        if (msg.error) {
-          handleSdkError(wave, msg.error);
-        }
-      }
-
-      if (msg.type === 'system' && msg.subtype === 'init' && msg.model) {
-        detectedModel = msg.model;
-      }
-
-      if (msg.type === 'tool_use') {
-        const toolMsg = msg as { type: string; name?: string };
-        log.debug(`[${wave}] Tool: ${toolMsg.name ?? 'unknown'}`);
-      }
-
-      if (msg.type === 'result') {
-        result = msg.result ?? null;
-        cost = msg.total_cost_usd ?? 0;
-        if (msg.structured_output !== undefined) {
-          structuredOutput = msg.structured_output;
-        }
-        break;
+    // Extract cost from all assistant messages
+    const messages = session.agent.state.messages;
+    for (const msg of messages) {
+      if (msg.role === 'assistant') {
+        const assistantMsg = msg as {
+          role: 'assistant';
+          usage?: { cost?: { total?: number } };
+          content?: Array<{ type: string; text?: string }>;
+        };
+        cost += assistantMsg.usage?.cost?.total ?? 0;
       }
     }
 
-    // Defense-in-depth: detect spending cap that slipped through
+    // Get the final assistant text
+    const lastAssistant = [...messages].reverse().find((m) => m.role === 'assistant');
+    if (lastAssistant) {
+      const textContent = (lastAssistant as { content?: Array<{ type: string; text?: string }> }).content;
+      if (textContent) {
+        result = textContent
+          .filter((c): c is { type: 'text'; text: string } => c.type === 'text' && typeof c.text === 'string')
+          .map((c) => c.text)
+          .join('');
+      }
+    }
+
+    // Parse structured output if expected
+    if (outputFormat && result) {
+      structuredOutput = parseStructuredOutput(result);
+      if (!structuredOutput) {
+        log.warn(`[${wave}] Failed to parse structured output from response`);
+      }
+    }
+
+    // Defense-in-depth: detect spending cap behavior
     if (isSpendingCapBehavior(turnCount, cost, result ?? '')) {
       throw new KovaError(`Spending cap likely reached (turns=${turnCount}, cost=$0)`, 'billing', true);
     }
@@ -116,12 +153,21 @@ export async function executeWave(options: WaveOptions): Promise<WaveExecutionRe
       duration,
       turns: turnCount,
       cost,
-      model: detectedModel,
+      model: model.id,
       ...(structuredOutput !== undefined && { structuredOutput }),
     };
   } catch (error) {
     const duration = Date.now() - startTime;
     const err = error instanceof Error ? error : new Error(String(error));
+    const errMsg = err.message.toLowerCase();
+
+    // Map common errors to KovaError types
+    if (/billing|rate.?limit|429|spending.?cap/i.test(errMsg)) {
+      throw new KovaError(`Billing/rate limit error during ${wave}: ${err.message}`, 'billing', true);
+    }
+    if (/authentication|401|invalid.?api.?key/i.test(errMsg)) {
+      throw new KovaError(`Authentication failed during ${wave}`, 'config', false);
+    }
 
     log.error(`[${wave}] Failed — ${err.message} (${(duration / 1000).toFixed(1)}s)`);
 
@@ -131,8 +177,11 @@ export async function executeWave(options: WaveOptions): Promise<WaveExecutionRe
       duration,
       turns: turnCount,
       cost,
-      model: detectedModel,
+      model: model.id,
     };
+  } finally {
+    unsubscribe();
+    session.dispose();
   }
 }
 
@@ -149,39 +198,52 @@ export async function executeWaveWithRetry(options: WaveOptions, maxRetries: num
     }
   }
 
-  // Should not reach here, but satisfy the compiler
   throw new KovaError(`Wave ${options.wave} failed after ${maxRetries + 1} attempts`, 'agent', false);
 }
 
-function handleSdkError(wave: WaveName, errorType: string): void {
-  switch (errorType) {
-    case 'billing_error':
-    case 'rate_limit':
-      throw new KovaError(`${errorType} during ${wave}`, 'billing', true);
-    case 'authentication_failed':
-      throw new KovaError(`Authentication failed during ${wave}`, 'config', false);
-    default:
-      log.warn(`[${wave}] SDK error: ${errorType}`);
-  }
+function buildStructuredOutputInstructions(schema: Record<string, unknown>): string {
+  return [
+    '## Required Output Format',
+    '',
+    'Your FINAL message must be ONLY a valid JSON object matching this schema (no markdown fences, no explanation):',
+    '',
+    '```json',
+    JSON.stringify(schema, null, 2),
+    '```',
+    '',
+    'Return ONLY the JSON object as your final message after completing all work.',
+  ].join('\n');
 }
 
-function buildEnv(): Record<string, string> {
-  const env: Record<string, string> = {};
-  const passthrough = [
-    'ANTHROPIC_API_KEY',
-    'CLAUDE_CODE_OAUTH_TOKEN',
-    'ANTHROPIC_BASE_URL',
-    'ANTHROPIC_AUTH_TOKEN',
-    'HOME',
-    'PATH',
-  ];
+function parseStructuredOutput(text: string): unknown | undefined {
+  const trimmed = text.trim();
 
-  for (const name of passthrough) {
-    const val = process.env[name];
-    if (val) {
-      env[name] = val;
+  // Try direct parse first
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    // Not pure JSON
+  }
+
+  // Try extracting from markdown code fences
+  const fenceMatch = trimmed.match(/```(?:json)?\s*\n?([\s\S]*?)\n?\s*```/);
+  if (fenceMatch?.[1]) {
+    try {
+      return JSON.parse(fenceMatch[1].trim());
+    } catch {
+      // Not valid JSON in fence
     }
   }
 
-  return env;
+  // Try finding the last JSON object in the text
+  const jsonMatch = trimmed.match(/\{[\s\S]*\}/);
+  if (jsonMatch) {
+    try {
+      return JSON.parse(jsonMatch[0]);
+    } catch {
+      // Not valid JSON
+    }
+  }
+
+  return undefined;
 }
