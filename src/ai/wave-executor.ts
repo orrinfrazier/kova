@@ -11,6 +11,7 @@ import type { ModelTier, WaveHandoff, WaveName } from '../types/index.js';
 import { log } from '../utils/logger.js';
 import { classifyError, isSpendingCapBehavior, KovaError } from './errors.js';
 import { resolveModel, resolveModelFromString } from './models.js';
+import { isOllamaProvider, resolveOllamaApiKey } from './ollama.js';
 import { type AIWaveName, DEFAULT_THINKING_LEVELS, getWaveTools } from './wave-tools.js';
 
 export interface OutputFormat {
@@ -91,8 +92,6 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
 
   log.info(`[${wave}] Starting wave — model=${model.id}, cwd=${cwd}`);
 
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-
   const effectiveSystemPrompt = outputFormat
     ? `${systemPrompt}\n\n${buildStructuredOutputInstructions(outputFormat.schema)}`
     : systemPrompt;
@@ -108,7 +107,8 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
     },
     streamFn: streamSimple,
     convertToLlm,
-    getApiKey: () => apiKey,
+    getApiKey: (provider: string) =>
+      isOllamaProvider(provider) ? resolveOllamaApiKey() : process.env.ANTHROPIC_API_KEY,
   });
 
   let turnCount = 0;

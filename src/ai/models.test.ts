@@ -1,7 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 // Reset env vars between tests
-const ENV_KEYS = ['KOVA_SMALL_MODEL', 'KOVA_MEDIUM_MODEL', 'KOVA_LARGE_MODEL', 'OLLAMA_HOST'] as const;
+const ENV_KEYS = [
+  'KOVA_SMALL_MODEL',
+  'KOVA_MEDIUM_MODEL',
+  'KOVA_LARGE_MODEL',
+  'KOVA_OLLAMA_URL',
+  'OLLAMA_HOST',
+] as const;
 
 describe('models', () => {
   afterEach(async () => {
@@ -123,7 +129,7 @@ describe('models', () => {
     });
   });
 
-  describe('ollama models', () => {
+  describe('ollama models (config-registered)', () => {
     it('resolves a registered ollama model via ollama:modelId', async () => {
       const { registerOllamaModels, resolveModelFromString } = await import('./models.js');
 
@@ -186,12 +192,6 @@ describe('models', () => {
       expect(model.baseUrl).toBe('http://remote:11434/v1');
     });
 
-    it('throws for unregistered ollama model', async () => {
-      const { resolveModelFromString } = await import('./models.js');
-
-      expect(() => resolveModelFromString('ollama:nonexistent')).toThrow(/Unknown model/);
-    });
-
     it('can use ollama model via KOVA_SMALL_MODEL env var', async () => {
       const { registerOllamaModels, resolveModel } = await import('./models.js');
 
@@ -231,8 +231,64 @@ describe('models', () => {
 
       clearCustomModels();
 
-      // Fails after clearing
-      expect(() => resolveModelFromString('ollama:llama3')).toThrow(/Unknown model/);
+      // Falls through to createOllamaModel (on-the-fly) after clearing registry
+      const model = resolveModelFromString('ollama:llama3');
+      expect(model.id).toBe('llama3');
+      expect(model.provider).toBe('ollama');
+    });
+  });
+
+  describe('ollama model resolution (on-the-fly via env vars)', () => {
+    it('parseModelSpec recognizes ollama: prefix', async () => {
+      const { parseModelSpec } = await import('./models.js');
+
+      const spec = parseModelSpec('ollama:qwen2.5-coder:32b');
+      expect(spec).toEqual({ provider: 'ollama', modelId: 'qwen2.5-coder:32b' });
+    });
+
+    it('resolveModelFromString creates Ollama model for ollama: prefix', async () => {
+      const { resolveModelFromString } = await import('./models.js');
+
+      const model = resolveModelFromString('ollama:qwen2.5-coder:32b');
+      expect(model.id).toBe('qwen2.5-coder:32b');
+      expect(model.provider).toBe('ollama');
+      expect(model.api).toBe('openai-completions');
+      expect(model.baseUrl).toBe('http://localhost:11434/v1');
+      expect(model.cost.input).toBe(0);
+    });
+
+    it('resolves ollama model via KOVA_MEDIUM_MODEL env var', async () => {
+      process.env.KOVA_MEDIUM_MODEL = 'ollama:qwen2.5-coder:32b';
+      const { resolveModel } = await import('./models.js');
+
+      const model = resolveModel('medium');
+      expect(model.id).toBe('qwen2.5-coder:32b');
+      expect(model.provider).toBe('ollama');
+    });
+
+    it('resolves ollama model via KOVA_SMALL_MODEL env var', async () => {
+      process.env.KOVA_SMALL_MODEL = 'ollama:qwen2.5-coder:7b';
+      const { resolveModel } = await import('./models.js');
+
+      const model = resolveModel('small');
+      expect(model.id).toBe('qwen2.5-coder:7b');
+      expect(model.provider).toBe('ollama');
+    });
+
+    it('uses custom KOVA_OLLAMA_URL in resolved model baseUrl', async () => {
+      process.env.KOVA_OLLAMA_URL = 'http://gpu-box:11434';
+      const { resolveModelFromString } = await import('./models.js');
+
+      const model = resolveModelFromString('ollama:qwen2.5-coder:7b');
+      expect(model.baseUrl).toBe('http://gpu-box:11434/v1');
+    });
+
+    it('ollama models accept any model name (not limited to known list)', async () => {
+      const { resolveModelFromString } = await import('./models.js');
+
+      const model = resolveModelFromString('ollama:my-custom-finetune:latest');
+      expect(model.id).toBe('my-custom-finetune:latest');
+      expect(model.provider).toBe('ollama');
     });
   });
 });
