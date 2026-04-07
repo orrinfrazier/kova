@@ -155,12 +155,14 @@ program
   .command('brainstorm')
   .description('Analyze codebase and generate structured issue suite')
   .option('--repo <path>', 'Repository path', '.')
-  .action(async (opts: { repo?: string }) => {
+  .option('--focus <areas>', 'Comma-separated focus areas (e.g., "security,performance")')
+  .action(async (opts: { repo?: string; focus?: string }) => {
     const repoPath = resolve(opts.repo ?? '.');
     const config = resolveRepoConfig(repoPath);
+    const focus = opts.focus ? opts.focus.split(',').map((s) => s.trim()) : undefined;
 
     log.info('Brainstorming issues...');
-    const result = await brainstorm({ repoPath, config });
+    const result = await brainstorm({ repoPath, config, focus });
     printBrainstormPreview(result);
 
     if (!result.success) {
