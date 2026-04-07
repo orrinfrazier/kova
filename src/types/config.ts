@@ -257,6 +257,7 @@ export interface WaveResult {
   provider?: string | undefined;
   fallback_used?: boolean | undefined;
   local_attempt_cost?: number | undefined;
+  promptHash?: string | undefined;
 }
 
 export interface FailedPiece {

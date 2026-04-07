@@ -602,4 +602,61 @@ program
     }
   });
 
+const prompts = program.command('prompts').description('Prompt versioning and analytics');
+
+prompts
+  .command('list')
+  .description('List recorded prompt versions')
+  .option('--wave <name>', 'Filter by wave name')
+  .option('--repo <name-or-path>', 'Repository name or path', '.')
+  .action(async (opts: { wave?: string; repo?: string }) => {
+    const kovaConfig = await tryLoadConfig(program.opts().config);
+    const { repoPath } = resolveRepo(opts.repo ?? '.', kovaConfig);
+
+    const { getVersionHistory } = await import('../services/prompt-versions.js');
+    const { formatPromptHistory } = await import('../services/prompt-versions-display.js');
+    const versions = await getVersionHistory(repoPath, opts.wave);
+    console.log(formatPromptHistory(versions));
+  });
+
+prompts
+  .command('diff <hash1> <hash2>')
+  .description('Compare two prompt versions')
+  .option('--repo <name-or-path>', 'Repository name or path', '.')
+  .action(async (hash1: string, hash2: string, opts: { repo?: string }) => {
+    const kovaConfig = await tryLoadConfig(program.opts().config);
+    const { repoPath } = resolveRepo(opts.repo ?? '.', kovaConfig);
+
+    const { diffVersions } = await import('../services/prompt-versions.js');
+    const diff = await diffVersions(repoPath, hash1, hash2);
+
+    if (diff === null) {
+      console.error('One or both prompt versions not found.');
+      process.exit(1);
+    }
+
+    if (diff === '') {
+      console.log('Prompt versions are identical.');
+    } else {
+      console.log(diff);
+    }
+  });
+
+prompts
+  .command('correlate')
+  .description('Correlate prompt versions with success rates')
+  .option('--repo <name-or-path>', 'Repository name or path', '.')
+  .action(async (opts: { repo?: string }) => {
+    const kovaConfig = await tryLoadConfig(program.opts().config);
+    const { repoPath } = resolveRepo(opts.repo ?? '.', kovaConfig);
+
+    const { readHistory } = await import('../services/history.js');
+    const { correlateByPromptVersion } = await import('../services/prompt-correlation.js');
+    const { formatPromptCorrelation } = await import('../services/prompt-versions-display.js');
+
+    const entries = await readHistory(repoPath);
+    const stats = correlateByPromptVersion(entries);
+    console.log(formatPromptCorrelation(stats));
+  });
+
 program.parse();
