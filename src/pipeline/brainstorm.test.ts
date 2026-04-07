@@ -51,6 +51,7 @@ const SAMPLE_ISSUES = [
     labels: ['bug', 'security'],
     priority: 'high' as const,
     category: 'security' as const,
+    confidence: 0.9,
   },
   {
     title: 'Refactor duplicated error handling',
@@ -58,6 +59,7 @@ const SAMPLE_ISSUES = [
     labels: ['tech-debt'],
     priority: 'medium' as const,
     category: 'tech-debt' as const,
+    confidence: 0.5,
   },
 ];
 
@@ -110,7 +112,7 @@ describe('brainstorm', () => {
   it('returns structured BrainstormResult with issues array', async () => {
     mockSpawnWaveAgent.mockResolvedValueOnce(makeBrainstormHandoff(SAMPLE_ISSUES));
 
-    const result = await brainstorm({ repoPath: '/tmp/repo', config: DEFAULT_CONFIG });
+    const result = await brainstorm({ repoPath: '/tmp/repo', config: DEFAULT_CONFIG, threshold: 0 });
 
     expect(result.success).toBe(true);
     expect(result.issues).toHaveLength(2);
@@ -169,6 +171,50 @@ describe('brainstorm', () => {
 
     expect(result.success).toBe(false);
     expect(result.issues).toHaveLength(0);
+  });
+
+  it('filters issues below default threshold of 0.7', async () => {
+    mockSpawnWaveAgent.mockResolvedValueOnce(makeBrainstormHandoff(SAMPLE_ISSUES));
+
+    const result = await brainstorm({ repoPath: '/tmp/repo', config: DEFAULT_CONFIG });
+
+    expect(result.success).toBe(true);
+    // confidence 0.9 passes, confidence 0.5 filtered
+    expect(result.issues).toHaveLength(1);
+    expect(result.issues[0]?.title).toBe('Add input validation to API endpoints');
+    expect(result.filtered).toHaveLength(1);
+    expect(result.filtered[0]?.title).toBe('Refactor duplicated error handling');
+  });
+
+  it('uses custom threshold when provided', async () => {
+    mockSpawnWaveAgent.mockResolvedValueOnce(makeBrainstormHandoff(SAMPLE_ISSUES));
+
+    const result = await brainstorm({ repoPath: '/tmp/repo', config: DEFAULT_CONFIG, threshold: 0.4 });
+
+    expect(result.success).toBe(true);
+    // Both pass at threshold 0.4
+    expect(result.issues).toHaveLength(2);
+    expect(result.filtered).toHaveLength(0);
+  });
+
+  it('filters all issues when threshold is 1.0', async () => {
+    const highConfidenceIssues = SAMPLE_ISSUES.map((i) => ({ ...i, confidence: 0.99 }));
+    mockSpawnWaveAgent.mockResolvedValueOnce(makeBrainstormHandoff(highConfidenceIssues));
+
+    const result = await brainstorm({ repoPath: '/tmp/repo', config: DEFAULT_CONFIG, threshold: 1.0 });
+
+    expect(result.success).toBe(true);
+    expect(result.issues).toHaveLength(0);
+    expect(result.filtered).toHaveLength(2);
+  });
+
+  it('returns empty filtered array on failure', async () => {
+    mockSpawnWaveAgent.mockRejectedValueOnce(new Error('Agent failed'));
+
+    const result = await brainstorm({ repoPath: '/tmp/repo', config: DEFAULT_CONFIG });
+
+    expect(result.success).toBe(false);
+    expect(result.filtered).toHaveLength(0);
   });
 
   describe('focus areas', () => {

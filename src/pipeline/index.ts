@@ -1,6 +1,12 @@
 export { type AutoOptions, type AutoResult, runAuto } from './auto.js';
 export { type BatchSchedulerConfig, executePiecesInBatches, type PieceResult } from './batch-scheduler.js';
-export { type BrainstormOptions, type BrainstormReturn, brainstorm, printBrainstormPreview } from './brainstorm.js';
+export {
+  type BrainstormOptions,
+  type BrainstormReturn,
+  brainstorm,
+  DEFAULT_CONFIDENCE_THRESHOLD,
+  printBrainstormPreview,
+} from './brainstorm.js';
 export {
   buildPieceContext,
   buildWaveContext,

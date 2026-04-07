@@ -9,6 +9,7 @@ describe('BrainstormIssueSchema', () => {
       labels: ['security', 'enhancement'],
       priority: 'high',
       category: 'security',
+      confidence: 0.9,
     });
     expect(result.success).toBe(true);
   });
@@ -52,12 +53,85 @@ describe('BrainstormIssueSchema', () => {
       labels: [],
       priority: 'medium',
       category: 'enhancement',
+      confidence: 0.8,
       dependencies: ['Other issue title'],
     });
     expect(result.success).toBe(true);
     if (result.success) {
       expect(result.data.dependencies).toEqual(['Other issue title']);
     }
+  });
+
+  it('requires confidence field as number between 0 and 1', () => {
+    const valid = BrainstormIssueSchema.safeParse({
+      title: 'Test',
+      body: 'Body',
+      labels: [],
+      priority: 'medium',
+      category: 'bug',
+      confidence: 0.85,
+    });
+    expect(valid.success).toBe(true);
+    if (valid.success) {
+      expect(valid.data.confidence).toBe(0.85);
+    }
+  });
+
+  it('rejects confidence below 0', () => {
+    const result = BrainstormIssueSchema.safeParse({
+      title: 'Test',
+      body: 'Body',
+      labels: [],
+      priority: 'medium',
+      category: 'bug',
+      confidence: -0.1,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects confidence above 1', () => {
+    const result = BrainstormIssueSchema.safeParse({
+      title: 'Test',
+      body: 'Body',
+      labels: [],
+      priority: 'medium',
+      category: 'bug',
+      confidence: 1.5,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects issue missing confidence field', () => {
+    const result = BrainstormIssueSchema.safeParse({
+      title: 'Test',
+      body: 'Body',
+      labels: [],
+      priority: 'medium',
+      category: 'bug',
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('accepts confidence at boundary values 0 and 1', () => {
+    const zero = BrainstormIssueSchema.safeParse({
+      title: 'Test',
+      body: 'Body',
+      labels: [],
+      priority: 'medium',
+      category: 'bug',
+      confidence: 0,
+    });
+    expect(zero.success).toBe(true);
+
+    const one = BrainstormIssueSchema.safeParse({
+      title: 'Test',
+      body: 'Body',
+      labels: [],
+      priority: 'medium',
+      category: 'bug',
+      confidence: 1,
+    });
+    expect(one.success).toBe(true);
   });
 });
 
@@ -71,6 +145,7 @@ describe('BrainstormResultSchema', () => {
           labels: ['bug'],
           priority: 'high',
           category: 'bug',
+          confidence: 0.8,
         },
       ],
       summary: 'Found 1 issue',

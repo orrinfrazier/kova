@@ -12,6 +12,7 @@ function makeIssue(title: string, category = 'enhancement' as const): Brainstorm
     labels: [],
     priority: 'medium',
     category,
+    confidence: 0.8,
   };
 }
 
