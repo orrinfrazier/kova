@@ -104,26 +104,37 @@ describe('extractPRFromResult', () => {
   });
 });
 
+// --- Module-level mocks for fix() pipeline tests ---
+
+const mockSpawnWaveAgent = vi.fn();
+const mockRunTILoop = vi.fn();
+
+vi.mock('../ai/index.js', () => ({
+  resolveModel: vi.fn().mockReturnValue({ id: 'test-model' }),
+  spawnWaveAgent: (...args: unknown[]) => mockSpawnWaveAgent(...args),
+  getWaveTools: vi.fn().mockReturnValue([]),
+}));
+
+vi.mock('./loops.js', () => ({
+  runTILoop: (...args: unknown[]) => mockRunTILoop(...args),
+  runReviewLoop: vi.fn().mockResolvedValue({
+    reviewWaveResult: {
+      wave: 'review',
+      success: true,
+      artifact: { verdict: 'pass', findings: [], summary: 'ok' },
+      duration: 100,
+      cost: 0.01,
+      turns: 1,
+      model: 'test-model',
+    },
+    totalCost: 0.01,
+    iterations: 1,
+    knownIssues: [],
+  }),
+}));
+
 // Test that fix() passes PR context to spec and impl waves
 describe('fix — PR context injection', () => {
-  vi.mock('../ai/index.js', () => ({
-    executeWaveWithRetry: vi.fn().mockResolvedValue({
-      result: 'done',
-      success: true,
-      duration: 100,
-      turns: 1,
-      cost: 0.01,
-      model: 'test-model',
-      structuredOutput: {
-        grade: 'A',
-        surface_area: { files: [], estimated_lines: 10, modules_affected: [] },
-        risk: 'low',
-        reasoning: 'simple',
-        should_proceed: true,
-      },
-    }),
-  }));
-
   vi.mock('../services/github.js', async (importOriginal) => {
     const original = await importOriginal<typeof import('../services/github.js')>();
     return {
@@ -133,6 +144,11 @@ describe('fix — PR context injection', () => {
       commentOnIssue: vi.fn().mockResolvedValue(undefined),
     };
   });
+
+  vi.mock('../services/language-detect.js', () => ({
+    detectTooling: vi.fn().mockResolvedValue({ language: 'typescript', testRunner: 'vitest' }),
+    formatToolingContext: vi.fn().mockReturnValue('Language: typescript'),
+  }));
 
   vi.mock('../services/worktree.js', async (importOriginal) => {
     const original = await importOriginal<typeof import('../services/worktree.js')>();
@@ -151,6 +167,53 @@ describe('fix — PR context injection', () => {
     };
   });
 
+  function setupMocks(): void {
+    mockSpawnWaveAgent.mockImplementation(async (config: { wave: string }) => ({
+      wave: config.wave,
+      timestamp: new Date().toISOString(),
+      model: 'test-model',
+      cost: 0.01,
+      turns: 1,
+      confidence: 'high',
+      artifact:
+        config.wave === 'assess'
+          ? {
+              grade: 'A',
+              surface_area: { files: [], estimated_lines: 10, modules_affected: [] },
+              risk: 'low',
+              reasoning: 'simple',
+              should_proceed: true,
+            }
+          : config.wave === 'spec'
+            ? { summary: 'spec', pieces: [], dependency_order: [], constraints: [] }
+            : { lint: 'pass', typecheck: 'pass', tests: 'pass', coverage: 90, audit: 'pass', all_passing: true },
+      approach_notes: '',
+    }));
+    mockRunTILoop.mockResolvedValue({
+      testWaveResult: {
+        wave: 'test',
+        success: true,
+        artifact: 'tests written',
+        duration: 100,
+        cost: 0.01,
+        turns: 1,
+        model: 'test-model',
+      },
+      implWaveResult: {
+        wave: 'impl',
+        success: true,
+        artifact: { tests_passing: true },
+        duration: 100,
+        cost: 0.01,
+        turns: 1,
+        model: 'test-model',
+      },
+      testsPassing: true,
+      totalCost: 0.02,
+      attempts: 1,
+    });
+  }
+
   it('includes PR context in spec wave userMessage when pendingPRs provided', async () => {
     const { mkdtemp, rm } = await import('node:fs/promises');
     const { tmpdir } = await import('node:os');
@@ -159,9 +222,8 @@ describe('fix — PR context injection', () => {
 
     try {
       const { fix } = await import('./fix.js');
-      const { executeWaveWithRetry } = await import('../ai/index.js');
-      const mockExecute = vi.mocked(executeWaveWithRetry);
-      mockExecute.mockClear();
+      setupMocks();
+      mockSpawnWaveAgent.mockClear();
 
       const pendingPRs: OpenPR[] = [{ number: 10, title: 'Fix auth', branch: 'kova/fix-10', files: ['src/auth.ts'] }];
 
@@ -178,17 +240,18 @@ describe('fix — PR context injection', () => {
         pendingPRs,
       });
 
-      const specCall = mockExecute.mock.calls.find((c) => c[0].wave === 'spec');
+      // spec is called via spawnWaveAgent — check userMessage contains PR context
+      const specCall = mockSpawnWaveAgent.mock.calls.find((c: unknown[]) => (c[0] as { wave: string }).wave === 'spec');
       expect(specCall).toBeDefined();
-      expect(specCall?.[0].userMessage).toContain('Pending PRs');
-      expect(specCall?.[0].userMessage).toContain('#10');
-      expect(specCall?.[0].userMessage).toContain('src/auth.ts');
+      expect((specCall?.[0] as { userMessage: string }).userMessage).toContain('Pending PRs');
+      expect((specCall?.[0] as { userMessage: string }).userMessage).toContain('#10');
+      expect((specCall?.[0] as { userMessage: string }).userMessage).toContain('src/auth.ts');
     } finally {
       await rm(workDir, { recursive: true, force: true });
     }
   });
 
-  it('includes PR context in impl wave userMessage when pendingPRs provided', async () => {
+  it('includes PR context in TI loop config when pendingPRs provided', async () => {
     const { mkdtemp, rm } = await import('node:fs/promises');
     const { tmpdir } = await import('node:os');
     const { join } = await import('node:path');
@@ -196,9 +259,8 @@ describe('fix — PR context injection', () => {
 
     try {
       const { fix } = await import('./fix.js');
-      const { executeWaveWithRetry } = await import('../ai/index.js');
-      const mockExecute = vi.mocked(executeWaveWithRetry);
-      mockExecute.mockClear();
+      setupMocks();
+      mockRunTILoop.mockClear();
 
       const pendingPRs: OpenPR[] = [
         { number: 11, title: 'Add logger', branch: 'kova/fix-11', files: ['src/logger.ts'] },
@@ -217,11 +279,13 @@ describe('fix — PR context injection', () => {
         pendingPRs,
       });
 
-      const implCall = mockExecute.mock.calls.find((c) => c[0].wave === 'impl');
-      expect(implCall).toBeDefined();
-      expect(implCall?.[0].userMessage).toContain('Pending PRs');
-      expect(implCall?.[0].userMessage).toContain('#11');
-      expect(implCall?.[0].userMessage).toContain('src/logger.ts');
+      // impl runs via runTILoop — check prContext is passed in config
+      expect(mockRunTILoop).toHaveBeenCalled();
+      const tiConfig = mockRunTILoop.mock.calls[0]?.[0] as { prContext?: string };
+      expect(tiConfig.prContext).toBeDefined();
+      expect(tiConfig.prContext).toContain('Pending PRs');
+      expect(tiConfig.prContext).toContain('#11');
+      expect(tiConfig.prContext).toContain('src/logger.ts');
     } finally {
       await rm(workDir, { recursive: true, force: true });
     }
@@ -235,9 +299,8 @@ describe('fix — PR context injection', () => {
 
     try {
       const { fix } = await import('./fix.js');
-      const { executeWaveWithRetry } = await import('../ai/index.js');
-      const mockExecute = vi.mocked(executeWaveWithRetry);
-      mockExecute.mockClear();
+      setupMocks();
+      mockSpawnWaveAgent.mockClear();
 
       await fix({
         issue: { number: 44, title: 'Test', body: 'body', labels: [], url: 'https://example.com/44' },
@@ -252,8 +315,9 @@ describe('fix — PR context injection', () => {
         pendingPRs: [],
       });
 
-      const specCall = mockExecute.mock.calls.find((c) => c[0].wave === 'spec');
-      expect(specCall?.[0].userMessage).not.toContain('Pending PRs');
+      const specCall = mockSpawnWaveAgent.mock.calls.find((c: unknown[]) => (c[0] as { wave: string }).wave === 'spec');
+      expect(specCall).toBeDefined();
+      expect((specCall?.[0] as { userMessage: string }).userMessage).not.toContain('Pending PRs');
     } finally {
       await rm(workDir, { recursive: true, force: true });
     }
