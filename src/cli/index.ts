@@ -155,12 +155,18 @@ program
   .command('brainstorm')
   .description('Analyze codebase and generate structured issue suite')
   .option('--repo <path>', 'Repository path', '.')
-  .action(async (opts: { repo?: string }) => {
+  .option('--threshold <n>', 'Minimum confidence score (0.0-1.0)', '0.7')
+  .action(async (opts: { repo?: string; threshold?: string }) => {
     const repoPath = resolve(opts.repo ?? '.');
     const config = resolveRepoConfig(repoPath);
+    const threshold = Number.parseFloat(opts.threshold ?? '0.7');
+    if (Number.isNaN(threshold) || threshold < 0 || threshold > 1) {
+      console.error('--threshold must be a number between 0.0 and 1.0');
+      process.exit(1);
+    }
 
     log.info('Brainstorming issues...');
-    const result = await brainstorm({ repoPath, config });
+    const result = await brainstorm({ repoPath, config, threshold });
     printBrainstormPreview(result);
 
     if (!result.success) {

@@ -94,6 +94,7 @@ export const BrainstormIssueSchema = z.object({
   labels: z.array(z.string()),
   priority: z.enum(['critical', 'high', 'medium', 'low']),
   category: z.enum(['bug', 'security', 'performance', 'tech-debt', 'enhancement']),
+  confidence: z.number().min(0).max(1),
   dependencies: z.array(z.string()).optional(),
 });
 export type BrainstormIssue = z.infer<typeof BrainstormIssueSchema>;
