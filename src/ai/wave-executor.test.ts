@@ -1383,36 +1383,111 @@ describe('isAssistantMessage', () => {
 describe('resolveApiKey', () => {
   afterEach(() => {
     delete process.env.ANTHROPIC_API_KEY;
-    delete process.env.OPENAI_API_KEY;
+    delete process.env.GEMINI_API_KEY;
     delete process.env.GOOGLE_API_KEY;
+    delete process.env.OPENAI_API_KEY;
   });
 
-  it('returns ANTHROPIC_API_KEY for anthropic provider', async () => {
-    process.env.ANTHROPIC_API_KEY = 'sk-ant-test';
+  it('returns GEMINI_API_KEY for google provider', async () => {
+    process.env.GEMINI_API_KEY = 'gemini-key-123';
     const { resolveApiKey } = await import('./wave-executor.js');
-    expect(resolveApiKey('anthropic')).toBe('sk-ant-test');
+    expect(resolveApiKey('google')).toBe('gemini-key-123');
+  });
+
+  it('falls back to GOOGLE_API_KEY when GEMINI_API_KEY is not set', async () => {
+    process.env.GOOGLE_API_KEY = 'google-key-456';
+    const { resolveApiKey } = await import('./wave-executor.js');
+    expect(resolveApiKey('google')).toBe('google-key-456');
+  });
+
+  it('prefers GEMINI_API_KEY over GOOGLE_API_KEY', async () => {
+    process.env.GEMINI_API_KEY = 'gemini-preferred';
+    process.env.GOOGLE_API_KEY = 'google-fallback';
+    const { resolveApiKey } = await import('./wave-executor.js');
+    expect(resolveApiKey('google')).toBe('gemini-preferred');
   });
 
   it('returns OPENAI_API_KEY for openai provider', async () => {
-    process.env.OPENAI_API_KEY = 'sk-openai-test';
+    process.env.OPENAI_API_KEY = 'openai-key-789';
     const { resolveApiKey } = await import('./wave-executor.js');
-    expect(resolveApiKey('openai')).toBe('sk-openai-test');
+    expect(resolveApiKey('openai')).toBe('openai-key-789');
   });
 
-  it('returns GOOGLE_API_KEY for google provider', async () => {
-    process.env.GOOGLE_API_KEY = 'google-test-key';
+  it('returns ANTHROPIC_API_KEY for anthropic provider', async () => {
+    process.env.ANTHROPIC_API_KEY = 'anthropic-key-abc';
     const { resolveApiKey } = await import('./wave-executor.js');
-    expect(resolveApiKey('google')).toBe('google-test-key');
+    expect(resolveApiKey('anthropic')).toBe('anthropic-key-abc');
   });
 
-  it('returns undefined when provider key is not set', async () => {
+  it('returns ANTHROPIC_API_KEY for unknown providers (fallback)', async () => {
+    process.env.ANTHROPIC_API_KEY = 'anthropic-fallback';
     const { resolveApiKey } = await import('./wave-executor.js');
-    expect(resolveApiKey('openai')).toBeUndefined();
+    expect(resolveApiKey('mistral')).toBe('anthropic-fallback');
   });
 
-  it('falls back to ANTHROPIC_API_KEY for unknown providers', async () => {
-    process.env.ANTHROPIC_API_KEY = 'sk-ant-fallback';
+  it('returns ollama dummy key for ollama provider', async () => {
     const { resolveApiKey } = await import('./wave-executor.js');
-    expect(resolveApiKey('some-unknown-provider')).toBe('sk-ant-fallback');
+    expect(resolveApiKey('ollama')).toBe('ollama');
+  });
+
+  it('returns undefined when no key is set for the provider', async () => {
+    const { resolveApiKey } = await import('./wave-executor.js');
+    expect(resolveApiKey('google')).toBeUndefined();
+  });
+});
+
+describe('spawnWaveAgent API key routing', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockPrompt.mockResolvedValue(undefined);
+    mockSubscribe.mockImplementation(() => vi.fn());
+    setAgentResponse('done');
+  });
+
+  afterEach(() => {
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.GEMINI_API_KEY;
+    delete process.env.GOOGLE_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+  });
+
+  it('passes google API key to Agent when using google provider model', async () => {
+    process.env.GEMINI_API_KEY = 'gemini-test-key';
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+
+    await spawnWaveAgent({
+      wave: 'assess',
+      model: 'google:gemini-2.5-pro',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Message.',
+      cwd: '/tmp/test',
+    });
+
+    const agentConfig = vi.mocked(Agent).mock.calls[0]?.[0] as {
+      getApiKey: (provider: string) => string | undefined;
+    };
+    expect(agentConfig.getApiKey('google')).toBe('gemini-test-key');
+  });
+
+  it('passes openai API key to Agent when using openai provider', async () => {
+    process.env.OPENAI_API_KEY = 'openai-test-key';
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+
+    await spawnWaveAgent({
+      wave: 'assess',
+      model: 'openai:gpt-4o',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Message.',
+      cwd: '/tmp/test',
+    });
+
+    const agentConfig = vi.mocked(Agent).mock.calls[0]?.[0] as {
+      getApiKey: (provider: string) => string | undefined;
+    };
+    expect(agentConfig.getApiKey('openai')).toBe('openai-test-key');
   });
 });

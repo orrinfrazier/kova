@@ -63,8 +63,9 @@ export function buildRunArgs(opts: {
   if (process.env.OPENAI_API_KEY) {
     envFlags.push('-e', `OPENAI_API_KEY=${process.env.OPENAI_API_KEY}`);
   }
-  if (process.env.GOOGLE_API_KEY) {
-    envFlags.push('-e', `GOOGLE_API_KEY=${process.env.GOOGLE_API_KEY}`);
+  const googleKey = process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY;
+  if (googleKey) {
+    envFlags.push('-e', `GEMINI_API_KEY=${googleKey}`);
   }
 
   return [
