@@ -35,8 +35,7 @@ describe('wave prompts', () => {
         const prompt = await loadPrompt(wave);
         // Each prompt should tell the agent to read/examine the codebase
         const readsCodebase =
-          /read/i.test(prompt) &&
-          (/file/i.test(prompt) || /code/i.test(prompt) || /codebase/i.test(prompt));
+          /read/i.test(prompt) && (/file/i.test(prompt) || /code/i.test(prompt) || /codebase/i.test(prompt));
         expect(readsCodebase).toBe(true);
       });
     });

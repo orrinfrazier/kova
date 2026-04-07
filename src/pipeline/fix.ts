@@ -2,16 +2,21 @@
 // Each wave runs Agent SDK query() with wave-specific prompts and structured output.
 // Waves are strictly sequential. Quality gates run inside the agent (self-healing).
 
-import { z } from 'zod';
 import type { JsonSchemaOutputFormat } from '@anthropic-ai/claude-agent-sdk';
+import { z } from 'zod';
 import { executeWaveWithRetry, type WaveExecutionResult } from '../ai/index.js';
-import type { FixState, Issue, RepoConfig, WaveName, WaveResult } from '../types/index.js';
-import { AssessResultSchema, type AssessResult, SpecResultSchema, ReviewResultSchema } from '../types/index.js';
-import { saveCheckpoint, loadCheckpoint } from '../services/checkpoint.js';
-import { createWorktree, removeWorktree } from '../services/worktree.js';
+import { clearCheckpoint, loadCheckpoint, saveCheckpoint } from '../services/checkpoint.js';
 import { createPR, listOpenPRs } from '../services/github.js';
-import { loadPrompt } from './prompts.js';
+import {
+  createWorktree,
+  worktreePath as getWorktreePath,
+  removeWorktree,
+  worktreeExists,
+} from '../services/worktree.js';
+import type { FixState, Issue, RepoConfig, WaveName, WaveResult } from '../types/index.js';
+import { type AssessResult, AssessResultSchema, ReviewResultSchema, SpecResultSchema } from '../types/index.js';
 import { log } from '../utils/logger.js';
+import { loadPrompt } from './prompts.js';
 
 function toOutputFormat(schema: z.ZodType): JsonSchemaOutputFormat {
   return {
@@ -25,6 +30,7 @@ export interface FixOptions {
   repoPath: string;
   repoName: string;
   config: RepoConfig;
+  fresh?: boolean | undefined;
 }
 
 export interface FixResult {
@@ -35,16 +41,36 @@ export interface FixResult {
 }
 
 export async function fix(options: FixOptions): Promise<FixResult> {
-  const { issue, repoPath, repoName, config } = options;
+  const { issue, repoPath, repoName, config, fresh } = options;
 
-  // 1. Create worktree for isolation
-  const worktree = config.isolation === 'worktree'
-    ? await createWorktree(repoPath, issue.number)
-    : undefined;
+  // 1. Handle --fresh: clear existing checkpoint and worktree before starting
+  if (fresh) {
+    if (config.isolation === 'worktree' && (await worktreeExists(repoPath, issue.number))) {
+      await removeWorktree(repoPath, getWorktreePath(repoPath, issue.number));
+      log.info(`[fresh] Removed existing worktree for #${issue.number}`);
+    }
+  }
+
+  // 2. Create worktree for isolation
+  const worktree = config.isolation === 'worktree' ? await createWorktree(repoPath, issue.number) : undefined;
   const workDir = worktree?.path ?? repoPath;
 
-  // 2. Load or create state
-  let state = await loadCheckpoint(workDir) ?? createInitialState(issue, repoName, repoPath, worktree?.path);
+  // Clear checkpoint after workDir is resolved (for non-worktree isolation too)
+  if (fresh) {
+    await clearCheckpoint(workDir);
+    log.info(`[fresh] Cleared checkpoint — starting from scratch`);
+  }
+
+  // 3. Load or create state
+  const existing = await loadCheckpoint(workDir);
+  let state: FixState;
+
+  if (existing && existing.completedWaves.length > 0) {
+    state = existing;
+    log.info(`Resuming #${issue.number} — completed waves: [${state.completedWaves.join(', ')}]`);
+  } else {
+    state = createInitialState(issue, repoName, repoPath, worktree?.path);
+  }
 
   const shouldSkip = (wave: WaveName): boolean => state.completedWaves.includes(wave);
 
