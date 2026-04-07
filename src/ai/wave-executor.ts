@@ -4,7 +4,7 @@
 // executeWave() is a backward-compat wrapper that resolves model/tools internally.
 
 import { Agent, type AgentTool, type ThinkingLevel } from '@mariozechner/pi-agent-core';
-import { streamSimple } from '@mariozechner/pi-ai';
+import { type AssistantMessage, streamSimple } from '@mariozechner/pi-ai';
 import { convertToLlm } from '@mariozechner/pi-coding-agent';
 import type { z } from 'zod';
 import type { ModelTier, WaveHandoff, WaveName } from '../types/index.js';
@@ -21,6 +21,21 @@ export interface OutputFormat {
 
 // biome-ignore lint/suspicious/noExplicitAny: pi-mono AgentTool uses any for tool parameter schemas
 type AnyTool = AgentTool<any>;
+
+/** Runtime type guard for pi-mono AssistantMessage — validates shape instead of unsafe `as` casts. */
+export function isAssistantMessage(msg: unknown): msg is AssistantMessage {
+  return (
+    typeof msg === 'object' &&
+    msg !== null &&
+    'role' in msg &&
+    (msg as { role: unknown }).role === 'assistant' &&
+    'content' in msg &&
+    Array.isArray((msg as { content: unknown }).content) &&
+    'usage' in msg &&
+    typeof (msg as { usage: unknown }).usage === 'object' &&
+    (msg as { usage: unknown }).usage !== null
+  );
+}
 
 /** Default wall-clock timeouts per wave type (ms). `undefined` means no timeout. */
 export const DEFAULT_WAVE_TIMEOUTS: Record<WaveName, number | undefined> = {
@@ -108,18 +123,13 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
       if (turnCount % 50 === 0) {
         log.info(`[${wave}] Turn ${turnCount}...`);
       }
-      const msg = event.message as {
-        role?: string;
-        stopReason?: string;
-        errorMessage?: string;
-        usage?: { input?: number; totalTokens?: number; cost?: { total?: number } };
-      };
-      if (msg?.role === 'assistant' && (msg.stopReason === 'error' || msg.stopReason === 'aborted')) {
-        lastErrorMessage = msg.errorMessage ?? `Agent ${msg.stopReason} during ${wave}`;
-      }
-      // Track cost incrementally from assistant turn_end events
-      if (msg?.role === 'assistant') {
-        const turnCost = msg.usage?.cost?.total ?? 0;
+      const msg = event.message;
+      if (isAssistantMessage(msg)) {
+        if (msg.stopReason === 'error' || msg.stopReason === 'aborted') {
+          lastErrorMessage = msg.errorMessage ?? `Agent ${msg.stopReason} during ${wave}`;
+        }
+        // Track cost incrementally from assistant turn_end events
+        const turnCost = msg.usage.cost.total;
         accumulatedCost += turnCost;
         if (maxCostUsd != null && accumulatedCost >= maxCostUsd && !aborted) {
           costCapExceeded = true;
@@ -127,10 +137,14 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
           log.warn(`[${wave}] Cost cap exceeded ($${accumulatedCost.toFixed(4)} >= $${maxCostUsd}), aborting`);
           agent.abort();
         }
+      } else {
+        log.debug(
+          `[${wave}] Skipping non-assistant turn_end message (role=${String((msg as { role?: unknown }).role ?? 'unknown')})`,
+        );
       }
 
       // Context window monitoring: check input tokens against threshold
-      const inputTokens = msg?.usage?.input ?? 0;
+      const inputTokens = isAssistantMessage(msg) ? msg.usage.input : 0;
       if (inputTokens > 0 && model.contextWindow > 0) {
         const usageRatio = inputTokens / model.contextWindow;
         if (usageRatio >= contextThreshold && !aborted) {
@@ -185,26 +199,19 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
     let cost = 0;
     const messages = agent.state.messages;
     for (const msg of messages) {
-      if (msg.role === 'assistant') {
-        const assistantMsg = msg as {
-          role: 'assistant';
-          usage?: { cost?: { total?: number } };
-        };
-        cost += assistantMsg.usage?.cost?.total ?? 0;
+      if (isAssistantMessage(msg)) {
+        cost += msg.usage.cost.total;
       }
     }
 
     // Get the final assistant text
     let resultText: string | null = null;
-    const lastAssistant = [...messages].reverse().find((m) => m.role === 'assistant');
+    const lastAssistant = [...messages].reverse().find((m): m is AssistantMessage => isAssistantMessage(m));
     if (lastAssistant) {
-      const textContent = (lastAssistant as { content?: Array<{ type: string; text?: string }> }).content;
-      if (textContent) {
-        resultText = textContent
-          .filter((c): c is { type: 'text'; text: string } => c.type === 'text' && typeof c.text === 'string')
-          .map((c) => c.text)
-          .join('');
-      }
+      resultText = lastAssistant.content
+        .filter((c) => c.type === 'text' && 'text' in c)
+        .map((c) => ('text' in c ? String(c.text) : ''))
+        .join('');
     }
 
     // Parse structured output if expected
