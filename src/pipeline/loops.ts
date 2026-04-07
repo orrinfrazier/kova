@@ -283,9 +283,22 @@ export async function runTILoop(config: TILoopConfig): Promise<TILoopResult> {
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     log.info(`[ti-loop] Impl attempt ${attempt + 1}/${maxRetries}`);
 
+    // Classify diagnosis mid-loop to inject escalation hint for APPROACH_WRONG
+    let escalationHint: string | undefined;
+    if (failureOutputs.length >= 2) {
+      const midDiagnosis = classifyDiagnosis(failureOutputs);
+      if (midDiagnosis === 'APPROACH_WRONG') {
+        const prevAttempts = failureOutputs
+          .map((output, i) => `### Attempt ${i + 1}\n\`\`\`\n${output}\n\`\`\``)
+          .join('\n\n');
+        escalationHint = `Diagnosis: APPROACH_WRONG — each attempt fails different tests.\nThe previous approach failed. Try a fundamentally different strategy.\n\n${prevAttempts}`;
+      }
+    }
+
     // Build impl context — fresh each time with spec + test failures only
     let implContext = buildWaveContext('impl', issue, updatedWaveResults, {
       ...(prContext != null && { prContext }),
+      ...(escalationHint != null && { escalationHint }),
     });
     if (failureOutputs.length > 0) {
       const lastFailure = failureOutputs.at(-1) as string;

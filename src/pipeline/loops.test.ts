@@ -146,9 +146,13 @@ describe('runTILoop', () => {
   });
 
   it('each impl retry is a fresh agent call (not accumulated context)', async () => {
+    // Use same test name → SPEC_WRONG diagnosis (no escalation hint), isolating the "fresh context" behavior
+    const sameTestFail1 = ' FAIL  src/a.test.ts > suite > test one\n   Error: attempt-1-detail';
+    const sameTestFail2 = ' FAIL  src/a.test.ts > suite > test one\n   Error: attempt-2-detail';
+
     vi.mocked(mockTestRunner)
-      .mockResolvedValueOnce({ passed: false, output: 'error-1', exitCode: 1 })
-      .mockResolvedValueOnce({ passed: false, output: 'error-2', exitCode: 1 })
+      .mockResolvedValueOnce({ passed: false, output: sameTestFail1, exitCode: 1 })
+      .mockResolvedValueOnce({ passed: false, output: sameTestFail2, exitCode: 1 })
       .mockResolvedValueOnce({ passed: true, output: 'ok', exitCode: 0 });
 
     await runTILoop({
@@ -163,11 +167,11 @@ describe('runTILoop', () => {
     const implCalls = mockExecute.mock.calls.filter((c) => c[0].wave === 'impl');
     expect(implCalls).toHaveLength(3);
 
-    // Third impl should only have the LAST failure, not accumulated history
+    // Third impl should only have the LAST failure in "Previous Test Failure Output", not accumulated history
     const thirdImplMsg = implCalls.at(2)?.[0].userMessage;
-    expect(thirdImplMsg).toContain('error-2');
+    expect(thirdImplMsg).toContain('attempt-2-detail');
     // Should not contain the first error (fresh context, only most recent failure)
-    expect(thirdImplMsg).not.toContain('error-1');
+    expect(thirdImplMsg).not.toContain('attempt-1-detail');
   });
 
   it('runs tests via bash (testRunner), not via agent', async () => {
@@ -460,6 +464,94 @@ describe('runTILoop', () => {
     expect(implCall).toBeDefined();
     // Context building happens internally — just verify the call was made
     expect(implCall?.[0].userMessage).toBeDefined();
+  });
+
+  it('injects escalation hint into impl context when APPROACH_WRONG diagnosed mid-loop', async () => {
+    // Attempt 1: fails with test A
+    const attempt1Output =
+      ' FAIL  src/auth.test.ts > AuthService > validates expired tokens\n   TypeError: cannot read undefined';
+    // Attempt 2: fails with different test B (→ APPROACH_WRONG)
+    const attempt2Output =
+      ' FAIL  src/parser.test.ts > Parser > handles nested expressions\n   RangeError: maximum call stack exceeded';
+
+    vi.mocked(mockTestRunner)
+      .mockResolvedValueOnce({ passed: false, output: attempt1Output, exitCode: 1 })
+      .mockResolvedValueOnce({ passed: false, output: attempt2Output, exitCode: 1 })
+      .mockResolvedValueOnce({ passed: true, output: 'ok', exitCode: 0 });
+
+    await runTILoop({
+      issue: makeIssue(),
+      workDir: '/tmp/test',
+      repoConfig: makeConfig(),
+      waveResults: {},
+      testRunner: mockTestRunner,
+      testCommand: 'npm test',
+    });
+
+    const implCalls = mockExecute.mock.calls.filter((c) => c[0].wave === 'impl');
+    expect(implCalls).toHaveLength(3);
+
+    // First impl: no escalation (0 failures)
+    expect(implCalls.at(0)?.[0].userMessage).not.toContain('Escalation');
+    // Second impl: no escalation (only 1 failure, can't classify yet)
+    expect(implCalls.at(1)?.[0].userMessage).not.toContain('Escalation');
+    // Third impl: APPROACH_WRONG diagnosed from 2 failures → escalation hint injected
+    expect(implCalls.at(2)?.[0].userMessage).toContain('Escalation');
+    expect(implCalls.at(2)?.[0].userMessage).toContain('different strategy');
+  });
+
+  it('escalation hint summarizes previous approaches from failure outputs', async () => {
+    const attempt1Output =
+      ' FAIL  src/auth.test.ts > AuthService > validates expired tokens\n   TypeError: cannot read undefined';
+    const attempt2Output =
+      ' FAIL  src/parser.test.ts > Parser > handles nested expressions\n   RangeError: maximum call stack exceeded';
+
+    vi.mocked(mockTestRunner)
+      .mockResolvedValueOnce({ passed: false, output: attempt1Output, exitCode: 1 })
+      .mockResolvedValueOnce({ passed: false, output: attempt2Output, exitCode: 1 })
+      .mockResolvedValueOnce({ passed: true, output: 'ok', exitCode: 0 });
+
+    await runTILoop({
+      issue: makeIssue(),
+      workDir: '/tmp/test',
+      repoConfig: makeConfig(),
+      waveResults: {},
+      testRunner: mockTestRunner,
+      testCommand: 'npm test',
+    });
+
+    const implCalls = mockExecute.mock.calls.filter((c) => c[0].wave === 'impl');
+    const thirdImplMsg = implCalls.at(2)?.[0].userMessage as string;
+
+    // Should reference previous failure outputs so the agent knows what was tried
+    expect(thirdImplMsg).toContain('Attempt 1');
+    expect(thirdImplMsg).toContain('Attempt 2');
+  });
+
+  it('does not inject escalation hint for SPEC_WRONG diagnosis', async () => {
+    // Same test names fail across attempts → SPEC_WRONG, not APPROACH_WRONG
+    const sameFailure = ' FAIL  src/auth.test.ts > AuthService > validates expired tokens\n   Error: fail';
+
+    vi.mocked(mockTestRunner)
+      .mockResolvedValueOnce({ passed: false, output: sameFailure, exitCode: 1 })
+      .mockResolvedValueOnce({ passed: false, output: sameFailure, exitCode: 1 })
+      .mockResolvedValueOnce({ passed: false, output: sameFailure, exitCode: 1 });
+
+    const result = await runTILoop({
+      issue: makeIssue(),
+      workDir: '/tmp/test',
+      repoConfig: makeConfig(),
+      waveResults: {},
+      testRunner: mockTestRunner,
+      testCommand: 'npm test',
+    });
+
+    const implCalls = mockExecute.mock.calls.filter((c) => c[0].wave === 'impl');
+    // No impl call should have escalation hint for SPEC_WRONG
+    for (const call of implCalls) {
+      expect(call[0].userMessage).not.toContain('Escalation');
+    }
+    expect(result.diagnosis).toBe('SPEC_WRONG');
   });
 
   it('throws when maxRetries is less than 1', async () => {
