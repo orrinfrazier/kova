@@ -3,6 +3,7 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fetchKovaPRs, fetchOpenIssueCount } from '../services/github.js';
+import type { QueueStatus } from '../services/priority-queue.js';
 import type { KovaConfig } from '../types/index.js';
 import { log } from '../utils/logger.js';
 
@@ -18,6 +19,7 @@ export interface RepoStatus {
 export interface StatusResult {
   repos: RepoStatus[];
   totalSpend: number;
+  queue?: QueueStatus | undefined;
 }
 
 async function readJsonFile(filePath: string): Promise<unknown> {
@@ -132,6 +134,53 @@ export function formatStatusTable(result: StatusResult): string {
     separatorLine,
     `Total: $${result.totalSpend.toFixed(2)}`,
   ];
+
+  if (result.queue) {
+    lines.push('', formatQueueTable(result.queue));
+  }
+
+  return lines.join('\n');
+}
+
+export function formatQueueTable(queue: QueueStatus): string {
+  const lines: string[] = [`Queue (${queue.activeSlots}/${queue.maxSlots} slots active)`];
+  lines.push('');
+
+  if (queue.entries.length === 0) {
+    lines.push('  (empty)');
+    return lines.join('\n');
+  }
+
+  const headers = ['Issue', 'Score', 'Status', 'Failures', 'Blocked By'];
+  const rows: string[][] = queue.entries.map((e) => {
+    const blockers = e.request.blockedBy.length > 0 ? e.request.blockedBy.map((b) => `#${b}`).join(', ') : '\u2014';
+    return [
+      `#${e.request.issueNumber}`,
+      String(e.request.score),
+      e.status,
+      e.consecutiveFailures > 0 ? String(e.consecutiveFailures) : '\u2014',
+      blockers,
+    ];
+  });
+
+  const widths = headers.map((h, i) => {
+    const maxDataWidth = Math.max(...rows.map((row) => (row[i] ?? '').length), 0);
+    return Math.max(h.length, maxDataWidth);
+  });
+
+  const headerLine = headers.map((h, i) => pad(h, widths[i] ?? h.length)).join('  ');
+  const separatorLine = widths.map((w) => '\u2500'.repeat(w)).join('  ');
+  const dataLines = rows.map((row) => row.map((cell, i) => pad(cell, widths[i] ?? cell.length)).join('  '));
+
+  lines.push(headerLine, separatorLine, ...dataLines, separatorLine);
+
+  const counts: string[] = [];
+  if (queue.completedCount > 0) counts.push(`${queue.completedCount} completed`);
+  if (queue.skippedCount > 0) counts.push(`${queue.skippedCount} skipped`);
+  if (queue.failedCount > 0) counts.push(`${queue.failedCount} failed`);
+  if (counts.length > 0) {
+    lines.push(counts.join(', '));
+  }
 
   return lines.join('\n');
 }
