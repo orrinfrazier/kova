@@ -441,7 +441,13 @@ describe('models', () => {
       expect(() =>
         validateModelConfig({
           path: '/tmp/test',
-          rules: { coverage: 80, auto_merge: false, max_issues_per_run: 10, ci_merge: 'require' as const },
+          rules: {
+            coverage: 80,
+            auto_merge: false,
+            max_issues_per_run: 10,
+            ci_merge: 'require' as const,
+            concurrency: 1,
+          },
           model: {
             assess: 'large',
             spec: 'large',
@@ -464,7 +470,13 @@ describe('models', () => {
       expect(() =>
         validateModelConfig({
           path: '/tmp/test',
-          rules: { coverage: 80, auto_merge: false, max_issues_per_run: 10, ci_merge: 'require' as const },
+          rules: {
+            coverage: 80,
+            auto_merge: false,
+            max_issues_per_run: 10,
+            ci_merge: 'require' as const,
+            concurrency: 1,
+          },
           model: {
             assess: 'claude-opus-4-6',
             spec: 'large',
@@ -486,7 +498,13 @@ describe('models', () => {
       expect(() =>
         validateModelConfig({
           path: '/tmp/test',
-          rules: { coverage: 80, auto_merge: false, max_issues_per_run: 10, ci_merge: 'require' as const },
+          rules: {
+            coverage: 80,
+            auto_merge: false,
+            max_issues_per_run: 10,
+            ci_merge: 'require' as const,
+            concurrency: 1,
+          },
           model: {
             assess: 'ollama:llama3',
             spec: 'ollama:llama3',
@@ -507,7 +525,13 @@ describe('models', () => {
       expect(() =>
         validateModelConfig({
           path: '/tmp/test',
-          rules: { coverage: 80, auto_merge: false, max_issues_per_run: 10, ci_merge: 'require' as const },
+          rules: {
+            coverage: 80,
+            auto_merge: false,
+            max_issues_per_run: 10,
+            ci_merge: 'require' as const,
+            concurrency: 1,
+          },
           model: {
             assess: 'fake-provider:nonexistent',
             spec: 'large',
