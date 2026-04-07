@@ -1,5 +1,5 @@
 import { getModel, getProviders, type Model, registerBuiltInApiProviders } from '@mariozechner/pi-ai';
-import type { ModelTier, OllamaProvider } from '../types/index.js';
+import type { ModelTier, OllamaProvider, WaveModelConfig } from '../types/index.js';
 import { KovaError } from './errors.js';
 import { createOllamaModel, isOllamaProvider } from './ollama.js';
 
@@ -132,4 +132,19 @@ function resolveModelString(tier: ModelTier): string {
     default:
       return process.env.KOVA_MEDIUM_MODEL ?? DEFAULT_MODELS.medium;
   }
+}
+
+/** Resolve a WaveModelConfig (tier string or {provider, model} override) to a Model. */
+export function resolveWaveModel(config: WaveModelConfig): Model<string> {
+  if (typeof config === 'string') {
+    return resolveModel(config);
+  }
+  return resolveModelFromString(`${config.provider}:${config.model}`);
+}
+
+const LOCAL_PROVIDERS = new Set(['ollama', 'llamafile', 'llama-cpp', 'vllm', 'lmstudio']);
+
+/** Returns true if the provider runs locally (no API cost). */
+export function isLocalProvider(provider: string): boolean {
+  return LOCAL_PROVIDERS.has(provider);
 }

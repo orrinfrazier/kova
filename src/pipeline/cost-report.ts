@@ -1,14 +1,24 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { isLocalProvider } from '../ai/index.js';
 import type { FixState, WaveName } from '../types/index.js';
 import { log } from '../utils/logger.js';
 
 export interface CostReport {
   issueNumber: number;
   totalCost: number;
+  apiCost: number;
+  localCost: number;
   totalTurns: number;
   totalDuration: number;
-  waves: Array<{ wave: string; cost: number; turns: number; duration: number; model?: string | undefined }>;
+  waves: Array<{
+    wave: string;
+    cost: number;
+    turns: number;
+    duration: number;
+    model?: string | undefined;
+    provider?: string | undefined;
+  }>;
   startedAt: string;
   completedAt: string;
 }
@@ -18,19 +28,37 @@ const WAVE_ORDER: WaveName[] = ['assess', 'spec', 'test', 'impl', 'quality', 're
 export function buildCostReport(state: FixState): CostReport {
   const waves: CostReport['waves'] = [];
   let totalCost = 0;
+  let apiCost = 0;
+  let localCost = 0;
   let totalTurns = 0;
   let totalDuration = 0;
   for (const wave of WAVE_ORDER) {
     const result = state.waveResults[wave];
     if (!result) continue;
-    waves.push({ wave, cost: result.cost, turns: result.turns, duration: result.duration, model: result.model });
+    waves.push({
+      wave,
+      cost: result.cost,
+      turns: result.turns,
+      duration: result.duration,
+      model: result.model,
+      provider: result.provider,
+    });
     totalCost += result.cost;
     totalTurns += result.turns;
     totalDuration += result.duration;
+
+    // Classify cost as API or local — undefined provider treated as API (backward compat)
+    if (result.provider && isLocalProvider(result.provider)) {
+      localCost += result.cost;
+    } else {
+      apiCost += result.cost;
+    }
   }
   return {
     issueNumber: state.issue.number,
     totalCost,
+    apiCost,
+    localCost,
     totalTurns,
     totalDuration,
     waves,
@@ -58,6 +86,10 @@ export function printRunSummary(report: CostReport): void {
   log.info('=== Run Summary ===');
   log.info(`Issue:    #${report.issueNumber}`);
   log.info(`Cost:     $${report.totalCost.toFixed(2)}`);
+  if (report.apiCost > 0 || report.localCost > 0) {
+    log.info(`  API:    $${report.apiCost.toFixed(2)}`);
+    log.info(`  Local:  $${report.localCost.toFixed(2)}`);
+  }
   log.info(`Turns:    ${report.totalTurns}`);
   log.info(`Duration: ${formatDuration(report.totalDuration)}`);
   if (report.waves.length > 0) {
@@ -65,6 +97,7 @@ export function printRunSummary(report: CostReport): void {
     log.info('Per-wave breakdown:');
     for (const wave of report.waves) {
       const model = wave.model ? ` (${wave.model})` : '';
+      const provider = wave.provider ? ` [${wave.provider}]` : '';
       log.info(
         '  ' +
           wave.wave.padEnd(8) +
@@ -74,7 +107,8 @@ export function printRunSummary(report: CostReport): void {
           wave.turns +
           ' turns  ' +
           formatDuration(wave.duration) +
-          model,
+          model +
+          provider,
       );
     }
   }

@@ -2,7 +2,13 @@
 // and generate a structured suite of issue suggestions.
 
 import { z } from 'zod';
-import { getWaveTools, type OutputFormat, resolveModel, resolveThinkingLevel, spawnWaveAgent } from '../ai/index.js';
+import {
+  getWaveTools,
+  type OutputFormat,
+  resolveThinkingLevel,
+  resolveWaveModel,
+  spawnWaveAgent,
+} from '../ai/index.js';
 import {
   appendCycle,
   type DiminishingReturnsReport,
@@ -47,7 +53,7 @@ export interface BrainstormReturn {
 export async function brainstorm(options: BrainstormOptions): Promise<BrainstormReturn> {
   const { repoPath, config, threshold = DEFAULT_CONFIDENCE_THRESHOLD, focus, kovaConfig } = options;
 
-  const model = resolveModel(config.model.brainstorm);
+  const model = resolveWaveModel(config.model.brainstorm);
   const tools = getWaveTools('brainstorm', repoPath);
   const systemPrompt = await loadPrompt('brainstorm');
   const thinkingLevel = resolveThinkingLevel(config, 'brainstorm');

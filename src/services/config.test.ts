@@ -505,6 +505,79 @@ repos:
 });
 
 /* ------------------------------------------------------------------ */
+/*  per-wave provider+model overrides (#27)                            */
+/* ------------------------------------------------------------------ */
+
+describe('per-wave provider+model overrides', () => {
+  it('accepts provider+model object for a wave', async () => {
+    const yaml = `
+repos:
+  local-repo:
+    path: /tmp/local
+    model:
+      impl:
+        provider: ollama
+        model: qwen2.5-coder:32b
+`;
+    await writeFile(join(tempDir, 'repos.yaml'), yaml);
+
+    const config = await loadConfig(join(tempDir, 'repos.yaml'));
+    const repo = config.repos['local-repo'];
+    expect(repo).toBeDefined();
+    if (!repo) return;
+
+    expect(repo.model.impl).toEqual({ provider: 'ollama', model: 'qwen2.5-coder:32b' });
+    // Other waves keep tier defaults
+    expect(repo.model.assess).toBe('large');
+    expect(repo.model.spec).toBe('large');
+  });
+
+  it('accepts mixed tier and provider+model overrides', async () => {
+    const yaml = `
+repos:
+  mixed-repo:
+    path: /tmp/mixed
+    model:
+      assess: large
+      spec: large
+      test:
+        provider: ollama
+        model: qwen2.5-coder:32b
+      impl:
+        provider: ollama
+        model: qwen2.5-coder:32b
+      quality: small
+      review: large
+`;
+    await writeFile(join(tempDir, 'repos.yaml'), yaml);
+
+    const config = await loadConfig(join(tempDir, 'repos.yaml'));
+    const repo = config.repos['mixed-repo'];
+    expect(repo).toBeDefined();
+    if (!repo) return;
+
+    expect(repo.model.assess).toBe('large');
+    expect(repo.model.test).toEqual({ provider: 'ollama', model: 'qwen2.5-coder:32b' });
+    expect(repo.model.impl).toEqual({ provider: 'ollama', model: 'qwen2.5-coder:32b' });
+    expect(repo.model.quality).toBe('small');
+  });
+
+  it('rejects provider+model without required fields', async () => {
+    const yaml = `
+repos:
+  bad-repo:
+    path: /tmp/bad
+    model:
+      impl:
+        provider: ollama
+`;
+    await writeFile(join(tempDir, 'repos.yaml'), yaml);
+
+    await expect(loadConfig(join(tempDir, 'repos.yaml'))).rejects.toThrow(ZodError);
+  });
+});
+
+/* ------------------------------------------------------------------ */
 /*  detectRepoName                                                     */
 /* ------------------------------------------------------------------ */
 

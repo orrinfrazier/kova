@@ -53,7 +53,7 @@ describe('buildCostReport', () => {
   it('includes per-wave breakdown', () => {
     const report = buildCostReport(makeState());
     expect(report.waves).toHaveLength(7);
-    expect(report.waves[0]).toEqual({
+    expect(report.waves[0]).toMatchObject({
       wave: 'assess',
       cost: 0.12,
       turns: 5,
@@ -99,6 +99,8 @@ describe('writeCostReport', () => {
     const report: CostReport = {
       issueNumber: 42,
       totalCost: 0.68,
+      apiCost: 0.68,
+      localCost: 0,
       totalTurns: 52,
       totalDuration: 32000,
       waves: [{ wave: 'assess', cost: 0.12, turns: 5, duration: 3000, model: 'test-model' }],
@@ -115,6 +117,8 @@ describe('writeCostReport', () => {
     await writeCostReport(workDir, {
       issueNumber: 42,
       totalCost: 0.5,
+      apiCost: 0.5,
+      localCost: 0,
       totalTurns: 30,
       totalDuration: 20000,
       waves: [],
@@ -124,6 +128,8 @@ describe('writeCostReport', () => {
     await writeCostReport(workDir, {
       issueNumber: 42,
       totalCost: 0.75,
+      apiCost: 0.75,
+      localCost: 0,
       totalTurns: 55,
       totalDuration: 35000,
       waves: [],
@@ -135,11 +141,53 @@ describe('writeCostReport', () => {
   });
 });
 
+describe('API vs local cost split', () => {
+  it('calculates apiCost and localCost from provider info', () => {
+    const state = makeState({
+      waveResults: {
+        assess: makeWaveResult('assess', { cost: 0.12, provider: 'anthropic' }),
+        spec: makeWaveResult('spec', { cost: 0.08, provider: 'anthropic' }),
+        test: makeWaveResult('test', { cost: 0, provider: 'ollama' }),
+        impl: makeWaveResult('impl', { cost: 0, provider: 'ollama' }),
+        quality: makeWaveResult('quality', { cost: 0, provider: 'ollama' }),
+        review: makeWaveResult('review', { cost: 0.1, provider: 'anthropic' }),
+        ship: makeWaveResult('ship', { cost: 0, turns: 0 }),
+      },
+    });
+    const report = buildCostReport(state);
+    expect(report.apiCost).toBeCloseTo(0.3, 4);
+    expect(report.localCost).toBeCloseTo(0, 4);
+  });
+
+  it('includes provider in per-wave breakdown', () => {
+    const state = makeState({
+      waveResults: {
+        assess: makeWaveResult('assess', { cost: 0.12, provider: 'anthropic' }),
+        impl: makeWaveResult('impl', { cost: 0, provider: 'ollama' }),
+      },
+    });
+    const report = buildCostReport(state);
+    const assessWave = report.waves.find((w) => w.wave === 'assess');
+    const implWave = report.waves.find((w) => w.wave === 'impl');
+    expect(assessWave?.provider).toBe('anthropic');
+    expect(implWave?.provider).toBe('ollama');
+  });
+
+  it('treats undefined provider as API (backward compat)', () => {
+    const report = buildCostReport(makeState());
+    // All waves have no provider set — should count as API
+    expect(report.apiCost).toBeCloseTo(report.totalCost, 4);
+    expect(report.localCost).toBe(0);
+  });
+});
+
 describe('printRunSummary', () => {
   it('logs total cost, per-wave breakdown, turns, and duration', () => {
     const report: CostReport = {
       issueNumber: 42,
       totalCost: 0.68,
+      apiCost: 0.68,
+      localCost: 0,
       totalTurns: 52,
       totalDuration: 32000,
       waves: [
