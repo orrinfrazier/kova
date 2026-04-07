@@ -28,6 +28,7 @@ export {
   executeWaveWithRetry,
   type FallbackWaveHandoff,
   type OutputFormat,
+  resolveApiKey,
   type SpawnWaveAgentConfig,
   type SpawnWithFallbackConfig,
   spawnWaveAgent,

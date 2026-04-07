@@ -14,6 +14,22 @@ import { isLocalModel, resolveModelFromString, resolveWaveModel } from './models
 import { isOllamaProvider, resolveOllamaApiKey } from './ollama.js';
 import { type AIWaveName, DEFAULT_THINKING_LEVELS, getWaveTools } from './wave-tools.js';
 
+/** Provider-aware API key resolution. Maps provider names to their environment variable. */
+const PROVIDER_KEY_MAP: Readonly<Record<string, string>> = {
+  anthropic: 'ANTHROPIC_API_KEY',
+  openai: 'OPENAI_API_KEY',
+  google: 'GOOGLE_API_KEY',
+};
+
+/** Resolve API key for a provider. Known providers map to their env var; unknown falls back to ANTHROPIC_API_KEY. */
+export function resolveApiKey(provider: string): string | undefined {
+  if (isOllamaProvider(provider)) {
+    return resolveOllamaApiKey();
+  }
+  const envVar = PROVIDER_KEY_MAP[provider] ?? 'ANTHROPIC_API_KEY';
+  return process.env[envVar];
+}
+
 export interface OutputFormat {
   type: 'json_schema';
   schema: Record<string, unknown>;
@@ -107,8 +123,7 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
     },
     streamFn: streamSimple,
     convertToLlm,
-    getApiKey: (provider: string) =>
-      isOllamaProvider(provider) ? resolveOllamaApiKey() : process.env.ANTHROPIC_API_KEY,
+    getApiKey: resolveApiKey,
   });
 
   let turnCount = 0;
