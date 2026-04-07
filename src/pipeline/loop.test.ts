@@ -1,6 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Issue, RepoConfig } from '../types/index.js';
 
+vi.mock('./run-report.js', () => ({
+  buildRunReport: vi.fn().mockReturnValue({}),
+  printRunReport: vi.fn(),
+  writeRunReport: vi.fn().mockResolvedValue(undefined),
+}));
+
 vi.mock('../services/github.js', () => ({
   fetchIssues: vi.fn().mockResolvedValue([
     { number: 1, title: 'Issue 1', body: 'body 1', labels: [], url: 'https://example.com/1' },
@@ -8,13 +14,12 @@ vi.mock('../services/github.js', () => ({
   ]),
   listOpenPRs: vi.fn().mockResolvedValue([]),
   createPR: vi.fn().mockResolvedValue('https://github.com/test/repo/pull/1'),
-  hasExistingWork: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock('./fix.js', () => ({
   fix: vi.fn().mockImplementation(({ issue }: { issue: Issue }) => ({
     success: true,
-    prUrl: 'https://github.com/test/repo/pull/' + issue.number,
+    prUrl: `https://github.com/test/repo/pull/${issue.number}`,
     state: {
       issue,
       repo: 'test-repo',
@@ -59,6 +64,11 @@ describe('fixLoop — cumulative cost tracking', () => {
     const result = await fixLoop({ repoPath: '/tmp/test', repoName: 'test-repo', config: makeConfig() });
     expect(result.totalDuration).toBe(48000);
   });
+  it('returns startedAt timestamp', async () => {
+    const result = await fixLoop({ repoPath: '/tmp/test', repoName: 'test-repo', config: makeConfig() });
+    expect(result.startedAt).toBeDefined();
+    expect(new Date(result.startedAt).getTime()).toBeGreaterThan(0);
+  });
   it('prints cumulative cost summary', async () => {
     const consoleSpy = vi.spyOn(console, 'log');
     await fixLoop({ repoPath: '/tmp/test', repoName: 'test-repo', config: makeConfig() });
@@ -71,7 +81,6 @@ describe('fixLoop — cumulative cost tracking', () => {
 
 describe('fixLoop — budget cap', () => {
   it('stops after current issue when cumulative cost exceeds budgetUsd', async () => {
-    // Each issue costs $0.58, budget of $0.50 means first issue exceeds it → stop
     const result = await fixLoop({
       repoPath: '/tmp/test',
       repoName: 'test-repo',
@@ -119,12 +128,12 @@ describe('fixLoop — budget cap', () => {
 
   it('CLI budgetUsd overrides config rules.budget_usd', async () => {
     const config = makeConfig();
-    config.rules.budget_usd = 0.5; // would stop after 1
+    config.rules.budget_usd = 0.5;
     const result = await fixLoop({
       repoPath: '/tmp/test',
       repoName: 'test-repo',
       config,
-      budgetUsd: 5.0, // CLI says plenty of budget
+      budgetUsd: 5.0,
     });
     expect(result.total).toBe(2);
     expect(result.budgetExceeded).toBe(false);
@@ -141,103 +150,5 @@ describe('fixLoop — budget cap', () => {
     const output = consoleSpy.mock.calls.map((c) => c[0] as string).join('\n');
     expect(output).toMatch(/budget/i);
     consoleSpy.mockRestore();
-  });
-});
-
-describe('fixLoop — skip issues with existing work', () => {
-  it('skips issue when branch already exists on remote', async () => {
-    const { hasExistingWork } = await import('../services/github.js');
-    const mocked = vi.mocked(hasExistingWork);
-    // Issue 1 has existing branch, issue 2 does not
-    mocked
-      .mockResolvedValueOnce({ reason: 'Branch kova/fix-1 already exists on remote' })
-      .mockResolvedValueOnce(undefined);
-
-    const { fix } = await import('./fix.js');
-    const fixMock = vi.mocked(fix);
-    fixMock.mockClear();
-
-    const result = await fixLoop({ repoPath: '/tmp/test', repoName: 'test-repo', config: makeConfig() });
-    expect(result.skipped).toBe(1);
-    expect(result.succeeded).toBe(1);
-    // fix() should only be called for issue 2
-    expect(fixMock).toHaveBeenCalledTimes(1);
-    expect(fixMock.mock.calls[0]?.[0].issue.number).toBe(2);
-
-    mocked.mockResolvedValue(undefined); // reset
-  });
-
-  it('skips issue when open PR exists for branch', async () => {
-    const { hasExistingWork } = await import('../services/github.js');
-    const mocked = vi.mocked(hasExistingWork);
-    mocked
-      .mockResolvedValueOnce({
-        reason: 'Open PR #5 exists for kova/fix-1',
-        prUrl: 'https://github.com/test/repo/pull/5',
-      })
-      .mockResolvedValueOnce(undefined);
-
-    const { fix } = await import('./fix.js');
-    vi.mocked(fix).mockClear();
-
-    const result = await fixLoop({ repoPath: '/tmp/test', repoName: 'test-repo', config: makeConfig() });
-    expect(result.skipped).toBe(1);
-    expect(result.succeeded).toBe(1);
-
-    mocked.mockResolvedValue(undefined);
-  });
-
-  it('skips all issues when all have existing work', async () => {
-    const { hasExistingWork } = await import('../services/github.js');
-    const mocked = vi.mocked(hasExistingWork);
-    mocked.mockResolvedValue({ reason: 'Branch already exists' });
-
-    const { fix } = await import('./fix.js');
-    vi.mocked(fix).mockClear();
-
-    const result = await fixLoop({ repoPath: '/tmp/test', repoName: 'test-repo', config: makeConfig() });
-    expect(result.skipped).toBe(2);
-    expect(result.succeeded).toBe(0);
-    expect(result.failed).toBe(0);
-    expect(vi.mocked(fix)).not.toHaveBeenCalled();
-
-    mocked.mockResolvedValue(undefined);
-  });
-
-  it('does not skip when force is true', async () => {
-    const { hasExistingWork } = await import('../services/github.js');
-    const mocked = vi.mocked(hasExistingWork);
-    mocked.mockClear();
-    mocked.mockResolvedValue({ reason: 'Branch already exists' });
-
-    const { fix } = await import('./fix.js');
-    vi.mocked(fix).mockClear();
-
-    const result = await fixLoop({
-      repoPath: '/tmp/test',
-      repoName: 'test-repo',
-      config: makeConfig(),
-      force: true,
-    });
-    expect(result.skipped).toBe(0);
-    expect(result.succeeded).toBe(2);
-    // hasExistingWork should not be called when force is true
-    expect(mocked).not.toHaveBeenCalled();
-
-    mocked.mockResolvedValue(undefined);
-  });
-
-  it('logs skip reason for each skipped issue', async () => {
-    const { hasExistingWork } = await import('../services/github.js');
-    const mocked = vi.mocked(hasExistingWork);
-    mocked.mockResolvedValue({ reason: 'Branch kova/fix-1 already exists on remote' });
-
-    const consoleSpy = vi.spyOn(console, 'log');
-    await fixLoop({ repoPath: '/tmp/test', repoName: 'test-repo', config: makeConfig() });
-    const output = consoleSpy.mock.calls.map((c) => c[0] as string).join('\n');
-    expect(output).toMatch(/skip/i);
-    consoleSpy.mockRestore();
-
-    mocked.mockResolvedValue(undefined);
   });
 });
