@@ -1297,7 +1297,7 @@ describe('spawnWaveAgentWithFallback', () => {
     expect(result.fallback_used).toBe(true);
   });
 
-  it('does NOT fall back when model is NOT local (API model)', async () => {
+  it('falls back when API model fails and fallbackModel differs', async () => {
     const { spawnWaveAgentWithFallback } = await import('./wave-executor.js');
 
     const TestSchema = z.object({ grade: z.string(), should_proceed: z.boolean() });
@@ -1314,8 +1314,9 @@ describe('spawnWaveAgentWithFallback', () => {
       fallbackModel: 'claude-opus-4-6',
     });
 
-    expect(result.fallback_used).toBe(false);
-    expect(Agent).toHaveBeenCalledOnce();
+    // With issue #40, fallback works for any model when fallbackModel differs
+    expect(result.fallback_used).toBe(true);
+    expect(Agent).toHaveBeenCalledTimes(2);
   });
 
   it('does NOT fall back when no fallbackModel is specified', async () => {

@@ -20,6 +20,8 @@ export interface CostReport {
     provider?: string | undefined;
     fallback_used?: boolean | undefined;
   }>;
+  /** Per-provider cost aggregation (e.g., { anthropic: 0.50, google: 0.20 }). */
+  providerCosts: Record<string, number>;
   fallbackCount: number;
   startedAt: string;
   completedAt: string;
@@ -36,6 +38,8 @@ export function buildCostReport(state: FixState): CostReport {
   let totalTurns = 0;
   let totalDuration = 0;
   let fallbackCount = 0;
+  const providerCosts: Record<string, number> = {};
+
   for (const wave of WAVE_ORDER) {
     const result = state.waveResults[wave];
     if (!result) continue;
@@ -52,6 +56,10 @@ export function buildCostReport(state: FixState): CostReport {
     totalCost += result.cost;
     totalTurns += result.turns;
     totalDuration += result.duration;
+
+    // Per-provider cost aggregation
+    const providerKey = result.provider ?? 'unknown';
+    providerCosts[providerKey] = (providerCosts[providerKey] ?? 0) + result.cost;
 
     // Classify cost as API or local — undefined provider treated as API (backward compat)
     if (result.provider && isLocalProvider(result.provider)) {
@@ -74,6 +82,7 @@ export function buildCostReport(state: FixState): CostReport {
     totalTurns,
     totalDuration,
     waves,
+    providerCosts,
     fallbackCount,
     startedAt: state.startedAt,
     completedAt: new Date().toISOString(),
@@ -100,7 +109,13 @@ export function printRunSummary(report: CostReport): void {
   log.info('=== Run Summary ===');
   log.info(`Issue:    #${report.issueNumber}`);
   log.info(`Cost:     $${report.totalCost.toFixed(2)}`);
-  if (report.apiCost > 0 || report.localCost > 0) {
+  const providerKeys = Object.keys(report.providerCosts ?? {});
+  if (providerKeys.length > 1) {
+    for (const provider of providerKeys.sort()) {
+      const cost = report.providerCosts[provider] ?? 0;
+      log.info(`  ${provider.padEnd(8)} $${cost.toFixed(2)}`);
+    }
+  } else if (report.apiCost > 0 || report.localCost > 0) {
     log.info(`  API:    $${report.apiCost.toFixed(2)}`);
     log.info(`  Local:  $${report.localCost.toFixed(2)}`);
   }

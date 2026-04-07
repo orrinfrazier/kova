@@ -102,11 +102,25 @@ function waveProvider(config: RepoConfig, wave: FixAIWaveName): string {
   return resolveWaveModel(waveModel).provider;
 }
 
-/** Determine the API fallback model string for a wave config, if applicable. */
-function waveFallbackModel(waveConfig: WaveModelConfig, modelString: string): string | undefined {
+/** Determine the fallback model string for a wave config, if applicable.
+ *  Uses the configured fallback model when set, otherwise falls back to
+ *  the tier-default API model for local-only models. */
+function waveFallbackModel(
+  waveConfig: WaveModelConfig,
+  modelString: string,
+  configFallback?: string,
+): string | undefined {
+  // Configured fallback takes priority — only use if different from primary
+  if (configFallback && configFallback !== modelString) return configFallback;
+  // Default behavior: local models fall back to API tier defaults
   if (!isLocalModel(modelString)) return undefined;
-  // If the wave config is a tier string, use that tier for the fallback
-  if (typeof waveConfig === 'string') return getApiFallbackModelString(waveConfig);
+  if (typeof waveConfig === 'string') {
+    if (waveConfig === 'small' || waveConfig === 'medium' || waveConfig === 'large') {
+      return getApiFallbackModelString(waveConfig);
+    }
+    // Bare model string with local prefix — fall back to medium tier
+    return getApiFallbackModelString('medium');
+  }
   // Object override with a local provider — fall back to medium tier
   return getApiFallbackModelString('medium');
 }
@@ -124,7 +138,7 @@ async function spawnWave<T>(
   const systemPrompt = await loadPrompt(wave);
   const thinkingLevel = resolveThinkingLevel(config, wave);
   const modelString = model.id;
-  const fallbackModel = waveFallbackModel(config.model[wave], modelString);
+  const fallbackModel = waveFallbackModel(config.model[wave], modelString, config.model.fallback);
   return spawnWaveAgentWithFallback<T>({
     wave,
     model: modelString,

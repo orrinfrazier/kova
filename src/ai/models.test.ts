@@ -399,6 +399,130 @@ describe('models', () => {
     });
   });
 
+  describe('resolveWaveModel with bare model strings', () => {
+    it('resolves a bare model string (non-tier) to a model', async () => {
+      const { resolveWaveModel } = await import('./models.js');
+
+      const model = resolveWaveModel('claude-sonnet-4-6');
+      expect(model.id).toBe('claude-sonnet-4-6');
+      expect(model.provider).toBe('anthropic');
+    });
+
+    it('resolves a bare model string with provider prefix', async () => {
+      const { resolveWaveModel } = await import('./models.js');
+
+      const model = resolveWaveModel('openai:gpt-4o');
+      expect(model.id).toBe('gpt-4o');
+      expect(model.provider).toBe('openai');
+    });
+
+    it('resolves ollama model via bare string with ollama prefix', async () => {
+      const { resolveWaveModel } = await import('./models.js');
+
+      const model = resolveWaveModel('ollama:qwen2.5-coder:32b');
+      expect(model.id).toBe('qwen2.5-coder:32b');
+      expect(model.provider).toBe('ollama');
+    });
+
+    it('still resolves tier strings correctly', async () => {
+      const { resolveWaveModel } = await import('./models.js');
+
+      expect(resolveWaveModel('small').id).toBe('claude-haiku-4-5-20251001');
+      expect(resolveWaveModel('medium').id).toBe('claude-sonnet-4-6');
+      expect(resolveWaveModel('large').id).toBe('claude-opus-4-6');
+    });
+  });
+
+  describe('validateModelConfig', () => {
+    it('passes for default config with ANTHROPIC_API_KEY set', async () => {
+      process.env.ANTHROPIC_API_KEY = 'sk-ant-test';
+      const { validateModelConfig } = await import('./models.js');
+
+      expect(() =>
+        validateModelConfig({
+          path: '/tmp/test',
+          rules: { coverage: 80, auto_merge: false, max_issues_per_run: 10 },
+          model: {
+            assess: 'large',
+            spec: 'large',
+            test: 'medium',
+            impl: 'medium',
+            quality: 'small',
+            review: 'large',
+            brainstorm: 'large',
+          },
+          isolation: 'worktree',
+        }),
+      ).not.toThrow();
+      delete process.env.ANTHROPIC_API_KEY;
+    });
+
+    it('throws when API key is missing for anthropic models', async () => {
+      delete process.env.ANTHROPIC_API_KEY;
+      const { validateModelConfig } = await import('./models.js');
+
+      expect(() =>
+        validateModelConfig({
+          path: '/tmp/test',
+          rules: { coverage: 80, auto_merge: false, max_issues_per_run: 10 },
+          model: {
+            assess: 'claude-opus-4-6',
+            spec: 'large',
+            test: 'medium',
+            impl: 'medium',
+            quality: 'small',
+            review: 'large',
+            brainstorm: 'large',
+          },
+          isolation: 'worktree',
+        }),
+      ).toThrow(/API key/i);
+    });
+
+    it('passes for local-only config without API keys', async () => {
+      delete process.env.ANTHROPIC_API_KEY;
+      const { validateModelConfig } = await import('./models.js');
+
+      expect(() =>
+        validateModelConfig({
+          path: '/tmp/test',
+          rules: { coverage: 80, auto_merge: false, max_issues_per_run: 10 },
+          model: {
+            assess: 'ollama:llama3',
+            spec: 'ollama:llama3',
+            test: 'ollama:llama3',
+            impl: 'ollama:llama3',
+            quality: 'ollama:llama3',
+            review: 'ollama:llama3',
+            brainstorm: 'ollama:llama3',
+          },
+          isolation: 'worktree',
+        }),
+      ).not.toThrow();
+    });
+
+    it('throws for unknown model', async () => {
+      const { validateModelConfig } = await import('./models.js');
+
+      expect(() =>
+        validateModelConfig({
+          path: '/tmp/test',
+          rules: { coverage: 80, auto_merge: false, max_issues_per_run: 10 },
+          model: {
+            assess: 'fake-provider:nonexistent',
+            spec: 'large',
+            test: 'medium',
+            impl: 'medium',
+            quality: 'small',
+            review: 'large',
+            brainstorm: 'large',
+          },
+          isolation: 'worktree',
+        }),
+      ).toThrow(/Unknown model/i);
+    });
+  });
+
   describe('isLocalProvider', () => {
     it('identifies ollama as local', async () => {
       const { isLocalProvider } = await import('./models.js');

@@ -104,6 +104,7 @@ describe('writeCostReport', () => {
       totalTurns: 52,
       totalDuration: 32000,
       waves: [{ wave: 'assess', cost: 0.12, turns: 5, duration: 3000, model: 'test-model' }],
+      providerCosts: {},
       fallbackCount: 0,
       startedAt: '2026-04-06T10:00:00.000Z',
       completedAt: '2026-04-06T10:05:00.000Z',
@@ -123,6 +124,7 @@ describe('writeCostReport', () => {
       totalTurns: 30,
       totalDuration: 20000,
       waves: [],
+      providerCosts: {},
       fallbackCount: 0,
       startedAt: '2026-04-06T10:00:00.000Z',
       completedAt: '2026-04-06T10:03:00.000Z',
@@ -135,6 +137,7 @@ describe('writeCostReport', () => {
       totalTurns: 55,
       totalDuration: 35000,
       waves: [],
+      providerCosts: {},
       fallbackCount: 0,
       startedAt: '2026-04-06T10:00:00.000Z',
       completedAt: '2026-04-06T10:06:00.000Z',
@@ -262,6 +265,47 @@ describe('sandbox resource usage in cost report', () => {
   });
 });
 
+describe('per-provider cost breakdown', () => {
+  it('aggregates costs by provider name', () => {
+    const state = makeState({
+      waveResults: {
+        assess: makeWaveResult('assess', { cost: 0.12, provider: 'anthropic' }),
+        spec: makeWaveResult('spec', { cost: 0.08, provider: 'anthropic' }),
+        test: makeWaveResult('test', { cost: 0, provider: 'ollama' }),
+        impl: makeWaveResult('impl', { cost: 0.15, provider: 'google' }),
+        quality: makeWaveResult('quality', { cost: 0, provider: 'ollama' }),
+        review: makeWaveResult('review', { cost: 0.1, provider: 'anthropic' }),
+        ship: makeWaveResult('ship', { cost: 0, turns: 0 }),
+      },
+    });
+    const report = buildCostReport(state);
+    expect(report.providerCosts).toBeDefined();
+    expect(report.providerCosts.anthropic).toBeCloseTo(0.3, 4);
+    expect(report.providerCosts.google).toBeCloseTo(0.15, 4);
+    expect(report.providerCosts.ollama).toBeCloseTo(0, 4);
+  });
+
+  it('uses "unknown" for waves without provider', () => {
+    const state = makeState({
+      waveResults: {
+        assess: makeWaveResult('assess', { cost: 0.12 }),
+      },
+      completedWaves: ['assess'],
+    });
+    const report = buildCostReport(state);
+    expect(report.providerCosts.unknown).toBeCloseTo(0.12, 4);
+  });
+
+  it('returns empty object when no waves completed', () => {
+    const state = makeState({
+      waveResults: {},
+      completedWaves: [],
+    });
+    const report = buildCostReport(state);
+    expect(report.providerCosts).toEqual({});
+  });
+});
+
 describe('printRunSummary', () => {
   it('logs total cost, per-wave breakdown, turns, and duration', () => {
     const report: CostReport = {
@@ -276,6 +320,7 @@ describe('printRunSummary', () => {
         { wave: 'spec', cost: 0.08, turns: 3, duration: 2000, model: 'claude-opus-4-20250514' },
         { wave: 'impl', cost: 0.2, turns: 20, duration: 12000, model: 'claude-sonnet-4-20250514' },
       ],
+      providerCosts: {},
       fallbackCount: 0,
       startedAt: '2026-04-06T10:00:00.000Z',
       completedAt: '2026-04-06T10:05:00.000Z',
