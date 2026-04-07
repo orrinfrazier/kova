@@ -82,6 +82,13 @@ export interface FailedPiece {
   };
 }
 
+export interface ReviewKnownIssue {
+  category: string;
+  file: string;
+  description: string;
+  severity: string;
+}
+
 export interface FixState {
   issue: Issue;
   repo: string;
@@ -93,4 +100,5 @@ export interface FixState {
   status: 'running' | 'completed' | 'failed' | 'interrupted';
   error?: string | undefined;
   failedPieces?: FailedPiece[] | undefined;
+  reviewKnownIssues?: ReviewKnownIssue[] | undefined;
 }

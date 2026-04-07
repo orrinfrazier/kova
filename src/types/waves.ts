@@ -75,7 +75,9 @@ export const ReviewFindingSchema = z.object({
   line: z.number().optional(),
   description: z.string(),
   severity: z.enum(['low', 'medium', 'high', 'critical']),
+  test_code: z.string().optional(),
 });
+export type ReviewFinding = z.infer<typeof ReviewFindingSchema>;
 
 export const ReviewResultSchema = z.object({
   verdict: z.enum(['pass', 'needs_fixes']),
