@@ -2,35 +2,62 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Issue, RepoConfig } from '../types/index.js';
+import type { Issue, RepoConfig, WaveHandoff, WaveName, WaveResult } from '../types/index.js';
 
-// Mock the AI layer — returns wave-appropriate structured output
-function waveStructuredOutput(wave?: string): unknown {
-  if (wave === 'review') {
-    return { verdict: 'pass', findings: [], summary: 'all good' };
-  }
+// --- Default artifacts ---
+
+const DEFAULT_ASSESS = {
+  grade: 'A',
+  surface_area: { files: [], estimated_lines: 10, modules_affected: [] },
+  risk: 'low',
+  reasoning: 'simple',
+  should_proceed: true,
+};
+
+const DEFAULT_SPEC = { summary: 'test spec', pieces: [], dependency_order: [], constraints: [] };
+const DEFAULT_QUALITY = {
+  lint: 'pass',
+  typecheck: 'pass',
+  tests: 'pass',
+  coverage: 90,
+  audit: 'pass',
+  all_passing: true,
+};
+const DEFAULT_REVIEW = { verdict: 'pass', findings: [], summary: 'all good' };
+
+function makeHandoff(wave: WaveName, artifact: unknown): WaveHandoff {
   return {
-    grade: 'A',
-    surface_area: { files: [], estimated_lines: 10, modules_affected: [] },
-    risk: 'low',
-    reasoning: 'simple',
-    should_proceed: true,
+    wave,
+    timestamp: new Date().toISOString(),
+    model: 'test-model',
+    cost: 0.01,
+    turns: 1,
+    confidence: 'high',
+    artifact,
+    approach_notes: '',
   };
 }
 
+function makeWaveResult(wave: WaveName, artifact: unknown): WaveResult {
+  return { wave, success: true, artifact, duration: 100, cost: 0.01, turns: 1, model: 'test-model' };
+}
+
+// --- Mocks ---
+
+const mockSpawnWaveAgent = vi.fn();
 vi.mock('../ai/index.js', () => ({
-  executeWaveWithRetry: vi.fn().mockImplementation((opts: { wave?: string }) => ({
-    result: 'done',
-    success: true,
-    duration: 100,
-    turns: 1,
-    cost: 0.01,
-    model: 'test-model',
-    structuredOutput: waveStructuredOutput(opts.wave),
-  })),
+  resolveModel: vi.fn().mockReturnValue({ id: 'test-model' }),
+  spawnWaveAgent: (...args: unknown[]) => mockSpawnWaveAgent(...args),
+  getWaveTools: vi.fn().mockReturnValue([]),
 }));
 
-// Mock github
+const mockRunTILoop = vi.fn();
+const mockRunReviewLoop = vi.fn();
+vi.mock('./loops.js', () => ({
+  runTILoop: (...args: unknown[]) => mockRunTILoop(...args),
+  runReviewLoop: (...args: unknown[]) => mockRunReviewLoop(...args),
+}));
+
 vi.mock('../services/github.js', () => ({
   listOpenPRs: vi.fn().mockResolvedValue([]),
   createPR: vi.fn().mockResolvedValue('https://github.com/test/repo/pull/1'),
@@ -38,22 +65,18 @@ vi.mock('../services/github.js', () => ({
   hasExistingWork: vi.fn().mockResolvedValue(false),
 }));
 
-// Mock pr-context
 vi.mock('../services/pr-context.js', () => ({
   formatPRContext: vi.fn().mockReturnValue(''),
 }));
 
-// Mock language detection (needed by review loop's resolveTestCommand)
 vi.mock('../services/language-detect.js', () => ({
   detectTooling: vi.fn().mockResolvedValue({ language: 'typescript', testRunner: 'vitest' }),
 }));
 
-// Mock prompt loading
 vi.mock('./prompts.js', () => ({
   loadPrompt: vi.fn().mockResolvedValue('mock system prompt'),
 }));
 
-// Mock worktree
 vi.mock('../services/worktree.js', async (importOriginal) => {
   const original = await importOriginal<typeof import('../services/worktree.js')>();
   return {
@@ -73,9 +96,7 @@ vi.mock('../services/worktree.js', async (importOriginal) => {
 
 const { fix } = await import('./fix.js');
 const { loadCheckpoint } = await import('../services/checkpoint.js');
-const { executeWaveWithRetry } = await import('../ai/index.js');
 const { installSignalHandlers, removeSignalHandlers, resetShutdown } = await import('../services/shutdown.js');
-const mockExecute = vi.mocked(executeWaveWithRetry);
 
 function makeIssue(n: number): Issue {
   return { number: n, title: `Test issue ${n}`, body: 'body', labels: [], url: `https://example.com/${n}` };
@@ -90,23 +111,40 @@ function makeConfig(): RepoConfig {
   };
 }
 
+function setupDefaultMocks(): void {
+  const artifacts: Record<string, unknown> = {
+    assess: DEFAULT_ASSESS,
+    spec: DEFAULT_SPEC,
+    quality: DEFAULT_QUALITY,
+  };
+  mockSpawnWaveAgent.mockImplementation(async (config: { wave: WaveName }) => {
+    return makeHandoff(config.wave, artifacts[config.wave] ?? 'done');
+  });
+
+  mockRunTILoop.mockResolvedValue({
+    testWaveResult: makeWaveResult('test', 'tests written'),
+    implWaveResult: makeWaveResult('impl', { tests_passing: true }),
+    testsPassing: true,
+    totalCost: 0.02,
+    attempts: 1,
+  });
+
+  mockRunReviewLoop.mockResolvedValue({
+    reviewWaveResult: makeWaveResult('review', DEFAULT_REVIEW),
+    totalCost: 0.01,
+    iterations: 1,
+    knownIssues: [],
+  });
+}
+
 describe('fix — graceful shutdown', () => {
   let workDir: string;
 
   beforeEach(async () => {
     workDir = await mkdtemp(join(tmpdir(), 'kova-shutdown-'));
     resetShutdown();
-    // Reset mock to default wave-appropriate implementation (prevents test leakage)
-    mockExecute.mockReset();
-    mockExecute.mockImplementation(async (opts: { wave?: string }) => ({
-      result: 'done',
-      success: true,
-      duration: 100,
-      turns: 1,
-      cost: 0.01,
-      model: 'test-model',
-      structuredOutput: waveStructuredOutput(opts.wave),
-    }));
+    vi.clearAllMocks();
+    setupDefaultMocks();
   });
 
   afterEach(async () => {
@@ -117,23 +155,20 @@ describe('fix — graceful shutdown', () => {
 
   it('returns interrupted result when shutdown requested between waves', async () => {
     // Trigger shutdown after the first wave (assess) completes
-    let callCount = 0;
-    mockExecute.mockImplementation(async (opts: { wave?: string }) => {
-      callCount++;
-      if (callCount === 1) {
+    let spawnCallCount = 0;
+    mockSpawnWaveAgent.mockImplementation(async (config: { wave: WaveName }) => {
+      spawnCallCount++;
+      if (spawnCallCount === 1) {
         // After assess completes, request shutdown
         installSignalHandlers();
         process.emit('SIGINT', 'SIGINT');
       }
-      return {
-        result: 'done',
-        success: true,
-        duration: 100,
-        turns: 1,
-        cost: 0.01,
-        model: 'test-model',
-        structuredOutput: waveStructuredOutput(opts.wave),
+      const artifacts: Record<string, unknown> = {
+        assess: DEFAULT_ASSESS,
+        spec: DEFAULT_SPEC,
+        quality: DEFAULT_QUALITY,
       };
+      return makeHandoff(config.wave, artifacts[config.wave] ?? 'done');
     });
 
     const result = await fix({
@@ -146,28 +181,25 @@ describe('fix — graceful shutdown', () => {
     expect(result.success).toBe(false);
     expect(result.error).toBe('Interrupted by signal');
     expect(result.state.status).toBe('interrupted');
-    // Should have only run assess (1 wave) before stopping
-    expect(callCount).toBe(1);
+    // Should have only run assess (1 spawnWaveAgent call) before stopping
+    expect(spawnCallCount).toBe(1);
   });
 
   it('saves checkpoint with interrupted status', async () => {
-    let callCount = 0;
-    mockExecute.mockImplementation(async (opts: { wave?: string }) => {
-      callCount++;
-      if (callCount === 2) {
+    let spawnCallCount = 0;
+    mockSpawnWaveAgent.mockImplementation(async (config: { wave: WaveName }) => {
+      spawnCallCount++;
+      if (spawnCallCount === 2) {
         // After spec wave, trigger shutdown
         installSignalHandlers();
         process.emit('SIGINT', 'SIGINT');
       }
-      return {
-        result: 'done',
-        success: true,
-        duration: 100,
-        turns: 1,
-        cost: 0.01,
-        model: 'test-model',
-        structuredOutput: waveStructuredOutput(opts.wave),
+      const artifacts: Record<string, unknown> = {
+        assess: DEFAULT_ASSESS,
+        spec: DEFAULT_SPEC,
+        quality: DEFAULT_QUALITY,
       };
+      return makeHandoff(config.wave, artifacts[config.wave] ?? 'done');
     });
 
     await fix({
@@ -177,7 +209,6 @@ describe('fix — graceful shutdown', () => {
       config: makeConfig(),
     });
 
-    // Verify checkpoint was saved with interrupted status
     const checkpoint = await loadCheckpoint(workDir);
     expect(checkpoint).not.toBeNull();
     expect(checkpoint?.status).toBe('interrupted');

@@ -1,9 +1,9 @@
 // Fix pipeline — Assess → Spec → Test → Impl → Quality → Review → Ship
-// Each wave runs pi-mono agent sessions with wave-specific prompts and structured output.
-// Waves are strictly sequential. Quality gates run inside the agent (self-healing).
+// Uses spawnWaveAgent() for standalone waves, runTILoop() for test+impl,
+// and runReviewLoop() for review. Handoffs persist after every wave.
 
 import { z } from 'zod';
-import { executeWaveWithRetry, type OutputFormat, type WaveExecutionResult } from '../ai/index.js';
+import { getWaveTools, type OutputFormat, resolveModel, spawnWaveAgent } from '../ai/index.js';
 import { clearCheckpoint, loadCheckpoint, saveCheckpoint } from '../services/checkpoint.js';
 import { commentOnIssue, createPR, listOpenPRs } from '../services/github.js';
 import { formatPRContext, type OpenPR } from '../services/pr-context.js';
@@ -15,21 +15,18 @@ import {
   removeWorktree,
   worktreeExists,
 } from '../services/worktree.js';
-import type {
-  FailedPiece,
-  FixState,
-  ImplDiagnosis,
-  ImplResult,
-  Issue,
-  RepoConfig,
-  WaveName,
-  WaveResult,
+import type { FailedPiece, FixState, Issue, RepoConfig, WaveHandoff, WaveName, WaveResult } from '../types/index.js';
+import {
+  type AssessResult,
+  AssessResultSchema,
+  loadAllHandoffs,
+  SpecResultSchema,
+  saveHandoff,
 } from '../types/index.js';
-import { type AssessResult, AssessResultSchema, ImplResultSchema, SpecResultSchema } from '../types/index.js';
 import { log } from '../utils/logger.js';
 import { buildWaveContext } from './context.js';
 import { buildCostReport, printRunSummary, writeCostReport } from './cost-report.js';
-import { runReviewLoop } from './loops.js';
+import { runReviewLoop, runTILoop, type TestRunner } from './loops.js';
 import { loadPrompt } from './prompts.js';
 
 function toOutputFormat(schema: z.ZodType): OutputFormat {
@@ -47,6 +44,7 @@ export interface FixOptions {
   fresh?: boolean | undefined;
   noComment?: boolean | undefined;
   pendingPRs?: OpenPR[] | undefined;
+  testRunner?: TestRunner | undefined;
 }
 
 export interface FixResult {
@@ -56,8 +54,62 @@ export interface FixResult {
   state: FixState;
 }
 
+// --- Helpers ---
+
+/** Spawn a wave agent directly via spawnWaveAgent — no backward-compat wrapper. */
+async function spawnWave<T>(
+  wave: WaveName,
+  workDir: string,
+  config: RepoConfig,
+  userMessage: string,
+  outputFormat?: OutputFormat,
+): Promise<WaveHandoff<T>> {
+  const model = resolveModel(wave === 'ship' ? 'small' : config.model[wave]);
+  const tools = getWaveTools(wave, workDir);
+  const systemPrompt = await loadPrompt(wave);
+  return spawnWaveAgent<T>({
+    wave,
+    model: model.id,
+    tools,
+    systemPrompt,
+    handoffContext: '',
+    userMessage,
+    cwd: workDir,
+    ...(outputFormat != null && { outputFormat }),
+  });
+}
+
+/** Convert a WaveHandoff to WaveResult for checkpoint/cost-report compatibility. */
+function handoffToResult(handoff: WaveHandoff): WaveResult {
+  return {
+    wave: handoff.wave,
+    success: true,
+    artifact: handoff.artifact,
+    duration: 0,
+    cost: handoff.cost,
+    turns: handoff.turns,
+    model: handoff.model,
+  };
+}
+
+/** Convert a WaveResult to WaveHandoff for persistence. */
+function waveResultToHandoff(result: WaveResult): WaveHandoff {
+  return {
+    wave: result.wave,
+    timestamp: new Date().toISOString(),
+    model: result.model ?? 'unknown',
+    cost: result.cost,
+    turns: result.turns,
+    confidence: 'medium',
+    artifact: result.artifact,
+    approach_notes: '',
+  };
+}
+
+// --- Main ---
+
 export async function fix(options: FixOptions): Promise<FixResult> {
-  const { issue, repoPath, repoName, config, fresh, noComment, pendingPRs } = options;
+  const { issue, repoPath, repoName, config, fresh, noComment, pendingPRs, testRunner } = options;
 
   if (fresh) {
     if (config.isolation === 'worktree' && (await worktreeExists(repoPath, issue.number))) {
@@ -79,6 +131,13 @@ export async function fix(options: FixOptions): Promise<FixResult> {
 
   if (existing && existing.completedWaves.length > 0) {
     state = existing;
+    // Restore waveResults from handoff files for any missing entries
+    const handoffs = await loadAllHandoffs(workDir);
+    for (const handoff of handoffs) {
+      if (!state.waveResults[handoff.wave]) {
+        state.waveResults[handoff.wave] = handoffToResult(handoff);
+      }
+    }
     log.info(`Resuming #${issue.number} — completed waves: [${state.completedWaves.join(', ')}]`);
   } else {
     state = createInitialState(issue, repoName, repoPath, worktree?.path);
@@ -96,36 +155,48 @@ export async function fix(options: FixOptions): Promise<FixResult> {
   };
 
   try {
+    // WAVE A: Assess
     if (!shouldSkip('assess')) {
-      const result = await runWave('assess', workDir, config, {
-        userMessage: formatIssueContext(issue),
-        outputFormat: toOutputFormat(AssessResultSchema),
-      });
-      state.waveResults.assess = toWaveResult('assess', result);
+      const handoff = await spawnWave<AssessResult>(
+        'assess',
+        workDir,
+        config,
+        formatIssueContext(issue),
+        toOutputFormat(AssessResultSchema),
+      );
+      await saveHandoff(workDir, handoff);
+      state.waveResults.assess = handoffToResult(handoff);
       state.completedWaves.push('assess');
       await saveCheckpoint(workDir, state);
 
-      const assess = result.structuredOutput as AssessResult | undefined;
-      if (assess && !assess.should_proceed) {
-        log.warn(`[assess] Grade ${assess.grade} — not proceeding: ${assess.reasoning}`);
-        if (!noComment) {
-          const comment = formatSkipComment(assess, issue);
-          await commentOnIssue(repoPath, issue.number, comment);
+      // Gate: only check when structured output parsed successfully
+      if (handoff.confidence === 'high') {
+        const assess = handoff.artifact;
+        if (!assess.should_proceed) {
+          log.warn(`[assess] Grade ${assess.grade} — not proceeding: ${assess.reasoning}`);
+          if (!noComment) {
+            await commentOnIssue(repoPath, issue.number, formatSkipComment(assess, issue));
+          }
+          state.status = 'completed';
+          return { success: false, error: `Issue graded ${assess.grade}, skipped`, state };
         }
-        state.status = 'completed';
-        return { success: false, error: `Issue graded ${assess.grade}, skipped`, state };
       }
 
       const interrupted = await interruptIfShutdown();
       if (interrupted) return interrupted;
     }
 
+    // WAVE S: Spec
     if (!shouldSkip('spec')) {
-      const result = await runWave('spec', workDir, config, {
-        userMessage: buildWaveContext('spec', issue, state.waveResults, { prContext }),
-        outputFormat: toOutputFormat(SpecResultSchema),
-      });
-      state.waveResults.spec = toWaveResult('spec', result);
+      const handoff = await spawnWave(
+        'spec',
+        workDir,
+        config,
+        buildWaveContext('spec', issue, state.waveResults, { prContext }),
+        toOutputFormat(SpecResultSchema),
+      );
+      await saveHandoff(workDir, handoff);
+      state.waveResults.spec = handoffToResult(handoff);
       state.completedWaves.push('spec');
       await saveCheckpoint(workDir, state);
 
@@ -133,34 +204,81 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       if (interrupted) return interrupted;
     }
 
-    if (!shouldSkip('test')) {
-      const result = await runWave('test', workDir, config, {
-        userMessage: buildWaveContext('test', issue, state.waveResults),
+    // WAVE T + I: TI Loop
+    if (!(shouldSkip('test') && shouldSkip('impl'))) {
+      const tiResult = await runTILoop({
+        issue,
+        workDir,
+        repoConfig: config,
+        waveResults: state.waveResults,
+        prContext,
+        ...(testRunner != null && { testRunner }),
       });
-      state.waveResults.test = toWaveResult('test', result);
-      state.completedWaves.push('test');
+
+      // Save handoffs for test and impl
+      await saveHandoff(workDir, waveResultToHandoff(tiResult.testWaveResult));
+      state.waveResults.test = tiResult.testWaveResult;
+
+      const implHandoff: WaveHandoff = {
+        ...waveResultToHandoff(tiResult.implWaveResult),
+        confidence: tiResult.testsPassing ? 'high' : 'low',
+        approach_notes: tiResult.diagnosis ? `diagnosis: ${tiResult.diagnosis}` : '',
+      };
+      await saveHandoff(workDir, implHandoff);
+      state.waveResults.impl = tiResult.implWaveResult;
+
+      if (!state.completedWaves.includes('test')) state.completedWaves.push('test');
+      if (!state.completedWaves.includes('impl')) state.completedWaves.push('impl');
       await saveCheckpoint(workDir, state);
+
+      // Escalation: SPEC_WRONG → re-run spec + TI loop
+      if (!tiResult.testsPassing && tiResult.diagnosis === 'SPEC_WRONG') {
+        log.info('[escalation] SPEC_WRONG — re-running spec then TI loop');
+        const specHandoff = await spawnWave(
+          'spec',
+          workDir,
+          config,
+          buildWaveContext('spec', issue, state.waveResults, { prContext }),
+          toOutputFormat(SpecResultSchema),
+        );
+        await saveHandoff(workDir, specHandoff);
+        state.waveResults.spec = handoffToResult(specHandoff);
+
+        const retryTI = await runTILoop({
+          issue,
+          workDir,
+          repoConfig: config,
+          waveResults: state.waveResults,
+          prContext,
+          ...(testRunner != null && { testRunner }),
+        });
+        state.waveResults.test = retryTI.testWaveResult;
+        state.waveResults.impl = retryTI.implWaveResult;
+        await saveCheckpoint(workDir, state);
+
+        if (!retryTI.testsPassing) {
+          trackFailedPiece(state, retryTI.diagnosis);
+        }
+      } else if (!tiResult.testsPassing) {
+        trackFailedPiece(state, tiResult.diagnosis);
+      }
 
       const interrupted = await interruptIfShutdown();
       if (interrupted) return interrupted;
     }
 
-    if (!shouldSkip('impl')) {
-      await runImplWithEscalation(workDir, config, issue, state, prContext);
-      state.completedWaves.push('impl');
-      await saveCheckpoint(workDir, state);
-
-      const interrupted = await interruptIfShutdown();
-      if (interrupted) return interrupted;
-    }
-
+    // WAVE Q: Quality
     if (!shouldSkip('quality')) {
-      const result = await runWave('quality', workDir, config, {
-        userMessage: buildWaveContext('quality', issue, state.waveResults, {
+      const handoff = await spawnWave(
+        'quality',
+        workDir,
+        config,
+        buildWaveContext('quality', issue, state.waveResults, {
           coverageThreshold: config.rules.coverage,
         }),
-      });
-      state.waveResults.quality = toWaveResult('quality', result);
+      );
+      await saveHandoff(workDir, handoff);
+      state.waveResults.quality = handoffToResult(handoff);
       state.completedWaves.push('quality');
       await saveCheckpoint(workDir, state);
 
@@ -168,6 +286,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       if (interrupted) return interrupted;
     }
 
+    // WAVE R: Review Loop
     if (!shouldSkip('review')) {
       const reviewLoopResult = await runReviewLoop({
         issue,
@@ -175,6 +294,19 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         repoConfig: config,
         waveResults: state.waveResults,
         prContext,
+        ...(testRunner != null && { testRunner }),
+      });
+
+      // Save review handoff
+      await saveHandoff(workDir, {
+        wave: 'review' as WaveName,
+        timestamp: new Date().toISOString(),
+        model: reviewLoopResult.reviewWaveResult.model ?? 'unknown',
+        cost: reviewLoopResult.totalCost,
+        turns: reviewLoopResult.reviewWaveResult.turns,
+        confidence: reviewLoopResult.knownIssues.length === 0 ? 'high' : 'medium',
+        artifact: reviewLoopResult.reviewWaveResult.artifact,
+        approach_notes: `${reviewLoopResult.iterations} iteration(s)`,
       });
 
       state.waveResults.review = reviewLoopResult.reviewWaveResult;
@@ -198,6 +330,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       }
     }
 
+    // Ship — no AI wave, just git operations
     if (!shouldSkip('ship')) {
       const branch = worktree?.branch ?? `kova/fix-${issue.number}`;
       const commitResult = await commitAndPush(workDir, branch, issue);
@@ -279,154 +412,16 @@ export async function fix(options: FixOptions): Promise<FixResult> {
   }
 }
 
-const MAX_IMPL_RETRIES = 3;
-
-async function runImplWithEscalation(
-  workDir: string,
-  config: RepoConfig,
-  issue: Issue,
-  state: FixState,
-  prContext: string,
-): Promise<void> {
-  let lastDiagnosis: ImplDiagnosis | undefined;
-
-  for (let attempt = 1; attempt <= MAX_IMPL_RETRIES; attempt++) {
-    const result = await runWave('impl', workDir, config, {
-      userMessage: buildWaveContext('impl', issue, state.waveResults, { prContext }),
-      outputFormat: toOutputFormat(ImplResultSchema),
-    });
-    state.waveResults.impl = toWaveResult('impl', result);
-
-    const implResult = result.structuredOutput as ImplResult | undefined;
-
-    if (implResult?.tests_passing) {
-      return;
-    }
-
-    lastDiagnosis = implResult?.diagnosis;
-
-    if (attempt < MAX_IMPL_RETRIES) {
-      log.warn(`[impl] Attempt ${attempt}/${MAX_IMPL_RETRIES} — tests failing, retrying...`);
-    }
-  }
-
-  // All retries exhausted — escalate based on diagnosis
-  log.warn('[impl] All retries exhausted — escalating');
-  await handleEscalation(lastDiagnosis, workDir, config, issue, state, prContext);
-}
-
-async function handleEscalation(
-  diagnosis: ImplDiagnosis | undefined,
-  workDir: string,
-  config: RepoConfig,
-  issue: Issue,
-  state: FixState,
-  prContext: string,
-): Promise<void> {
-  const category = diagnosis?.category ?? 'STUCK';
-
-  if (category === 'SPEC_WRONG') {
-    log.info('[escalation] SPEC_WRONG — re-running spec then T→I');
-    const specResult = await runWave('spec', workDir, config, {
-      userMessage: buildWaveContext('spec', issue, state.waveResults, { prContext }),
-      outputFormat: toOutputFormat(SpecResultSchema),
-    });
-    state.waveResults.spec = toWaveResult('spec', specResult);
-
-    const testResult = await runWave('test', workDir, config, {
-      userMessage: buildWaveContext('test', issue, state.waveResults),
-    });
-    state.waveResults.test = toWaveResult('test', testResult);
-
-    const implResult = await runWave('impl', workDir, config, {
-      userMessage: buildWaveContext('impl', issue, state.waveResults, { prContext }),
-      outputFormat: toOutputFormat(ImplResultSchema),
-    });
-    state.waveResults.impl = toWaveResult('impl', implResult);
-
-    const impl = implResult.structuredOutput as ImplResult | undefined;
-    if (!impl?.tests_passing) {
-      trackFailedPiece(state, diagnosis);
-    }
-    return;
-  }
-
-  if (category === 'APPROACH_WRONG') {
-    log.info('[escalation] APPROACH_WRONG — re-running impl with approach hint');
-    const hint = `Previous approach failed. Diagnosis: ${diagnosis?.theory ?? 'unknown'}. Try a fundamentally different algorithm, pattern, or architecture.`;
-    const result = await runWave('impl', workDir, config, {
-      userMessage: buildWaveContext('impl', issue, state.waveResults, { prContext, escalationHint: hint }),
-      outputFormat: toOutputFormat(ImplResultSchema),
-    });
-    state.waveResults.impl = toWaveResult('impl', result);
-
-    const impl = result.structuredOutput as ImplResult | undefined;
-    if (!impl?.tests_passing) {
-      trackFailedPiece(state, diagnosis);
-    }
-    return;
-  }
-
-  if (category === 'MISSING_CONTEXT') {
-    log.info('[escalation] MISSING_CONTEXT — re-running impl with additional context');
-    const hint = `Missing context detected: ${diagnosis?.theory ?? 'unknown'}. Read additional source files, dependencies, and type definitions before implementing.`;
-    const result = await runWave('impl', workDir, config, {
-      userMessage: buildWaveContext('impl', issue, state.waveResults, { prContext, escalationHint: hint }),
-      outputFormat: toOutputFormat(ImplResultSchema),
-    });
-    state.waveResults.impl = toWaveResult('impl', result);
-
-    const impl = result.structuredOutput as ImplResult | undefined;
-    if (!impl?.tests_passing) {
-      trackFailedPiece(state, diagnosis);
-    }
-    return;
-  }
-
-  // STUCK or unknown — mark failed, continue
-  log.info('[escalation] STUCK — marking piece as failed');
-  trackFailedPiece(state, diagnosis);
-}
-
-function trackFailedPiece(state: FixState, diagnosis: ImplDiagnosis | undefined): void {
+function trackFailedPiece(state: FixState, diagnosis?: string): void {
   const piece: FailedPiece = {
     pieceName: 'impl',
     diagnosis: {
-      category: diagnosis?.category ?? 'STUCK',
-      theory: diagnosis?.theory ?? 'No diagnosis provided',
-      tests_still_failing: diagnosis?.tests_still_failing ?? [],
+      category: diagnosis ?? 'STUCK',
+      theory: 'TI loop exhausted all retries',
+      tests_still_failing: [],
     },
   };
   state.failedPieces = [...(state.failedPieces ?? []), piece];
-}
-
-async function runWave(
-  wave: WaveName,
-  workDir: string,
-  config: RepoConfig,
-  opts: { userMessage: string; outputFormat?: OutputFormat },
-): Promise<WaveExecutionResult> {
-  const systemPrompt = await loadPrompt(wave);
-  return executeWaveWithRetry({
-    wave,
-    systemPrompt,
-    userMessage: opts.userMessage,
-    cwd: workDir,
-    modelTier: wave === 'ship' ? 'small' : config.model[wave],
-    ...(opts.outputFormat && { outputFormat: opts.outputFormat }),
-  });
-}
-
-function toWaveResult(wave: WaveName, result: WaveExecutionResult): WaveResult {
-  return {
-    wave,
-    success: result.success,
-    artifact: result.structuredOutput ?? result.result,
-    duration: result.duration,
-    cost: result.cost,
-    turns: result.turns,
-    model: result.model,
-  };
 }
 
 function createInitialState(issue: Issue, repo: string, repoPath: string, worktree?: string): FixState {

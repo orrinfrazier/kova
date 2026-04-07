@@ -1,7 +1,7 @@
 // End-to-end test with mock pi-mono — verifies the full pipeline without hitting the API.
 // Mocks Agent at the pi-agent-core level, lets real wave-executor, checkpoint, and pipeline run.
 
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -156,6 +156,14 @@ const mockAgentConstructor = vi.fn();
 // Track all user messages passed to agent.prompt() across waves
 const allPrompts: string[] = [];
 
+// Mock test runner — always returns passing. Required because runTILoop
+// verifies tests via bash (orchestrator, not agent) after each impl attempt.
+const mockTestRunner = vi.fn().mockResolvedValue({
+  passed: true,
+  output: 'All tests pass',
+  exitCode: 0,
+});
+
 // Mock the Agent class from pi-agent-core — vi.fn() works as constructor with `new`
 vi.mock('@mariozechner/pi-agent-core', () => ({
   Agent: mockAgentConstructor,
@@ -285,6 +293,7 @@ describe('fix — E2E with mock pi-mono', () => {
         repoPath: workDir,
         repoName: 'test-repo',
         config: makeConfig(),
+        testRunner: mockTestRunner,
       });
 
       expect(result.success).toBe(true);
@@ -304,6 +313,7 @@ describe('fix — E2E with mock pi-mono', () => {
         repoPath: workDir,
         repoName: 'test-repo',
         config: makeConfig(),
+        testRunner: mockTestRunner,
       });
 
       expect(allPrompts[0]).toContain('Issue #7');
@@ -320,6 +330,7 @@ describe('fix — E2E with mock pi-mono', () => {
         repoPath: workDir,
         repoName: 'test-repo',
         config: makeConfig(),
+        testRunner: mockTestRunner,
       });
 
       const models = mockAgentConstructor.mock.calls.map(
@@ -341,6 +352,7 @@ describe('fix — E2E with mock pi-mono', () => {
         repoPath: workDir,
         repoName: 'test-repo',
         config: makeConfig(),
+        testRunner: mockTestRunner,
       });
 
       expect(result.state.waveResults.assess?.cost).toBe(0.1);
@@ -362,6 +374,7 @@ describe('fix — E2E with mock pi-mono', () => {
         repoPath: workDir,
         repoName: 'test-repo',
         config: makeConfig(),
+        testRunner: mockTestRunner,
       });
 
       const finalCheckpoint = await loadCheckpoint(workDir);
@@ -378,6 +391,7 @@ describe('fix — E2E with mock pi-mono', () => {
         repoPath: workDir,
         repoName: 'test-repo',
         config: makeConfig(),
+        testRunner: mockTestRunner,
       });
 
       const raw = await readFile(join(workDir, '.kova', 'state.json'), 'utf-8');
@@ -411,6 +425,7 @@ describe('fix — E2E with mock pi-mono', () => {
         repoPath: workDir,
         repoName: 'test-repo',
         config: makeConfig(),
+        testRunner: mockTestRunner,
       });
 
       const assess = result.state.waveResults.assess?.artifact as typeof ASSESS_PASS;
@@ -426,9 +441,62 @@ describe('fix — E2E with mock pi-mono', () => {
       expect(review.verdict).toBe('pass');
 
       expect(result.state.waveResults.test?.artifact).toBe('Tests written: 3 test files');
-      const implArtifact = result.state.waveResults.impl?.artifact as typeof IMPL_PASS;
+      // impl artifact comes from runTILoop which doesn't pass outputFormat,
+      // so structured output is stored as a JSON string
+      const implRaw = result.state.waveResults.impl?.artifact;
+      const implArtifact =
+        typeof implRaw === 'string' ? (JSON.parse(implRaw) as typeof IMPL_PASS) : (implRaw as typeof IMPL_PASS);
       expect(implArtifact.tests_passing).toBe(true);
       expect(implArtifact.files_modified).toContain('src/handler.ts');
+    });
+  });
+
+  describe('handoff persistence', () => {
+    it('saves handoff files after every wave', async () => {
+      setupResponseSequence(happyPathResponses());
+
+      await fix({
+        issue: makeIssue(7),
+        repoPath: workDir,
+        repoName: 'test-repo',
+        config: makeConfig(),
+        testRunner: mockTestRunner,
+      });
+
+      for (const wave of ['assess', 'spec', 'test', 'impl', 'quality', 'review'] as const) {
+        const handoffPath = join(workDir, '.kova', 'handoffs', `${wave}.json`);
+        const content = await readFile(handoffPath, 'utf-8');
+        const handoff = JSON.parse(content) as { wave: string; model: string; cost: number };
+        expect(handoff.wave).toBe(wave);
+        expect(typeof handoff.model).toBe('string');
+        expect(typeof handoff.cost).toBe('number');
+      }
+    });
+
+    it('restores waveResults from handoffs on resume', async () => {
+      // Run pipeline partway (assess + spec only, then "fail")
+      setupResponseSequence([
+        { structuredOutput: ASSESS_PASS, cost: 0.1 },
+        { structuredOutput: SPEC_RESULT, cost: 0.08 },
+        { error: 'authentication failed' },
+      ]);
+
+      await fix({
+        issue: makeIssue(7),
+        repoPath: workDir,
+        repoName: 'test-repo',
+        config: makeConfig(),
+        testRunner: mockTestRunner,
+      });
+
+      // Verify handoffs exist from partial run
+      const assessHandoff = join(workDir, '.kova', 'handoffs', 'assess.json');
+      await expect(stat(assessHandoff)).resolves.toBeDefined();
+
+      // Now verify checkpoint has waveResults populated
+      const checkpoint = await loadCheckpoint(workDir);
+      expect(checkpoint?.waveResults.assess).toBeDefined();
+      expect(checkpoint?.waveResults.spec).toBeDefined();
     });
   });
 
@@ -442,6 +510,7 @@ describe('fix — E2E with mock pi-mono', () => {
         repoPath: '/tmp/test-repo',
         repoName: 'test-repo',
         config: makeConfig({ isolation: 'worktree' }),
+        testRunner: mockTestRunner,
       });
 
       expect(result.success).toBe(true);
@@ -459,6 +528,7 @@ describe('fix — E2E with mock pi-mono', () => {
         repoPath: workDir,
         repoName: 'test-repo',
         config: makeConfig({ isolation: 'none' }),
+        testRunner: mockTestRunner,
       });
 
       expect(mockCreateWorktree).not.toHaveBeenCalled();
@@ -476,6 +546,7 @@ describe('fix — E2E with mock pi-mono', () => {
           repoPath: '/tmp/test-repo',
           repoName: 'test-repo',
           config: makeConfig({ isolation: 'worktree' }),
+          testRunner: mockTestRunner,
         });
 
         expect(result.success).toBe(false);
@@ -497,6 +568,7 @@ describe('fix — E2E with mock pi-mono', () => {
         repoPath: workDir,
         repoName: 'test-repo',
         config: makeConfig(),
+        testRunner: mockTestRunner,
       });
 
       expect(mockCreatePR).toHaveBeenCalledOnce();
@@ -518,6 +590,7 @@ describe('fix — E2E with mock pi-mono', () => {
         repoPath: workDir,
         repoName: 'test-repo',
         config: makeConfig(),
+        testRunner: mockTestRunner,
       });
 
       const body = mockCreatePR.mock.calls[0]?.[3] as string;
@@ -534,6 +607,7 @@ describe('fix — E2E with mock pi-mono', () => {
         repoPath: workDir,
         repoName: 'test-repo',
         config: makeConfig(),
+        testRunner: mockTestRunner,
       });
 
       expect(result.success).toBe(true);
@@ -550,6 +624,7 @@ describe('fix — E2E with mock pi-mono', () => {
         repoPath: workDir,
         repoName: 'test-repo',
         config: makeConfig({ isolation: 'worktree' }),
+        testRunner: mockTestRunner,
       });
 
       expect(mockCommitAndPush).toHaveBeenCalledWith(
@@ -570,6 +645,7 @@ describe('fix — E2E with mock pi-mono', () => {
         repoName: 'test-repo',
         config: makeConfig(),
         noComment: true,
+        testRunner: mockTestRunner,
       });
 
       expect(result.success).toBe(false);
@@ -583,13 +659,12 @@ describe('fix — E2E with mock pi-mono', () => {
 
   describe('review loop', () => {
     it('re-runs impl + quality + fresh review when review returns needs_fixes', async () => {
-      // New review loop flow: fix pipeline runs assess→spec→test→impl→quality,
-      // then runReviewLoop handles: review(1)→impl→quality→review(2)
+      // Flow: assess→spec→TI(test+impl)→quality, then runReviewLoop: review(1)→impl→quality→review(2)
       setupResponseSequence([
         { structuredOutput: ASSESS_PASS, cost: 0.1 }, // assess
         { structuredOutput: SPEC_RESULT, cost: 0.08 }, // spec
-        { result: 'Tests written', cost: 0.06 }, // test
-        { structuredOutput: IMPL_PASS, cost: 0.07 }, // impl
+        { result: 'Tests written', cost: 0.06 }, // test (via TI loop)
+        { structuredOutput: IMPL_PASS, cost: 0.07 }, // impl (via TI loop)
         { result: 'Quality OK', cost: 0.02 }, // quality
         { structuredOutput: REVIEW_NEEDS_FIXES, cost: 0.09 }, // review iter 1 → needs_fixes
         { structuredOutput: IMPL_PASS, cost: 0.03 }, // impl (mechanical fix)
@@ -602,6 +677,7 @@ describe('fix — E2E with mock pi-mono', () => {
         repoPath: workDir,
         repoName: 'test-repo',
         config: makeConfig(),
+        testRunner: mockTestRunner,
       });
 
       expect(result.success).toBe(true);
@@ -623,6 +699,7 @@ describe('fix — E2E with mock pi-mono', () => {
         repoPath: workDir,
         repoName: 'test-repo',
         config: makeConfig(),
+        testRunner: mockTestRunner,
       });
 
       expect(result.success).toBe(false);
@@ -646,6 +723,7 @@ describe('fix — E2E with mock pi-mono', () => {
         repoPath: workDir,
         repoName: 'test-repo',
         config: makeConfig(),
+        testRunner: mockTestRunner,
       });
 
       expect(result.success).toBe(false);
@@ -653,7 +731,9 @@ describe('fix — E2E with mock pi-mono', () => {
       const checkpoint = await loadCheckpoint(workDir);
       expect(checkpoint?.completedWaves).toContain('assess');
       expect(checkpoint?.completedWaves).toContain('spec');
-      expect(checkpoint?.completedWaves).toContain('test');
+      // T+I run as a combined block via runTILoop — if impl fails mid-loop,
+      // neither test nor impl is marked completed (the block threw before saving)
+      expect(checkpoint?.completedWaves).not.toContain('test');
       expect(checkpoint?.completedWaves).not.toContain('impl');
     });
   });
@@ -670,6 +750,7 @@ describe('fix — E2E with mock pi-mono', () => {
         repoPath: workDir,
         repoName: 'test-repo',
         config: makeConfig(),
+        testRunner: mockTestRunner,
       });
 
       expect(result.success).toBe(false);
@@ -688,6 +769,7 @@ describe('fix — E2E with mock pi-mono', () => {
         repoPath: workDir,
         repoName: 'test-repo',
         config: makeConfig(),
+        testRunner: mockTestRunner,
       });
 
       expect(result.success).toBe(false);
@@ -708,6 +790,7 @@ describe('fix — E2E with mock pi-mono', () => {
         repoPath: workDir,
         repoName: 'test-repo',
         config: makeConfig(),
+        testRunner: mockTestRunner,
       });
 
       expect(result.success).toBe(false);
@@ -715,7 +798,8 @@ describe('fix — E2E with mock pi-mono', () => {
       const checkpoint = await loadCheckpoint(workDir);
       expect(checkpoint?.completedWaves).toContain('assess');
       expect(checkpoint?.completedWaves).toContain('spec');
-      expect(checkpoint?.completedWaves).toContain('test');
+      // T+I combined block — impl failure prevents both from completing
+      expect(checkpoint?.completedWaves).not.toContain('test');
       expect(checkpoint?.completedWaves).not.toContain('impl');
       expect(checkpoint?.error).toContain('spending cap');
     });
@@ -731,6 +815,7 @@ describe('fix — E2E with mock pi-mono', () => {
           repoPath: '/tmp/test-repo',
           repoName: 'test-repo',
           config: makeConfig({ isolation: 'worktree' }),
+          testRunner: mockTestRunner,
         });
 
         expect(result.success).toBe(false);
