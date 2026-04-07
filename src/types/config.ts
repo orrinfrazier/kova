@@ -56,9 +56,18 @@ export const VectorDBConfigSchema = z
 
 export type VectorDBConfig = z.infer<typeof VectorDBConfigSchema>;
 
+export const EpisodicMemoryConfigSchema = z.object({
+  enabled: z.boolean(),
+  endpoint: z.string().optional(),
+  max_episodes: z.number().default(3),
+});
+
+export type EpisodicMemoryConfig = z.infer<typeof EpisodicMemoryConfigSchema>;
+
 export const RepoConfigSchema = z.object({
   path: z.string(),
   vectordb: VectorDBConfigSchema.optional(),
+  episodes: EpisodicMemoryConfigSchema.optional(),
   rules: z
     .object({
       coverage: z.number().default(80),
