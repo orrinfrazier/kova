@@ -5,11 +5,13 @@
 //   kova fix <issue-number>         Fix a single issue
 //   kova fix --all                  Fix all open issues (loop)
 //   kova fix --all --filter <label> Fix labeled issues
+//   kova brainstorm                 Analyze repo, generate issue suite
 //   kova auto                       Autonomous mode (overnight)
 
 import { resolve } from 'node:path';
 import { Command } from 'commander';
 import { runAuto } from '../pipeline/auto.js';
+import { brainstorm, printBrainstormPreview } from '../pipeline/brainstorm.js';
 import { fix } from '../pipeline/fix.js';
 import { fixLoop } from '../pipeline/loop.js';
 import { detectRepoName, resolveRepoConfig } from '../services/config.js';
@@ -147,6 +149,23 @@ program
       process.exit(exitCodeForSignal(getShutdownSignal()));
     }
     process.exit(result.exitCode);
+  });
+
+program
+  .command('brainstorm')
+  .description('Analyze codebase and generate structured issue suite')
+  .option('--repo <path>', 'Repository path', '.')
+  .action(async (opts: { repo?: string }) => {
+    const repoPath = resolve(opts.repo ?? '.');
+    const config = resolveRepoConfig(repoPath);
+
+    log.info('Brainstorming issues...');
+    const result = await brainstorm({ repoPath, config });
+    printBrainstormPreview(result);
+
+    if (!result.success) {
+      process.exit(1);
+    }
   });
 
 program.parse();

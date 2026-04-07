@@ -87,3 +87,19 @@ export const ReviewResultSchema = z.object({
   summary: z.string(),
 });
 export type ReviewResult = z.infer<typeof ReviewResultSchema>;
+
+export const BrainstormIssueSchema = z.object({
+  title: z.string(),
+  body: z.string(),
+  labels: z.array(z.string()),
+  priority: z.enum(['critical', 'high', 'medium', 'low']),
+  category: z.enum(['bug', 'security', 'performance', 'tech-debt', 'enhancement']),
+  dependencies: z.array(z.string()).optional(),
+});
+export type BrainstormIssue = z.infer<typeof BrainstormIssueSchema>;
+
+export const BrainstormResultSchema = z.object({
+  issues: z.array(BrainstormIssueSchema),
+  summary: z.string(),
+});
+export type BrainstormResult = z.infer<typeof BrainstormResultSchema>;

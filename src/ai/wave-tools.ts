@@ -20,6 +20,9 @@ type ToolName = 'read' | 'bash' | 'edit' | 'write' | 'grep' | 'find' | 'ls';
 /** Waves that spawn an AI agent — excludes ship (orchestrator-only, no AI). */
 export type AIWaveName = Exclude<WaveName, 'ship'>;
 
+/** Fix-pipeline AI waves — excludes ship and brainstorm (standalone command). */
+export type FixAIWaveName = Exclude<AIWaveName, 'brainstorm'>;
+
 /** Default extended thinking levels per wave type.
  *  Reasoning waves (assess, spec, review) benefit from extended thinking.
  *  Coding/mechanical waves (test, impl, quality) do not. */
@@ -27,6 +30,7 @@ export const DEFAULT_THINKING_LEVELS: Record<WaveName, ThinkingLevel> = {
   assess: 'medium',
   spec: 'medium',
   review: 'medium',
+  brainstorm: 'medium',
   test: 'off',
   impl: 'off',
   quality: 'off',
@@ -40,6 +44,7 @@ export const WAVE_TOOLS: Record<AIWaveName, ToolName[]> = {
   impl: ['read', 'write', 'edit', 'bash'],
   quality: ['bash', 'read'],
   review: ['read', 'grep'],
+  brainstorm: ['read', 'find', 'grep'],
 } as const;
 
 // biome-ignore lint/suspicious/noExplicitAny: pi-mono AgentTool uses any for tool parameter schemas
@@ -59,7 +64,7 @@ const toolCreators: Record<ToolName, (cwd: string) => AnyTool> = {
 
 /** Resolve the thinking level for a wave — config override takes precedence over defaults. */
 export function resolveThinkingLevel(config: RepoConfig, wave: WaveName): ThinkingLevel {
-  const override = config.model.thinking?.[wave as Exclude<WaveName, 'ship'>];
+  const override = config.model.thinking?.[wave as FixAIWaveName];
   return override ?? DEFAULT_THINKING_LEVELS[wave];
 }
 

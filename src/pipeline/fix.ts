@@ -4,7 +4,7 @@
 
 import { z } from 'zod';
 import {
-  type AIWaveName,
+  type FixAIWaveName,
   getWaveTools,
   type OutputFormat,
   resolveModel,
@@ -76,7 +76,7 @@ export interface FixResult {
 
 /** Spawn a wave agent directly via spawnWaveAgent — no backward-compat wrapper. */
 async function spawnWave<T>(
-  wave: AIWaveName,
+  wave: FixAIWaveName,
   workDir: string,
   config: RepoConfig,
   userMessage: string,
