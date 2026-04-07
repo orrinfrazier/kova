@@ -1,4 +1,5 @@
 import { fetchIssue, fetchIssues } from '../services/github.js';
+import * as metrics from '../services/metrics.js';
 import { extractPRFromResult, fetchOpenPRsDetailed, type OpenPR } from '../services/pr-context.js';
 import { prioritizeIssues } from '../services/prioritize.js';
 import { shutdownRequested } from '../services/shutdown.js';
@@ -103,6 +104,7 @@ export async function fixLoop(options: LoopOptions): Promise<LoopResult> {
     totalCost += waveCosts.cost;
     totalTurns += waveCosts.turns;
     totalDuration += waveCosts.duration;
+    metrics.setCurrentCostUsd(totalCost);
     if (result.success) {
       succeeded++;
       log.info(`#${issue.number} — PR created: ${result.prUrl}`);
@@ -267,6 +269,7 @@ export async function fixByNumbers(options: FixByNumbersOptions): Promise<LoopRe
     totalCost += waveCosts.cost;
     totalTurns += waveCosts.turns;
     totalDuration += waveCosts.duration;
+    metrics.setCurrentCostUsd(totalCost);
 
     if (result.success) {
       succeeded++;

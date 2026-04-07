@@ -132,6 +132,29 @@ export const RepoIntelConfigSchema = z
 
 export type RepoIntelConfig = z.infer<typeof RepoIntelConfigSchema>;
 
+export const MetricsConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  prometheus: z
+    .object({
+      enabled: z.boolean().default(true),
+      port: z.number().optional(),
+    })
+    .optional(),
+  otlp: z
+    .object({
+      enabled: z.boolean().default(false),
+      endpoint: z.string().optional(),
+      interval_ms: z.number().default(15000),
+    })
+    .refine((cfg) => !cfg.enabled || cfg.endpoint != null, {
+      message: 'endpoint is required when otlp is enabled',
+      path: ['endpoint'],
+    })
+    .optional(),
+});
+
+export type MetricsConfig = z.infer<typeof MetricsConfigSchema>;
+
 /** screenshots_dir is optional for construction; Zod applies the default during parsing via transform. */
 export interface PlaywrightConfig {
   enabled: boolean;
@@ -169,6 +192,7 @@ export const RepoConfigSchema = z.object({
   vectordb: VectorDBConfigSchema.optional(),
   episodes: EpisodicMemoryConfigSchema.optional(),
   repo_intel: RepoIntelConfigSchema.optional(),
+  metrics: MetricsConfigSchema.optional(),
   sandbox: SandboxConfigSchema.optional(),
   playwright: PlaywrightConfigSchema.optional(),
   tools: z.array(CustomToolSchema).optional(),
