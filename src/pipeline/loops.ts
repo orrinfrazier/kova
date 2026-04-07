@@ -10,10 +10,20 @@ import { promisify } from 'node:util';
 import { z } from 'zod';
 import { executeWaveWithRetry, type OutputFormat, resolveThinkingLevel } from '../ai/index.js';
 import { detectTooling } from '../services/language-detect.js';
-import type { Issue, RepoConfig, ReviewFinding, ReviewResult, WaveName, WaveResult } from '../types/index.js';
+import type {
+  Issue,
+  RepoConfig,
+  ReviewFinding,
+  ReviewResult,
+  SpecPiece,
+  SpecResult,
+  WaveName,
+  WaveResult,
+} from '../types/index.js';
 import { ReviewResultSchema } from '../types/index.js';
 import { log } from '../utils/logger.js';
-import { buildWaveContext } from './context.js';
+import { executePiecesInBatches } from './batch-scheduler.js';
+import { buildPieceContext, buildWaveContext } from './context.js';
 import { loadPrompt } from './prompts.js';
 
 const exec = promisify(execCb);
@@ -77,6 +87,52 @@ export interface ReviewLoopResult {
   totalCost: number;
   iterations: number;
   knownIssues: ReviewFinding[];
+}
+
+// --- Per-piece TI loop types ---
+
+export interface PieceTILoopConfig {
+  piece: SpecPiece;
+  pieceIndex: number;
+  workDir: string;
+  repoConfig: RepoConfig;
+  maxRetries?: number | undefined;
+  testCommand?: string | undefined;
+  testRunner?: TestRunner | undefined;
+  diffRunner?: DiffRunner | undefined;
+}
+
+export interface PieceTILoopResult {
+  pieceIndex: number;
+  testWaveResult: WaveResult;
+  implWaveResult: WaveResult;
+  testsPassing: boolean;
+  cost: number;
+  attempts: number;
+  diagnosis?: TILoopDiagnosis;
+}
+
+export interface ParallelPieceTILoopConfig {
+  issue: Issue;
+  workDir: string;
+  repoConfig: RepoConfig;
+  waveResults: Partial<Record<WaveName, WaveResult>>;
+  maxConcurrent?: number | undefined;
+  testCommand?: string | undefined;
+  testRunner?: TestRunner | undefined;
+  diffRunner?: DiffRunner | undefined;
+  prContext?: string | undefined;
+}
+
+export interface ParallelPieceTILoopResult {
+  testWaveResult: WaveResult;
+  implWaveResult: WaveResult;
+  testsPassing: boolean;
+  totalCost: number;
+  attempts: number;
+  pieceResults: PieceTILoopResult[];
+  diagnosis?: TILoopDiagnosis;
+  modifiedFilesPerAttempt: string[][];
 }
 
 // --- Test command resolution ---
@@ -434,6 +490,240 @@ export async function runTILoop(config: TILoopConfig): Promise<TILoopResult> {
     modifiedFilesPerAttempt,
     ...(diagnosis != null && { diagnosis }),
     ...(thrashingSignal != null && { thrashingSignal }),
+  };
+}
+
+// --- Per-piece TI Loop ---
+
+export async function runPieceTILoop(config: PieceTILoopConfig): Promise<PieceTILoopResult> {
+  const { piece, pieceIndex, workDir, repoConfig, maxRetries = 3, testRunner = defaultTestRunner } = config;
+
+  if (maxRetries < 1) {
+    throw new Error('maxRetries must be at least 1');
+  }
+
+  const testCmd = await resolveTestCommand(workDir, config.testCommand);
+  log.info(`[piece-ti-loop] Piece ${pieceIndex} (${piece.name}): test command: ${testCmd}`);
+
+  let cost = 0;
+
+  // Step 1: Test agent — scoped to this piece only
+  log.info(`[piece-ti-loop] Piece ${pieceIndex}: running test wave`);
+  const testSystemPrompt = await loadPrompt('test');
+  const testExecResult = await executeWaveWithRetry({
+    wave: 'test',
+    systemPrompt: testSystemPrompt,
+    userMessage: buildPieceContext('test', piece),
+    cwd: workDir,
+    modelTier: repoConfig.model.test,
+    thinkingLevel: resolveThinkingLevel(repoConfig, 'test'),
+  });
+
+  const testWaveResult = toWaveResult('test', testExecResult);
+  cost += testExecResult.cost;
+
+  // Step 2: Impl retry loop — piece-scoped context
+  const failureOutputs: string[] = [];
+  let implWaveResult: WaveResult | undefined;
+  let testsPassing = false;
+
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    log.info(`[piece-ti-loop] Piece ${pieceIndex}: impl attempt ${attempt + 1}/${maxRetries}`);
+
+    let escalationHint: string | undefined;
+    if (failureOutputs.length >= 2) {
+      const midDiagnosis = classifyDiagnosis(failureOutputs);
+      if (midDiagnosis === 'APPROACH_WRONG') {
+        const prevAttempts = failureOutputs
+          .map((output, i) => `### Attempt ${i + 1}\n\`\`\`\n${output}\n\`\`\``)
+          .join('\n\n');
+        escalationHint = `Diagnosis: APPROACH_WRONG — each attempt fails different tests.\nTry a fundamentally different strategy.\n\n${prevAttempts}`;
+      }
+    }
+
+    const implContext = buildPieceContext('impl', piece, {
+      ...(escalationHint != null && { escalationHint }),
+      ...(failureOutputs.length > 0 && { lastFailureOutput: failureOutputs.at(-1) }),
+    });
+
+    const implSystemPrompt = await loadPrompt('impl');
+    const implExecResult = await executeWaveWithRetry({
+      wave: 'impl',
+      systemPrompt: implSystemPrompt,
+      userMessage: implContext,
+      cwd: workDir,
+      modelTier: repoConfig.model.impl,
+      thinkingLevel: resolveThinkingLevel(repoConfig, 'impl'),
+    });
+
+    implWaveResult = toWaveResult('impl', implExecResult);
+    cost += implExecResult.cost;
+
+    // Run tests via bash
+    log.info(`[piece-ti-loop] Piece ${pieceIndex}: running tests`);
+    const testRun = await testRunner(testCmd, workDir);
+
+    if (testRun.passed) {
+      log.info(`[piece-ti-loop] Piece ${pieceIndex}: tests passing on attempt ${attempt + 1}`);
+      testsPassing = true;
+      break;
+    }
+
+    log.warn(`[piece-ti-loop] Piece ${pieceIndex}: tests failed on attempt ${attempt + 1}`);
+    failureOutputs.push(testRun.output);
+  }
+
+  // Diagnosis if all retries exhausted
+  let diagnosis: TILoopDiagnosis | undefined;
+  if (!testsPassing && failureOutputs.length >= 2) {
+    diagnosis = classifyDiagnosis(failureOutputs);
+    log.error(`[piece-ti-loop] Piece ${pieceIndex}: all retries exhausted — diagnosis: ${diagnosis}`);
+  } else if (!testsPassing) {
+    diagnosis = 'STUCK';
+  }
+
+  const attempts = failureOutputs.length + (testsPassing ? 1 : 0);
+
+  return {
+    pieceIndex,
+    testWaveResult,
+    implWaveResult: implWaveResult as WaveResult,
+    testsPassing,
+    cost,
+    attempts,
+    ...(diagnosis != null && { diagnosis }),
+  };
+}
+
+// --- Parallel piece TI loop orchestrator ---
+
+function isSpecResult(v: unknown): v is SpecResult {
+  return v != null && typeof v === 'object' && 'pieces' in v && Array.isArray((v as SpecResult).pieces);
+}
+
+export async function runParallelPieceTILoop(config: ParallelPieceTILoopConfig): Promise<ParallelPieceTILoopResult> {
+  const {
+    issue,
+    workDir,
+    repoConfig,
+    waveResults,
+    maxConcurrent = 3,
+    testRunner = defaultTestRunner,
+    prContext,
+  } = config;
+
+  // Extract spec pieces
+  const specArtifact = waveResults.spec?.artifact;
+  if (!isSpecResult(specArtifact) || specArtifact.pieces.length === 0) {
+    throw new Error('Cannot run parallel piece TI loop without spec pieces');
+  }
+
+  const { pieces, dependency_order } = specArtifact;
+
+  // 1 piece — backward compatible, delegate to existing runTILoop
+  if (pieces.length === 1) {
+    log.info('[parallel-ti] Single piece — delegating to runTILoop (no sub-worktrees)');
+    const tiResult = await runTILoop({
+      issue,
+      workDir,
+      repoConfig,
+      waveResults,
+      testRunner,
+      ...(prContext != null && { prContext }),
+      ...(config.diffRunner != null && { diffRunner: config.diffRunner }),
+      ...(config.testCommand != null && { testCommand: config.testCommand }),
+    });
+
+    return {
+      testWaveResult: tiResult.testWaveResult,
+      implWaveResult: tiResult.implWaveResult,
+      testsPassing: tiResult.testsPassing,
+      totalCost: tiResult.totalCost,
+      attempts: tiResult.attempts,
+      pieceResults: [
+        {
+          pieceIndex: 0,
+          testWaveResult: tiResult.testWaveResult,
+          implWaveResult: tiResult.implWaveResult,
+          testsPassing: tiResult.testsPassing,
+          cost: tiResult.totalCost,
+          attempts: tiResult.attempts,
+          ...(tiResult.diagnosis != null && { diagnosis: tiResult.diagnosis }),
+        },
+      ],
+      ...(tiResult.diagnosis != null && { diagnosis: tiResult.diagnosis }),
+      modifiedFilesPerAttempt: tiResult.modifiedFilesPerAttempt,
+    };
+  }
+
+  // Multiple pieces — fan out via batch scheduler
+  log.info(`[parallel-ti] ${pieces.length} pieces, max ${maxConcurrent} concurrent`);
+
+  const pieceResults: PieceTILoopResult[] = [];
+
+  await executePiecesInBatches({
+    pieces,
+    dependencyOrder: dependency_order,
+    maxConcurrent,
+    executePiece: async (piece, pieceIndex) => {
+      // Use workDir directly with piece index in path for isolation
+      const pieceWorkDir = `${workDir}/piece-${pieceIndex}`;
+
+      const result = await runPieceTILoop({
+        piece,
+        pieceIndex,
+        workDir: pieceWorkDir,
+        repoConfig,
+        testRunner,
+        ...(config.testCommand != null && { testCommand: config.testCommand }),
+      });
+
+      pieceResults.push(result);
+
+      return {
+        pieceIndex,
+        success: result.testsPassing,
+        ...(result.diagnosis != null && { error: result.diagnosis }),
+      };
+    },
+  });
+
+  // Sort piece results by pieceIndex for deterministic output
+  pieceResults.sort((a, b) => a.pieceIndex - b.pieceIndex);
+
+  const totalCost = pieceResults.reduce((sum, r) => sum + r.cost, 0);
+  const allPassing = pieceResults.every((r) => r.testsPassing);
+  const maxAttempts = Math.max(...pieceResults.map((r) => r.attempts), 0);
+  const firstFailure = pieceResults.find((r) => !r.testsPassing);
+
+  // Aggregate wave results
+  const aggregatedTestResult: WaveResult = {
+    wave: 'test',
+    success: true,
+    artifact: { pieces: pieceResults.map((r) => ({ pieceIndex: r.pieceIndex, artifact: r.testWaveResult.artifact })) },
+    duration: pieceResults.reduce((sum, r) => sum + r.testWaveResult.duration, 0),
+    cost: pieceResults.reduce((sum, r) => sum + r.testWaveResult.cost, 0),
+    turns: pieceResults.reduce((sum, r) => sum + r.testWaveResult.turns, 0),
+  };
+
+  const aggregatedImplResult: WaveResult = {
+    wave: 'impl',
+    success: allPassing,
+    artifact: { pieces: pieceResults.map((r) => ({ pieceIndex: r.pieceIndex, artifact: r.implWaveResult.artifact })) },
+    duration: pieceResults.reduce((sum, r) => sum + r.implWaveResult.duration, 0),
+    cost: pieceResults.reduce((sum, r) => sum + r.implWaveResult.cost, 0),
+    turns: pieceResults.reduce((sum, r) => sum + r.implWaveResult.turns, 0),
+  };
+
+  return {
+    testWaveResult: aggregatedTestResult,
+    implWaveResult: aggregatedImplResult,
+    testsPassing: allPassing,
+    totalCost,
+    attempts: maxAttempts,
+    pieceResults,
+    ...(firstFailure?.diagnosis != null && { diagnosis: firstFailure.diagnosis }),
+    modifiedFilesPerAttempt: [],
   };
 }
 

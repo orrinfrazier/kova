@@ -6,6 +6,7 @@ import type {
   Issue,
   QualityResult,
   ReviewResult,
+  SpecPiece,
   SpecResult,
   WaveName,
   WaveResult,
@@ -30,6 +31,15 @@ export interface ContextOptions {
   tokenBudget?: number;
   /** Escalation hint injected after diagnosis (APPROACH_WRONG / MISSING_CONTEXT). */
   escalationHint?: string;
+}
+
+export interface PieceContextOptions {
+  /** Escalation hint for impl retries. */
+  escalationHint?: string | undefined;
+  /** Last test failure output for impl retries. */
+  lastFailureOutput?: string | undefined;
+  /** Token budget for truncation (default: 8000). */
+  tokenBudget?: number | undefined;
 }
 
 type Handoffs = Partial<Record<string, WaveResult>>;
@@ -266,4 +276,40 @@ function formatReviewFindingsSection(review: ReviewResult): string {
     .join('\n');
 
   return `## Review findings\n\n${review.summary}\n\n${findings}`;
+}
+
+// --- Per-piece context builder ---
+
+/**
+ * Build focused context for a single spec piece.
+ * Each sub-agent gets ONLY its piece's context — not the full spec.
+ */
+export function buildPieceContext(wave: 'test' | 'impl', piece: SpecPiece, options: PieceContextOptions = {}): string {
+  const { tokenBudget = DEFAULT_TOKEN_BUDGET } = options;
+
+  const sections: string[] = [];
+
+  sections.push(`## Piece: ${piece.name}`);
+  sections.push(piece.description);
+
+  sections.push(`\n### Files (you may ONLY modify these)`);
+  sections.push(piece.files.map((f) => `- ${f}`).join('\n'));
+
+  sections.push(`\n### Acceptance Criteria`);
+  sections.push(piece.acceptance_criteria.map((c) => `- ${c}`).join('\n'));
+
+  if (piece.wiring.length > 0) {
+    sections.push(`\n### Wiring`);
+    sections.push(piece.wiring.map((w) => `- ${w}`).join('\n'));
+  }
+
+  if (wave === 'impl' && options.escalationHint) {
+    sections.push(`\n## Escalation\n\n${options.escalationHint}`);
+  }
+
+  if (wave === 'impl' && options.lastFailureOutput) {
+    sections.push(`\n## Previous Test Failure Output\n\n\`\`\`\n${options.lastFailureOutput}\n\`\`\``);
+  }
+
+  return truncateToTokenBudget(sections.join('\n\n'), tokenBudget);
 }
