@@ -291,4 +291,76 @@ describe('models', () => {
       expect(model.provider).toBe('ollama');
     });
   });
+
+  describe('resolveWaveModel', () => {
+    it('resolves a ModelTier string to a model', async () => {
+      const { resolveWaveModel } = await import('./models.js');
+
+      const model = resolveWaveModel('medium');
+      expect(model.id).toBe('claude-sonnet-4-6');
+      expect(model.provider).toBe('anthropic');
+    });
+
+    it('resolves a provider+model override object', async () => {
+      const { resolveWaveModel } = await import('./models.js');
+
+      const model = resolveWaveModel({ provider: 'openai', model: 'gpt-4o' });
+      expect(model.id).toBe('gpt-4o');
+      expect(model.provider).toBe('openai');
+    });
+
+    it('resolves all three tiers as strings', async () => {
+      const { resolveWaveModel } = await import('./models.js');
+
+      expect(resolveWaveModel('small').id).toBe('claude-haiku-4-5-20251001');
+      expect(resolveWaveModel('medium').id).toBe('claude-sonnet-4-6');
+      expect(resolveWaveModel('large').id).toBe('claude-opus-4-6');
+    });
+
+    it('throws for unknown provider+model combination', async () => {
+      const { resolveWaveModel } = await import('./models.js');
+
+      expect(() => resolveWaveModel({ provider: 'fake', model: 'nonexistent' })).toThrow(/Unknown model/);
+    });
+
+    it('resolves ollama override via resolveWaveModel', async () => {
+      const { resolveWaveModel } = await import('./models.js');
+
+      const model = resolveWaveModel({ provider: 'ollama', model: 'qwen2.5-coder:32b' });
+      expect(model.id).toBe('qwen2.5-coder:32b');
+      expect(model.provider).toBe('ollama');
+    });
+  });
+
+  describe('isLocalProvider', () => {
+    it('identifies ollama as local', async () => {
+      const { isLocalProvider } = await import('./models.js');
+      expect(isLocalProvider('ollama')).toBe(true);
+    });
+
+    it('identifies vllm as local', async () => {
+      const { isLocalProvider } = await import('./models.js');
+      expect(isLocalProvider('vllm')).toBe(true);
+    });
+
+    it('identifies lmstudio as local', async () => {
+      const { isLocalProvider } = await import('./models.js');
+      expect(isLocalProvider('lmstudio')).toBe(true);
+    });
+
+    it('identifies anthropic as non-local (API)', async () => {
+      const { isLocalProvider } = await import('./models.js');
+      expect(isLocalProvider('anthropic')).toBe(false);
+    });
+
+    it('identifies openai as non-local (API)', async () => {
+      const { isLocalProvider } = await import('./models.js');
+      expect(isLocalProvider('openai')).toBe(false);
+    });
+
+    it('identifies google as non-local (API)', async () => {
+      const { isLocalProvider } = await import('./models.js');
+      expect(isLocalProvider('google')).toBe(false);
+    });
+  });
 });

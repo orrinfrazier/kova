@@ -33,6 +33,15 @@ export const ProvidersSchema = z
 
 export type Providers = z.infer<typeof ProvidersSchema>;
 
+export const WaveModelOverrideSchema = z.object({
+  provider: z.string(),
+  model: z.string(),
+});
+export type WaveModelOverride = z.infer<typeof WaveModelOverrideSchema>;
+
+export const WaveModelConfigSchema = z.union([ModelTierSchema, WaveModelOverrideSchema]);
+export type WaveModelConfig = z.infer<typeof WaveModelConfigSchema>;
+
 export const RepoConfigSchema = z.object({
   path: z.string(),
   rules: z
@@ -55,13 +64,13 @@ export const RepoConfigSchema = z.object({
     .optional(),
   model: z
     .object({
-      assess: ModelTierSchema.default('large'),
-      spec: ModelTierSchema.default('large'),
-      test: ModelTierSchema.default('medium'),
-      impl: ModelTierSchema.default('medium'),
-      quality: ModelTierSchema.default('small'),
-      review: ModelTierSchema.default('large'),
-      brainstorm: ModelTierSchema.default('large'),
+      assess: WaveModelConfigSchema.default('large'),
+      spec: WaveModelConfigSchema.default('large'),
+      test: WaveModelConfigSchema.default('medium'),
+      impl: WaveModelConfigSchema.default('medium'),
+      quality: WaveModelConfigSchema.default('small'),
+      review: WaveModelConfigSchema.default('large'),
+      brainstorm: WaveModelConfigSchema.default('large'),
       thinking: z
         .object({
           assess: ThinkingLevelSchema.optional(),
@@ -113,6 +122,7 @@ export interface WaveResult {
   cost: number;
   turns: number;
   model?: string | undefined;
+  provider?: string | undefined;
 }
 
 export interface FailedPiece {
