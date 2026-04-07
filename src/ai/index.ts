@@ -47,6 +47,7 @@ export {
 } from './wave-executor.js';
 export {
   type AIWaveName,
+  createCustomTools,
   DEFAULT_THINKING_LEVELS,
   type FixAIWaveName,
   getWaveTools,
