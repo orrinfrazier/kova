@@ -125,8 +125,18 @@ const PR_LIST_FIXTURE = [
 /*  Import SUT after mock is installed                                 */
 /* ------------------------------------------------------------------ */
 
-const { fetchIssues, fetchIssue, commentOnIssue, createPR, createIssue, listOpenPRs, findOpenPR, hasExistingWork } =
-  await import('./github.js');
+const {
+  fetchIssues,
+  fetchIssue,
+  commentOnIssue,
+  createPR,
+  createIssue,
+  createIssueComment,
+  editIssueComment,
+  listOpenPRs,
+  findOpenPR,
+  hasExistingWork,
+} = await import('./github.js');
 
 /* ------------------------------------------------------------------ */
 /*  Tests                                                              */
@@ -433,5 +443,43 @@ describe('createIssue', () => {
   it('throws on gh error', async () => {
     setResponse('gh issue create', new Error('permission denied'));
     await expect(createIssue('/repo', 'Title', 'Body', [])).rejects.toThrow('permission denied');
+  });
+});
+
+/* ---------- createIssueComment ---------------------------------- */
+
+describe('createIssueComment', () => {
+  it('calls gh api to create comment and returns comment ID', async () => {
+    setResponse('gh api', { stdout: JSON.stringify({ id: 12345 }) });
+    const id = await createIssueComment('owner/repo', 42, 'Progress update');
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.command).toContain('repos/owner/repo/issues/42/comments');
+    expect(calls[0]?.command).toContain('-f body=');
+    expect(id).toBe(12345);
+  });
+
+  it('throws on API error', async () => {
+    setResponse('gh api', new Error('Not Found'));
+    await expect(createIssueComment('owner/repo', 42, 'test')).rejects.toThrow('Not Found');
+  });
+});
+
+/* ---------- editIssueComment ------------------------------------ */
+
+describe('editIssueComment', () => {
+  it('calls gh api to patch comment by ID', async () => {
+    setResponse('gh api', { stdout: JSON.stringify({ id: 12345 }) });
+    await editIssueComment('owner/repo', 12345, 'Updated body');
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.command).toContain('repos/owner/repo/issues/comments/12345');
+    expect(calls[0]?.command).toContain('-X PATCH');
+    expect(calls[0]?.command).toContain('-f body=');
+  });
+
+  it('throws on API error', async () => {
+    setResponse('gh api', new Error('Forbidden'));
+    await expect(editIssueComment('owner/repo', 12345, 'test')).rejects.toThrow('Forbidden');
   });
 });
