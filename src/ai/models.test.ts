@@ -1,13 +1,16 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 // Reset env vars between tests
-const ENV_KEYS = ['KOVA_SMALL_MODEL', 'KOVA_MEDIUM_MODEL', 'KOVA_LARGE_MODEL'] as const;
+const ENV_KEYS = ['KOVA_SMALL_MODEL', 'KOVA_MEDIUM_MODEL', 'KOVA_LARGE_MODEL', 'OLLAMA_HOST'] as const;
 
 describe('models', () => {
-  afterEach(() => {
+  afterEach(async () => {
     for (const key of ENV_KEYS) {
       delete process.env[key];
     }
+    // Clear custom models between tests
+    const { clearCustomModels } = await import('./models.js');
+    clearCustomModels();
     vi.restoreAllMocks();
   });
 
@@ -117,6 +120,119 @@ describe('models', () => {
       const model = resolveModel('medium');
       expect(model.id).toBe('gpt-4o');
       expect(model.provider).toBe('openai');
+    });
+  });
+
+  describe('ollama models', () => {
+    it('resolves a registered ollama model via ollama:modelId', async () => {
+      const { registerOllamaModels, resolveModelFromString } = await import('./models.js');
+
+      registerOllamaModels({
+        host: 'http://localhost:11434',
+        models: [{ id: 'llama3', contextWindow: 128000, maxTokens: 32000 }],
+      });
+
+      const model = resolveModelFromString('ollama:llama3');
+      expect(model.id).toBe('llama3');
+      expect(model.provider).toBe('ollama');
+    });
+
+    it('ollama models use openai-completions api', async () => {
+      const { registerOllamaModels, resolveModelFromString } = await import('./models.js');
+
+      registerOllamaModels({
+        host: 'http://localhost:11434',
+        models: [{ id: 'codellama', contextWindow: 16384, maxTokens: 4096 }],
+      });
+
+      const model = resolveModelFromString('ollama:codellama');
+      expect(model.api).toBe('openai-completions');
+    });
+
+    it('ollama models have zero cost', async () => {
+      const { registerOllamaModels, resolveModelFromString } = await import('./models.js');
+
+      registerOllamaModels({
+        host: 'http://localhost:11434',
+        models: [{ id: 'llama3', contextWindow: 128000, maxTokens: 32000 }],
+      });
+
+      const model = resolveModelFromString('ollama:llama3');
+      expect(model.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+    });
+
+    it('ollama model baseUrl ends with /v1', async () => {
+      const { registerOllamaModels, resolveModelFromString } = await import('./models.js');
+
+      registerOllamaModels({
+        host: 'http://gpu-server:11434',
+        models: [{ id: 'llama3', contextWindow: 128000, maxTokens: 32000 }],
+      });
+
+      const model = resolveModelFromString('ollama:llama3');
+      expect(model.baseUrl).toBe('http://gpu-server:11434/v1');
+    });
+
+    it('respects OLLAMA_HOST env var over config host', async () => {
+      process.env.OLLAMA_HOST = 'http://remote:11434';
+      const { registerOllamaModels, resolveModelFromString } = await import('./models.js');
+
+      registerOllamaModels({
+        host: 'http://localhost:11434',
+        models: [{ id: 'llama3', contextWindow: 128000, maxTokens: 32000 }],
+      });
+
+      const model = resolveModelFromString('ollama:llama3');
+      expect(model.baseUrl).toBe('http://remote:11434/v1');
+    });
+
+    it('throws for unregistered ollama model', async () => {
+      const { resolveModelFromString } = await import('./models.js');
+
+      expect(() => resolveModelFromString('ollama:nonexistent')).toThrow(/Unknown model/);
+    });
+
+    it('can use ollama model via KOVA_SMALL_MODEL env var', async () => {
+      const { registerOllamaModels, resolveModel } = await import('./models.js');
+
+      registerOllamaModels({
+        host: 'http://localhost:11434',
+        models: [{ id: 'llama3', contextWindow: 128000, maxTokens: 32000 }],
+      });
+
+      process.env.KOVA_SMALL_MODEL = 'ollama:llama3';
+      const model = resolveModel('small');
+      expect(model.id).toBe('llama3');
+      expect(model.provider).toBe('ollama');
+    });
+
+    it('uses custom name when provided', async () => {
+      const { registerOllamaModels, resolveModelFromString } = await import('./models.js');
+
+      registerOllamaModels({
+        host: 'http://localhost:11434',
+        models: [{ id: 'codellama', name: 'Code Llama 13B', contextWindow: 16384, maxTokens: 4096 }],
+      });
+
+      const model = resolveModelFromString('ollama:codellama');
+      expect(model.name).toBe('Code Llama 13B');
+    });
+
+    it('clearCustomModels removes all registered ollama models', async () => {
+      const { registerOllamaModels, resolveModelFromString, clearCustomModels } = await import('./models.js');
+
+      registerOllamaModels({
+        host: 'http://localhost:11434',
+        models: [{ id: 'llama3', contextWindow: 128000, maxTokens: 32000 }],
+      });
+
+      // Works before clearing
+      expect(resolveModelFromString('ollama:llama3').id).toBe('llama3');
+
+      clearCustomModels();
+
+      // Fails after clearing
+      expect(() => resolveModelFromString('ollama:llama3')).toThrow(/Unknown model/);
     });
   });
 });

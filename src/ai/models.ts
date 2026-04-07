@@ -1,5 +1,5 @@
 import { getModel, getProviders, type Model, registerBuiltInApiProviders } from '@mariozechner/pi-ai';
-import type { ModelTier } from '../types/index.js';
+import type { ModelTier, OllamaProvider } from '../types/index.js';
 import { KovaError } from './errors.js';
 
 const DEFAULT_MODELS: Readonly<Record<ModelTier, string>> = {
@@ -24,6 +24,47 @@ export interface ModelSpec {
   modelId: string;
 }
 
+// --- Custom model registry (Ollama, future local providers) ---
+
+const customModels = new Map<string, Model<string>>();
+
+export interface OllamaModelDef {
+  id: string;
+  name?: string;
+  contextWindow: number;
+  maxTokens: number;
+}
+
+/** Register Ollama models into the custom model registry.
+ *  OLLAMA_HOST env var takes precedence over config host. */
+export function registerOllamaModels(config: OllamaProvider): void {
+  const host = process.env.OLLAMA_HOST ?? config.host;
+  const baseUrl = `${host}/v1`;
+
+  for (const def of config.models) {
+    const model: Model<'openai-completions'> = {
+      id: def.id,
+      name: def.name ?? def.id,
+      api: 'openai-completions',
+      provider: 'ollama',
+      baseUrl,
+      reasoning: false,
+      input: ['text'],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: def.contextWindow,
+      maxTokens: def.maxTokens,
+    };
+    customModels.set(`ollama:${def.id}`, model);
+  }
+}
+
+/** Clear all custom models. Primarily for test cleanup. */
+export function clearCustomModels(): void {
+  customModels.clear();
+}
+
+// --- Provider / model resolution ---
+
 let _knownProviders: Set<string> | undefined;
 function knownProviders(): Set<string> {
   if (!_knownProviders) {
@@ -34,6 +75,15 @@ function knownProviders(): Set<string> {
 }
 
 export function parseModelSpec(modelString: string): ModelSpec {
+  // Check custom model registry first — allows "ollama:modelId" even though
+  // "ollama" isn't a known pi-mono provider
+  if (customModels.has(modelString)) {
+    const colonIndex = modelString.indexOf(':');
+    if (colonIndex > 0) {
+      return { provider: modelString.slice(0, colonIndex), modelId: modelString.slice(colonIndex + 1) };
+    }
+  }
+
   const colonIndex = modelString.indexOf(':');
   if (colonIndex > 0) {
     const candidate = modelString.slice(0, colonIndex);
@@ -46,6 +96,10 @@ export function parseModelSpec(modelString: string): ModelSpec {
 }
 
 export function resolveModelFromString(modelString: string): Model<string> {
+  // Check custom model registry first (Ollama, etc.)
+  const custom = customModels.get(modelString);
+  if (custom) return custom;
+
   ensureProviders();
   const { provider, modelId } = parseModelSpec(modelString);
   const model = getModel(provider as Parameters<typeof getModel>[0], modelId as Parameters<typeof getModel>[1]);
