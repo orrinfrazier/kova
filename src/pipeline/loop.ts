@@ -9,6 +9,7 @@ export interface LoopOptions {
   config: RepoConfig;
   filter?: string | undefined;
   maxIssues?: number | undefined;
+  budgetUsd?: number | undefined;
 }
 
 export interface LoopResult {
@@ -19,6 +20,7 @@ export interface LoopResult {
   totalCost: number;
   totalTurns: number;
   totalDuration: number;
+  budgetExceeded: boolean;
   results: Array<{ issue: Issue; result: FixResult }>;
 }
 
@@ -41,9 +43,13 @@ function aggregateWaveCosts(waveResults: Partial<Record<string, WaveResult>>): {
 }
 
 export async function fixLoop(options: LoopOptions): Promise<LoopResult> {
-  const { repoPath, repoName, config, filter, maxIssues } = options;
+  const { repoPath, repoName, config, filter, maxIssues, budgetUsd } = options;
   const limit = maxIssues ?? config.auto?.max_per_run ?? config.rules.max_issues_per_run;
+  const budget = budgetUsd ?? config.rules.budget_usd;
   log.info('Fetching open issues for ' + repoName + '...');
+  if (budget !== undefined) {
+    log.info('Budget cap: $' + budget.toFixed(2));
+  }
   const issues = await fetchIssues(repoPath, filter);
   if (issues.length === 0) {
     log.info('No open issues found.');
@@ -55,6 +61,7 @@ export async function fixLoop(options: LoopOptions): Promise<LoopResult> {
       totalCost: 0,
       totalTurns: 0,
       totalDuration: 0,
+      budgetExceeded: false,
       results: [],
     };
   }
@@ -67,6 +74,7 @@ export async function fixLoop(options: LoopOptions): Promise<LoopResult> {
   let totalCost = 0;
   let totalTurns = 0;
   let totalDuration = 0;
+  let budgetExceeded = false;
   for (const issue of toFix) {
     log.info('\n' + '='.repeat(60));
     log.info('Fixing #' + issue.number + ': ' + issue.title);
@@ -83,6 +91,13 @@ export async function fixLoop(options: LoopOptions): Promise<LoopResult> {
     } else {
       failed++;
       log.error('#' + issue.number + ' — Failed: ' + result.error);
+    }
+    if (budget !== undefined && totalCost >= budget) {
+      budgetExceeded = true;
+      log.info(
+        'Budget exceeded: $' + totalCost.toFixed(2) + ' spent of $' + budget.toFixed(2) + ' budget — stopping loop',
+      );
+      break;
     }
   }
   log.info('\n' + '='.repeat(60));
@@ -108,5 +123,15 @@ export async function fixLoop(options: LoopOptions): Promise<LoopResult> {
       Math.floor(totalDuration / 1000) +
       's',
   );
-  return { total: results.length, succeeded, failed, skipped, totalCost, totalTurns, totalDuration, results };
+  return {
+    total: results.length,
+    succeeded,
+    failed,
+    skipped,
+    totalCost,
+    totalTurns,
+    totalDuration,
+    budgetExceeded,
+    results,
+  };
 }

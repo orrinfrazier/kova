@@ -27,11 +27,20 @@ program
   .option('--max <n>', 'Maximum issues to fix', '10')
   .option('--repo <path>', 'Repository path', '.')
   .option('--fresh', 'Force restart — delete checkpoint and worktree')
+  .option('--budget <usd>', 'Maximum USD budget for fix loop')
   .option('--no-comment', 'Suppress GitHub comment on grade D/F skip')
   .action(
     async (
       issueArg: string | undefined,
-      opts: { all?: boolean; filter?: string; max?: string; repo?: string; fresh?: boolean; comment?: boolean },
+      opts: {
+        all?: boolean;
+        filter?: string;
+        max?: string;
+        budget?: string;
+        repo?: string;
+        fresh?: boolean;
+        comment?: boolean;
+      },
     ) => {
       const repoPath = resolve(opts.repo ?? '.');
       const repoName = detectRepoName(repoPath);
@@ -46,6 +55,7 @@ program
           config,
           filter: opts.filter,
           maxIssues: Number.parseInt(opts.max ?? '10', 10),
+          budgetUsd: opts.budget ? Number.parseFloat(opts.budget) : undefined,
         });
 
         log.info(`\nResults: ${result.succeeded}/${result.total} succeeded`);

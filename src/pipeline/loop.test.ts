@@ -67,3 +67,78 @@ describe('fixLoop — cumulative cost tracking', () => {
     consoleSpy.mockRestore();
   });
 });
+
+describe('fixLoop — budget cap', () => {
+  it('stops after current issue when cumulative cost exceeds budgetUsd', async () => {
+    // Each issue costs $0.58, budget of $0.50 means first issue exceeds it → stop
+    const result = await fixLoop({
+      repoPath: '/tmp/test',
+      repoName: 'test-repo',
+      config: makeConfig(),
+      budgetUsd: 0.5,
+    });
+    expect(result.total).toBe(1);
+    expect(result.succeeded).toBe(1);
+    expect(result.budgetExceeded).toBe(true);
+  });
+
+  it('processes all issues when budget is sufficient', async () => {
+    const result = await fixLoop({
+      repoPath: '/tmp/test',
+      repoName: 'test-repo',
+      config: makeConfig(),
+      budgetUsd: 5.0,
+    });
+    expect(result.total).toBe(2);
+    expect(result.succeeded).toBe(2);
+    expect(result.budgetExceeded).toBe(false);
+  });
+
+  it('processes all issues when budgetUsd is undefined (unlimited)', async () => {
+    const result = await fixLoop({
+      repoPath: '/tmp/test',
+      repoName: 'test-repo',
+      config: makeConfig(),
+    });
+    expect(result.total).toBe(2);
+    expect(result.budgetExceeded).toBe(false);
+  });
+
+  it('reads budget from config rules.budget_usd when no CLI override', async () => {
+    const config = makeConfig();
+    config.rules.budget_usd = 0.5;
+    const result = await fixLoop({
+      repoPath: '/tmp/test',
+      repoName: 'test-repo',
+      config,
+    });
+    expect(result.total).toBe(1);
+    expect(result.budgetExceeded).toBe(true);
+  });
+
+  it('CLI budgetUsd overrides config rules.budget_usd', async () => {
+    const config = makeConfig();
+    config.rules.budget_usd = 0.5; // would stop after 1
+    const result = await fixLoop({
+      repoPath: '/tmp/test',
+      repoName: 'test-repo',
+      config,
+      budgetUsd: 5.0, // CLI says plenty of budget
+    });
+    expect(result.total).toBe(2);
+    expect(result.budgetExceeded).toBe(false);
+  });
+
+  it('logs budget exceeded message when stopped', async () => {
+    const consoleSpy = vi.spyOn(console, 'log');
+    await fixLoop({
+      repoPath: '/tmp/test',
+      repoName: 'test-repo',
+      config: makeConfig(),
+      budgetUsd: 0.5,
+    });
+    const output = consoleSpy.mock.calls.map((c) => c[0] as string).join('\n');
+    expect(output).toMatch(/budget/i);
+    consoleSpy.mockRestore();
+  });
+});
