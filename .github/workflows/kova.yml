@@ -1,0 +1,107 @@
+# Kova — Autonomous Code Agent
+#
+# Triggers:
+#   1. Issue labeled "kova" → fixes that issue
+#   2. Nightly schedule → auto mode on all open issues
+#   3. Manual dispatch → fix a specific issue or run auto mode
+
+name: Kova
+
+on:
+  issues:
+    types: [labeled]
+
+  schedule:
+    # Nightly at 2am UTC
+    - cron: '0 2 * * *'
+
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Operation mode'
+        required: true
+        type: choice
+        options:
+          - fix
+          - auto
+          - brainstorm
+        default: 'fix'
+      issue_number:
+        description: 'Issue number (fix mode)'
+        required: false
+        type: string
+      filter:
+        description: 'Label filter'
+        required: false
+        type: string
+      max_issues:
+        description: 'Max issues to process'
+        required: false
+        type: string
+        default: '10'
+      budget:
+        description: 'Max USD budget'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  # ── Issue labeled trigger ─────────────────────────────────────────
+  fix-issue:
+    if: >-
+      github.event_name == 'issues' &&
+      github.event.label.name == 'kova'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: orrinfrazier/kova@main
+        with:
+          mode: fix
+          issue_number: ${{ github.event.issue.number }}
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+
+  # ── Nightly auto mode ────────────────────────────────────────────
+  nightly:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: orrinfrazier/kova@main
+        with:
+          mode: auto
+          max_issues: '5'
+          budget: '25'
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+
+  # ── Manual dispatch ──────────────────────────────────────────────
+  manual:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: orrinfrazier/kova@main
+        id: kova
+        with:
+          mode: ${{ inputs.mode }}
+          issue_number: ${{ inputs.issue_number }}
+          filter: ${{ inputs.filter }}
+          max_issues: ${{ inputs.max_issues }}
+          budget: ${{ inputs.budget }}
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+
+      - name: Report result
+        if: always()
+        run: |
+          echo "Status: ${{ steps.kova.outputs.status }}"
+          echo "PR URL: ${{ steps.kova.outputs.pr_url }}"
+          echo "Issues fixed: ${{ steps.kova.outputs.issues_fixed }}"
