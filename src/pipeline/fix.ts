@@ -27,6 +27,7 @@ import { detectTooling } from '../services/language-detect.js';
 import { ensureScreenshotsDir, isPlaywrightEnabled, resolvePlaywrightEnv } from '../services/playwright.js';
 import { formatPRContext, type OpenPR } from '../services/pr-context.js';
 import { ProgressTracker } from '../services/progress.js';
+import { detectPromptChange, hashPrompt, recordPromptVersion } from '../services/prompt-versions.js';
 import {
   formatRepoContext,
   formatRepoSearch,
@@ -144,16 +145,17 @@ function waveFallbackModel(
   return getApiFallbackModelString('medium');
 }
 
-/** Spawn a wave agent with automatic local-to-API fallback. */
+/** Spawn a wave agent with automatic local-to-API fallback. Returns handoff + prompt hash. */
 async function spawnWave<T>(
   wave: FixAIWaveName,
   workDir: string,
+  repoPath: string,
   config: RepoConfig,
   userMessage: string,
   outputFormat?: OutputFormat,
   mcpHandles?: Map<string, MCPServerHandle>,
   playwright?: { enabled: boolean },
-): Promise<WaveHandoff<T>> {
+): Promise<{ handoff: WaveHandoff<T>; promptHash: string }> {
   const model = resolveWaveModel(config.model[wave]);
   const mcpTools =
     mcpHandles && mcpHandles.size > 0
@@ -161,10 +163,19 @@ async function spawnWave<T>(
       : undefined;
   const tools = getWaveTools(wave, workDir, { customTools: config.tools, mcpTools, playwright });
   const systemPrompt = await loadPrompt(wave, config.tools);
+  const promptHash = hashPrompt(systemPrompt);
+
+  // Prompt versioning: detect changes and record version
+  const change = await detectPromptChange(repoPath, wave, systemPrompt).catch(() => null);
+  if (change) {
+    log.info(`Prompt changed for ${wave}: ${change.previousHash} → ${change.currentHash}`);
+  }
+  await recordPromptVersion(repoPath, wave, systemPrompt).catch(() => {});
+
   const thinkingLevel = resolveThinkingLevel(config, wave);
   const modelString = model.id;
   const fallbackModel = waveFallbackModel(config.model[wave], modelString, config.model.fallback);
-  return spawnWaveAgentWithFallback<T>({
+  const handoff = await spawnWaveAgentWithFallback<T>({
     wave,
     model: modelString,
     tools,
@@ -176,10 +187,11 @@ async function spawnWave<T>(
     fallbackModel,
     ...(outputFormat != null && { outputFormat }),
   });
+  return { handoff, promptHash };
 }
 
 /** Convert a WaveHandoff to WaveResult for checkpoint/cost-report compatibility. */
-function handoffToResult(handoff: WaveHandoff, provider?: string): WaveResult {
+function handoffToResult(handoff: WaveHandoff, provider?: string, promptHash?: string): WaveResult {
   return {
     wave: handoff.wave,
     success: true,
@@ -191,6 +203,7 @@ function handoffToResult(handoff: WaveHandoff, provider?: string): WaveResult {
     provider,
     fallback_used: handoff.fallback_used || undefined,
     local_attempt_cost: handoff.local_attempt_cost,
+    promptHash,
   };
 }
 
@@ -330,6 +343,9 @@ export async function fix(options: FixOptions): Promise<FixResult> {
     return { success: false, error: 'Interrupted by signal', state };
   };
 
+  // Track prompt hashes across waves for history correlation
+  const promptHashes: Record<string, string> = {};
+
   try {
     // Detect tooling and set up Playwright if applicable
     const tooling = await detectTooling(workDir);
@@ -368,9 +384,10 @@ export async function fix(options: FixOptions): Promise<FixResult> {
 
     // WAVE A: Assess
     if (!shouldSkip('assess')) {
-      const handoff = await spawnWave<AssessResult>(
+      const { handoff, promptHash } = await spawnWave<AssessResult>(
         'assess',
         workDir,
+        repoPath,
         config,
         buildWaveContext(
           'assess',
@@ -385,7 +402,8 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         mcpHandles,
       );
       await saveHandoff(workDir, handoff);
-      state.waveResults.assess = handoffToResult(handoff, waveProvider(config, 'assess'));
+      promptHashes.assess = promptHash;
+      state.waveResults.assess = handoffToResult(handoff, waveProvider(config, 'assess'), promptHash);
       state.completedWaves.push('assess');
       await saveCheckpoint(workDir, state);
       await progress?.waveCompleted('assess', state);
@@ -428,9 +446,10 @@ export async function fix(options: FixOptions): Promise<FixResult> {
 
     // WAVE S: Spec
     if (!shouldSkip('spec')) {
-      const handoff = await spawnWave(
+      const { handoff, promptHash } = await spawnWave(
         'spec',
         workDir,
+        repoPath,
         config,
         buildWaveContext('spec', issue, state.waveResults, {
           prContext,
@@ -442,7 +461,8 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         mcpHandles,
       );
       await saveHandoff(workDir, handoff);
-      state.waveResults.spec = handoffToResult(handoff, waveProvider(config, 'spec'));
+      promptHashes.spec = promptHash;
+      state.waveResults.spec = handoffToResult(handoff, waveProvider(config, 'spec'), promptHash);
       state.completedWaves.push('spec');
       await saveCheckpoint(workDir, state);
       await progress?.waveCompleted('spec', state);
@@ -499,9 +519,10 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       // Escalation: SPEC_WRONG → re-run spec + TI loop
       if (!tiResult.testsPassing && tiResult.diagnosis === 'SPEC_WRONG') {
         flog.info('[escalation] SPEC_WRONG — re-running spec then TI loop');
-        const specHandoff = await spawnWave(
+        const { handoff: specHandoff, promptHash: specPromptHash } = await spawnWave(
           'spec',
           workDir,
+          repoPath,
           config,
           buildWaveContext('spec', issue, state.waveResults, {
             prContext,
@@ -513,7 +534,8 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           mcpHandles,
         );
         await saveHandoff(workDir, specHandoff);
-        state.waveResults.spec = handoffToResult(specHandoff, waveProvider(config, 'spec'));
+        promptHashes.spec = specPromptHash;
+        state.waveResults.spec = handoffToResult(specHandoff, waveProvider(config, 'spec'), specPromptHash);
 
         const retryTI = await runParallelPieceTILoop({
           issue,
@@ -550,9 +572,10 @@ export async function fix(options: FixOptions): Promise<FixResult> {
 
     // WAVE Q: Quality
     if (!shouldSkip('quality')) {
-      const handoff = await spawnWave(
+      const { handoff, promptHash } = await spawnWave(
         'quality',
         workDir,
+        repoPath,
         config,
         buildWaveContext('quality', issue, state.waveResults, {
           coverageThreshold: config.rules.coverage,
@@ -562,7 +585,8 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         mcpHandles,
       );
       await saveHandoff(workDir, handoff);
-      state.waveResults.quality = handoffToResult(handoff, waveProvider(config, 'quality'));
+      promptHashes.quality = promptHash;
+      state.waveResults.quality = handoffToResult(handoff, waveProvider(config, 'quality'), promptHash);
       state.completedWaves.push('quality');
       await saveCheckpoint(workDir, state);
       await progress?.waveCompleted('quality', state);
@@ -762,6 +786,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
             ? 'partial'
             : 'success'
           : 'failure',
+      ...(Object.keys(promptHashes).length > 0 && { promptHashes }),
     }).catch((err) => {
       log.warn(`Failed to record history: ${err instanceof Error ? err.message : String(err)}`);
     });
