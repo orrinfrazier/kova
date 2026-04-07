@@ -244,7 +244,7 @@ function makeIssue(n: number): Issue {
 function makeConfig(overrides?: Partial<RepoConfig>): RepoConfig {
   return {
     path: '/tmp/test-repo',
-    rules: { coverage: 80, auto_merge: false, max_issues_per_run: 10, ci_merge: 'require' as const },
+    rules: { coverage: 80, auto_merge: false, max_issues_per_run: 10, ci_merge: 'require' as const, concurrency: 1 },
     model: {
       assess: 'large',
       spec: 'large',

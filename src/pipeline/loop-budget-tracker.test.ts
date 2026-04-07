@@ -79,7 +79,7 @@ function makeFixResult(cost: number) {
 function makeConfig() {
   return {
     path: '/tmp/test',
-    rules: { coverage: 80, auto_merge: false, max_issues_per_run: 10, ci_merge: 'require' as const },
+    rules: { coverage: 80, auto_merge: false, max_issues_per_run: 10, ci_merge: 'require' as const, concurrency: 1 },
     model: {
       assess: 'large' as const,
       spec: 'large' as const,
