@@ -67,3 +67,39 @@ export async function listOpenPRs(repoPath: string): Promise<string[]> {
   const prs = JSON.parse(result.stdout) as Array<{ number: number; title: string; headRefName: string }>;
   return prs.map((pr) => `#${pr.number}: ${pr.title} (${pr.headRefName})`);
 }
+
+export async function branchExistsOnRemote(repoPath: string, branch: string): Promise<boolean> {
+  try {
+    await $({ cwd: repoPath })`git ls-remote --exit-code --heads origin ${branch}`;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function findOpenPR(repoPath: string, branch: string): Promise<string | undefined> {
+  const result = await $({ cwd: repoPath })`gh pr list --state open --head ${branch} --json url --limit 1`;
+  const prs = JSON.parse(result.stdout) as Array<{ url: string }>;
+  return prs[0]?.url;
+}
+
+export interface ExistingWork {
+  reason: string;
+  prUrl?: string;
+}
+
+export async function hasExistingWork(repoPath: string, issueNumber: number): Promise<ExistingWork | undefined> {
+  const branch = `kova/fix-${issueNumber}`;
+  const [branchExists, prUrl] = await Promise.all([
+    branchExistsOnRemote(repoPath, branch),
+    findOpenPR(repoPath, branch),
+  ]);
+
+  if (prUrl) {
+    return { reason: `Open PR exists for ${branch}: ${prUrl}`, prUrl };
+  }
+  if (branchExists) {
+    return { reason: `Branch ${branch} already exists on remote` };
+  }
+  return undefined;
+}

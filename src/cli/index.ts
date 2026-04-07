@@ -13,7 +13,7 @@ import { runAuto } from '../pipeline/auto.js';
 import { fix } from '../pipeline/fix.js';
 import { fixLoop } from '../pipeline/loop.js';
 import { detectRepoName, resolveRepoConfig } from '../services/config.js';
-import { fetchIssue } from '../services/github.js';
+import { fetchIssue, hasExistingWork } from '../services/github.js';
 import { log } from '../utils/logger.js';
 
 const program = new Command();
@@ -29,6 +29,7 @@ program
   .option('--max <n>', 'Maximum issues to fix', '10')
   .option('--repo <path>', 'Repository path', '.')
   .option('--fresh', 'Force restart — delete checkpoint and worktree')
+  .option('--force', 'Override skip — re-fix issues with existing branches/PRs')
   .option('--budget <usd>', 'Maximum USD budget for fix loop')
   .option('--no-comment', 'Suppress GitHub comment on grade D/F skip')
   .action(
@@ -41,6 +42,7 @@ program
         budget?: string;
         repo?: string;
         fresh?: boolean;
+        force?: boolean;
         comment?: boolean;
       },
     ) => {
@@ -58,6 +60,7 @@ program
           filter: opts.filter,
           maxIssues: Number.parseInt(opts.max ?? '10', 10),
           budgetUsd: opts.budget ? Number.parseFloat(opts.budget) : undefined,
+          force: opts.force,
         });
 
         log.info(`\nResults: ${result.succeeded}/${result.total} succeeded`);
@@ -77,6 +80,15 @@ program
       }
 
       log.info(`Fixing issue #${issueNumber} in ${repoName}`);
+
+      if (!opts.force) {
+        const existing = await hasExistingWork(repoPath, issueNumber);
+        if (existing) {
+          log.info(`Skipping #${issueNumber}: ${existing.reason}`);
+          return;
+        }
+      }
+
       const issue = await fetchIssue(repoPath, issueNumber);
       const result = await fix({
         issue,
@@ -101,8 +113,9 @@ program
   .description('Autonomous mode — fetch open issues, prioritize, fix sequentially')
   .option('--filter <label>', 'Filter issues by label (overrides config)')
   .option('--max <n>', 'Maximum issues to fix (overrides config)')
+  .option('--force', 'Override skip — re-fix issues with existing branches/PRs')
   .option('--repo <path>', 'Repository path', '.')
-  .action(async (opts: { filter?: string; max?: string; repo?: string }) => {
+  .action(async (opts: { filter?: string; max?: string; force?: boolean; repo?: string }) => {
     const repoPath = resolve(opts.repo ?? '.');
     const repoName = detectRepoName(repoPath);
     const config = resolveRepoConfig(repoPath);
@@ -113,6 +126,7 @@ program
       config,
       filter: opts.filter,
       max: opts.max ? Number.parseInt(opts.max, 10) : undefined,
+      force: opts.force,
     });
 
     process.exit(result.exitCode);
