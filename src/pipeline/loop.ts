@@ -7,6 +7,7 @@ import type { Issue, RepoConfig, WaveResult } from '../types/index.js';
 import { log } from '../utils/logger.js';
 import { type FixResult, fix } from './fix.js';
 import { buildRunReport, printRunReport, writeRunReport } from './run-report.js';
+import type { SharedBudgetTracker } from './shared-budget.js';
 
 export interface LoopOptions {
   repoPath: string;
@@ -16,6 +17,7 @@ export interface LoopOptions {
   maxIssues?: number | undefined;
   budgetUsd?: number | undefined;
   force?: boolean | undefined;
+  budgetTracker?: SharedBudgetTracker | undefined;
 }
 
 export interface LoopResult {
@@ -50,12 +52,14 @@ function aggregateWaveCosts(waveResults: Partial<Record<string, WaveResult>>): {
 }
 
 export async function fixLoop(options: LoopOptions): Promise<LoopResult> {
-  const { repoPath, repoName, config, filter, maxIssues, budgetUsd } = options;
+  const { repoPath, repoName, config, filter, maxIssues, budgetUsd, budgetTracker } = options;
   const startedAt = new Date().toISOString();
   const limit = maxIssues ?? config.auto?.max_per_run ?? config.rules.max_issues_per_run;
-  const budget = budgetUsd ?? config.rules.budget_usd;
+  const budget = budgetTracker ? undefined : (budgetUsd ?? config.rules.budget_usd);
   log.info(`Fetching open issues for ${repoName}...`);
-  if (budget !== undefined) {
+  if (budgetTracker) {
+    log.info(`Shared budget cap: $${budgetTracker.limitUsd.toFixed(2)}`);
+  } else if (budget !== undefined) {
     log.info(`Budget cap: $${budget.toFixed(2)}`);
   }
   const issues = await fetchIssues(repoPath, filter);
@@ -116,7 +120,16 @@ export async function fixLoop(options: LoopOptions): Promise<LoopResult> {
       failed++;
       log.error(`#${issue.number} — Failed: ${result.error}`);
     }
-    if (budget !== undefined && totalCost >= budget) {
+    if (budgetTracker) {
+      budgetTracker.addCost(waveCosts.cost);
+      if (budgetTracker.isExceeded()) {
+        budgetExceeded = true;
+        log.info(
+          `Shared budget exceeded: $${budgetTracker.totalSpent().toFixed(2)} spent of $${budgetTracker.limitUsd.toFixed(2)} budget — stopping loop`,
+        );
+        break;
+      }
+    } else if (budget !== undefined && totalCost >= budget) {
       budgetExceeded = true;
       log.info(`Budget exceeded: $${totalCost.toFixed(2)} spent of $${budget.toFixed(2)} budget — stopping loop`);
       break;

@@ -126,6 +126,91 @@ function renderMarkdown(report: RunReport): string {
   return lines.join('\n');
 }
 
+/* ------------------------------------------------------------------ */
+/*  Multi-repo aggregated report                                       */
+/* ------------------------------------------------------------------ */
+
+export interface MultiRepoRunReportEntry {
+  name: string;
+  succeeded: number;
+  failed: number;
+  cost: number;
+  turns: number;
+  duration: number;
+}
+
+export interface MultiRepoRunReport {
+  totalSucceeded: number;
+  totalFailed: number;
+  totalCost: number;
+  totalTurns: number;
+  totalDuration: number;
+  budgetExceeded: boolean;
+  repos: MultiRepoRunReportEntry[];
+  completedAt: string;
+}
+
+export function buildMultiRepoRunReport(
+  repoResults: Array<{ repoName: string; loopResult: LoopResult }>,
+): MultiRepoRunReport {
+  let totalSucceeded = 0;
+  let totalFailed = 0;
+  let totalCost = 0;
+  let totalTurns = 0;
+  let totalDuration = 0;
+  let budgetExceeded = false;
+  const repos: MultiRepoRunReportEntry[] = [];
+
+  for (const { repoName, loopResult } of repoResults) {
+    totalSucceeded += loopResult.succeeded;
+    totalFailed += loopResult.failed;
+    totalCost += loopResult.totalCost;
+    totalTurns += loopResult.totalTurns;
+    totalDuration += loopResult.totalDuration;
+    if (loopResult.budgetExceeded) budgetExceeded = true;
+
+    repos.push({
+      name: repoName,
+      succeeded: loopResult.succeeded,
+      failed: loopResult.failed,
+      cost: loopResult.totalCost,
+      turns: loopResult.totalTurns,
+      duration: loopResult.totalDuration,
+    });
+  }
+
+  return {
+    totalSucceeded,
+    totalFailed,
+    totalCost,
+    totalTurns,
+    totalDuration,
+    budgetExceeded,
+    repos,
+    completedAt: new Date().toISOString(),
+  };
+}
+
+export function printMultiRepoRunReport(report: MultiRepoRunReport): void {
+  log.info('');
+  log.info('=== Multi-Repo Run Report (Parallel) ===');
+  log.info(`${report.totalSucceeded} succeeded, ${report.totalFailed} failed across ${report.repos.length} repos`);
+  log.info(
+    `Total cost: $${report.totalCost.toFixed(2)} | ${report.totalTurns} turns | ${formatDuration(report.totalDuration)}`,
+  );
+  if (report.budgetExceeded) {
+    log.info('Budget cap reached.');
+  }
+  log.info('');
+  log.info('Per-repo breakdown:');
+  for (const repo of report.repos) {
+    const status = repo.failed > 0 ? 'PARTIAL' : 'OK     ';
+    log.info(
+      `  ${repo.name} [${status}] ${repo.succeeded} ok / ${repo.failed} fail  $${repo.cost.toFixed(2)}  ${formatDuration(repo.duration)}`,
+    );
+  }
+}
+
 export function printRunReport(report: RunReport): void {
   log.info('');
   log.info('=== Auto Mode Run Report ===');
