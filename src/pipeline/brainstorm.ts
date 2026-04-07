@@ -9,6 +9,7 @@ import {
   detectDiminishingReturns,
   loadHistory,
 } from '../services/brainstorm-history.js';
+import { type CrossRepoConfig, fetchCrossRepoIssues, formatCrossRepoContext } from '../services/cross-repo-issues.js';
 import type { BrainstormIssue, BrainstormResult, RepoConfig } from '../types/index.js';
 import { BrainstormResultSchema } from '../types/index.js';
 import { log } from '../utils/logger.js';
@@ -29,6 +30,7 @@ export interface BrainstormOptions {
   config: RepoConfig;
   threshold?: number;
   focus?: string[] | undefined;
+  kovaConfig?: CrossRepoConfig | undefined;
 }
 
 export interface BrainstormReturn {
@@ -43,7 +45,7 @@ export interface BrainstormReturn {
 }
 
 export async function brainstorm(options: BrainstormOptions): Promise<BrainstormReturn> {
-  const { repoPath, config, threshold = DEFAULT_CONFIDENCE_THRESHOLD, focus } = options;
+  const { repoPath, config, threshold = DEFAULT_CONFIDENCE_THRESHOLD, focus, kovaConfig } = options;
 
   const model = resolveModel('large');
   const tools = getWaveTools('brainstorm', repoPath);
@@ -52,9 +54,24 @@ export async function brainstorm(options: BrainstormOptions): Promise<Brainstorm
 
   const focusAreas = focus ?? config.rules.focus;
 
+  // Fetch cross-repo issues for dedup context (best-effort)
+  let crossRepoContext = '';
+  if (kovaConfig) {
+    try {
+      const crossRepoEntries = await fetchCrossRepoIssues(repoPath, kovaConfig);
+      crossRepoContext = formatCrossRepoContext(crossRepoEntries);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      log.warn(`[brainstorm] Cross-repo issue fetch failed (continuing): ${message}`);
+    }
+  }
+
   let userMessage = `Analyze the codebase at ${repoPath} and identify improvements. Read key files, understand the architecture, then produce a structured list of issues.`;
   if (focusAreas && focusAreas.length > 0) {
     userMessage += `\n\nIMPORTANT: ONLY generate issues within these focus areas: ${focusAreas.join(', ')}. Do not generate issues outside these categories.`;
+  }
+  if (crossRepoContext) {
+    userMessage += crossRepoContext;
   }
 
   try {
