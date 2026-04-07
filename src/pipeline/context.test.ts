@@ -217,6 +217,29 @@ describe('buildWaveContext', () => {
     });
   });
 
+  describe('impl wave — escalation hint', () => {
+    it('includes escalation hint when provided', () => {
+      const handoffs: Partial<Record<string, WaveResult>> = {
+        spec: makeWaveResult('spec', specArtifact),
+      };
+      const ctx = buildWaveContext('impl', makeIssue(), handoffs, {
+        escalationHint: 'Previous approach failed. Try a different algorithm.',
+      });
+
+      expect(ctx).toContain('Escalation');
+      expect(ctx).toContain('Previous approach failed. Try a different algorithm.');
+    });
+
+    it('does NOT include escalation section when hint is absent', () => {
+      const handoffs: Partial<Record<string, WaveResult>> = {
+        spec: makeWaveResult('spec', specArtifact),
+      };
+      const ctx = buildWaveContext('impl', makeIssue(), handoffs);
+
+      expect(ctx).not.toContain('Escalation');
+    });
+  });
+
   describe('missing handoffs', () => {
     it('handles missing assess gracefully for spec wave', () => {
       const ctx = buildWaveContext('spec', makeIssue(), {});

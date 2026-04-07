@@ -38,11 +38,24 @@ export const TestResultSchema = z.object({
 });
 export type TestResult = z.infer<typeof TestResultSchema>;
 
+export const DiagnosisCategorySchema = z.enum(['SPEC_WRONG', 'APPROACH_WRONG', 'MISSING_CONTEXT', 'STUCK']);
+export type DiagnosisCategory = z.infer<typeof DiagnosisCategorySchema>;
+
+export const ImplDiagnosisSchema = z.object({
+  category: DiagnosisCategorySchema,
+  tests_still_failing: z.array(z.string()),
+  approaches_tried: z.array(z.string()),
+  failure_pattern: z.enum(['COMPILATION', 'WRONG_OUTPUT', 'TEST_MISMATCH', 'MISSING_DEP']),
+  theory: z.string(),
+});
+export type ImplDiagnosis = z.infer<typeof ImplDiagnosisSchema>;
+
 export const ImplResultSchema = z.object({
   files_modified: z.array(z.string()),
   files_created: z.array(z.string()),
   tests_passing: z.boolean(),
   approach_notes: z.string(),
+  diagnosis: ImplDiagnosisSchema.optional(),
 });
 export type ImplResult = z.infer<typeof ImplResultSchema>;
 
