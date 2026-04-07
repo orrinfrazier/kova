@@ -8,6 +8,7 @@
 //   kova fix 123 --repo onexos      Fix issue in named repo from repos.yaml
 //   kova brainstorm                 Analyze repo, generate issue suite
 //   kova auto                       Autonomous mode (all repos if config exists)
+//   kova status                     Dashboard across configured repos
 
 import { resolve } from 'node:path';
 import { Command } from 'commander';
@@ -15,6 +16,7 @@ import { runAuto, runAutoMultiRepo } from '../pipeline/auto.js';
 import { brainstorm, printBrainstormPreview } from '../pipeline/brainstorm.js';
 import { fix } from '../pipeline/fix.js';
 import { fixLoop } from '../pipeline/loop.js';
+import { gatherStatus, printStatusDashboard } from '../pipeline/status.js';
 import { runSupervised } from '../pipeline/supervised.js';
 import { approveIssues } from '../services/approval.js';
 import {
@@ -317,5 +319,23 @@ program
       process.exit(success ? 0 : 1);
     },
   );
+
+program
+  .command('status')
+  .description('Dashboard — open issues, pending PRs, spend across repos')
+  .option('--json', 'Output as JSON')
+  .action(async (opts: { json?: boolean }) => {
+    const configPath = resolveConfigPath(program.opts().config);
+    const config = await loadConfig(configPath);
+
+    log.info('Gathering status...');
+    const result = await gatherStatus(config);
+
+    if (opts.json) {
+      console.log(JSON.stringify(result, null, 2));
+    } else {
+      printStatusDashboard(result);
+    }
+  });
 
 program.parse();
