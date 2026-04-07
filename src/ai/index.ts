@@ -1,5 +1,17 @@
 export { classifyError, type ErrorClassification, isRetryable, isSpendingCapBehavior, KovaError } from './errors.js';
 export {
+  getMCPToolsForWave,
+  loadMCPServersFromSettings,
+  type MCPServerHandle,
+  mcpToolToAgentTool,
+  resolveMCPServers,
+  startAllMCPServers,
+  startMCPServer,
+  stopAllMCPServers,
+  stopMCPServer,
+  WAVE_MCP_DEFAULTS,
+} from './mcp.js';
+export {
   clearCustomModels,
   getApiFallbackModelString,
   isLocalModel,

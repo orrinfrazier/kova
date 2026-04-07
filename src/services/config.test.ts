@@ -935,3 +935,118 @@ describe('detectRepoName', () => {
     expect(detectRepoName('monorepo')).toBe('monorepo');
   });
 });
+
+/* ------------------------------------------------------------------ */
+/*  mcp config                                                         */
+/* ------------------------------------------------------------------ */
+
+describe('mcp config', () => {
+  it('loads config with MCP servers', async () => {
+    const yaml = `
+repos:
+  mcp-repo:
+    path: /tmp/mcp
+    mcp:
+      servers:
+        repo-intel:
+          command: npx
+          args:
+            - "-y"
+            - "@anthropic-ai/repo-intel-mcp"
+        shadcn:
+          command: npx
+          args:
+            - "-y"
+            - "@anthropic-ai/shadcn-mcp"
+          env:
+            SHADCN_KEY: test123
+`;
+    await writeFile(join(tempDir, 'repos.yaml'), yaml);
+
+    const config = await loadConfig(join(tempDir, 'repos.yaml'));
+    const repo = config.repos['mcp-repo'];
+    expect(repo).toBeDefined();
+    if (!repo) return;
+
+    expect(repo.mcp).toBeDefined();
+    expect(repo.mcp?.servers['repo-intel']).toEqual({
+      command: 'npx',
+      args: ['-y', '@anthropic-ai/repo-intel-mcp'],
+    });
+    expect(repo.mcp?.servers['shadcn']?.env).toEqual({ SHADCN_KEY: 'test123' });
+  });
+
+  it('loads config with per-wave MCP server assignments', async () => {
+    const yaml = `
+repos:
+  wave-mcp:
+    path: /tmp/wave-mcp
+    mcp:
+      servers:
+        repo-intel:
+          command: npx
+          args: ["-y", "repo-intel"]
+      waves:
+        spec:
+          - repo-intel
+        impl:
+          - repo-intel
+          - shadcn
+`;
+    await writeFile(join(tempDir, 'repos.yaml'), yaml);
+
+    const config = await loadConfig(join(tempDir, 'repos.yaml'));
+    const repo = config.repos['wave-mcp'];
+    expect(repo).toBeDefined();
+    if (!repo) return;
+
+    expect(repo.mcp?.waves?.spec).toEqual(['repo-intel']);
+    expect(repo.mcp?.waves?.impl).toEqual(['repo-intel', 'shadcn']);
+    expect(repo.mcp?.waves?.assess).toBeUndefined();
+  });
+
+  it('mcp section is optional', async () => {
+    const yaml = `
+repos:
+  no-mcp:
+    path: /tmp/none
+`;
+    await writeFile(join(tempDir, 'repos.yaml'), yaml);
+
+    const config = await loadConfig(join(tempDir, 'repos.yaml'));
+    const repo = config.repos['no-mcp'];
+    expect(repo?.mcp).toBeUndefined();
+  });
+
+  it('mcp servers default to empty object', async () => {
+    const yaml = `
+repos:
+  empty-mcp:
+    path: /tmp/empty
+    mcp:
+      waves:
+        spec:
+          - repo-intel
+`;
+    await writeFile(join(tempDir, 'repos.yaml'), yaml);
+
+    const config = await loadConfig(join(tempDir, 'repos.yaml'));
+    const repo = config.repos['empty-mcp'];
+    expect(repo?.mcp?.servers).toEqual({});
+  });
+
+  it('rejects MCP server config missing command', async () => {
+    const yaml = `
+repos:
+  bad-mcp:
+    path: /tmp/bad
+    mcp:
+      servers:
+        broken:
+          args: ["--help"]
+`;
+    await writeFile(join(tempDir, 'repos.yaml'), yaml);
+
+    await expect(loadConfig(join(tempDir, 'repos.yaml'))).rejects.toThrow(ZodError);
+  });
+});

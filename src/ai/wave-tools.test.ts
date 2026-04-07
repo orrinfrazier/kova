@@ -141,7 +141,7 @@ describe('getWaveTools with custom tools', () => {
   ];
 
   it('appends custom tools to impl wave', () => {
-    const tools = getWaveTools('impl', '/tmp', customTools);
+    const tools = getWaveTools('impl', '/tmp', { customTools });
     const names = tools.map((t) => t.name);
     expect(names).toContain('run-migrations');
     // Still has standard tools
@@ -150,32 +150,32 @@ describe('getWaveTools with custom tools', () => {
   });
 
   it('appends custom tools to quality wave', () => {
-    const tools = getWaveTools('quality', '/tmp', customTools);
+    const tools = getWaveTools('quality', '/tmp', { customTools });
     const names = tools.map((t) => t.name);
     expect(names).toContain('run-migrations');
     expect(names).toContain('bash');
   });
 
   it('does NOT append custom tools to assess wave', () => {
-    const tools = getWaveTools('assess', '/tmp', customTools);
+    const tools = getWaveTools('assess', '/tmp', { customTools });
     const names = tools.map((t) => t.name);
     expect(names).not.toContain('run-migrations');
   });
 
   it('does NOT append custom tools to spec wave', () => {
-    const tools = getWaveTools('spec', '/tmp', customTools);
+    const tools = getWaveTools('spec', '/tmp', { customTools });
     const names = tools.map((t) => t.name);
     expect(names).not.toContain('run-migrations');
   });
 
   it('does NOT append custom tools to review wave', () => {
-    const tools = getWaveTools('review', '/tmp', customTools);
+    const tools = getWaveTools('review', '/tmp', { customTools });
     const names = tools.map((t) => t.name);
     expect(names).not.toContain('run-migrations');
   });
 
   it('does NOT append custom tools to test wave', () => {
-    const tools = getWaveTools('test', '/tmp', customTools);
+    const tools = getWaveTools('test', '/tmp', { customTools });
     const names = tools.map((t) => t.name);
     expect(names).not.toContain('run-migrations');
   });
@@ -193,7 +193,7 @@ describe('getWaveTools with custom tools', () => {
   });
 
   it('works with empty custom tools array', () => {
-    const tools = getWaveTools('impl', '/tmp', []);
+    const tools = getWaveTools('impl', '/tmp', { customTools: [] });
     const names = tools.map((t) => t.name);
     expect(names).toEqual(WAVE_TOOLS.impl);
   });
