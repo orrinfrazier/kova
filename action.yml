@@ -1,0 +1,154 @@
+name: 'Kova — Autonomous Code Agent'
+description: 'Fix GitHub issues autonomously with AI-powered code generation'
+branding:
+  icon: 'cpu'
+  color: 'purple'
+
+inputs:
+  mode:
+    description: 'Operation mode: fix, auto, or brainstorm'
+    required: false
+    default: 'fix'
+  issue_number:
+    description: 'Issue number to fix (required for fix mode unless all is true)'
+    required: false
+  all:
+    description: 'Fix all open issues in sequence (fix mode)'
+    required: false
+    default: 'false'
+  filter:
+    description: 'Filter issues by label'
+    required: false
+  max_issues:
+    description: 'Maximum issues to process'
+    required: false
+    default: '10'
+  config:
+    description: 'Path to repos.yaml config file'
+    required: false
+  budget:
+    description: 'Maximum USD budget for the run'
+    required: false
+  force:
+    description: 'Override skip logic — re-fix issues with existing PRs'
+    required: false
+    default: 'false'
+  focus:
+    description: 'Comma-separated focus areas for brainstorm mode'
+    required: false
+  anthropic_api_key:
+    description: 'Anthropic API key'
+    required: true
+  github_token:
+    description: 'GitHub token for gh CLI (defaults to github.token)'
+    required: false
+
+outputs:
+  status:
+    description: 'Execution status: success or failed'
+    value: ${{ steps.run-kova.outputs.status }}
+  pr_url:
+    description: 'URL of the created PR (fix mode, single issue)'
+    value: ${{ steps.run-kova.outputs.pr_url }}
+  issues_fixed:
+    description: 'Number of issues successfully fixed'
+    value: ${{ steps.run-kova.outputs.issues_fixed }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+
+    - name: Install kova
+      shell: bash
+      run: |
+        cd "${{ github.action_path }}"
+        npm ci --ignore-scripts
+        npm run build
+
+    - name: Run kova
+      id: run-kova
+      shell: bash
+      env:
+        ANTHROPIC_API_KEY: ${{ inputs.anthropic_api_key }}
+        GH_TOKEN: ${{ inputs.github_token || github.token }}
+        KOVA_MODE: ${{ inputs.mode }}
+        KOVA_ISSUE: ${{ inputs.issue_number }}
+        KOVA_ALL: ${{ inputs.all }}
+        KOVA_FILTER: ${{ inputs.filter }}
+        KOVA_MAX: ${{ inputs.max_issues }}
+        KOVA_CONFIG: ${{ inputs.config }}
+        KOVA_BUDGET: ${{ inputs.budget }}
+        KOVA_FORCE: ${{ inputs.force }}
+        KOVA_FOCUS: ${{ inputs.focus }}
+      run: |
+        KOVA="node ${{ github.action_path }}/dist/cli/index.js"
+        ARGS=""
+
+        # Global options
+        if [ -n "$KOVA_CONFIG" ]; then
+          ARGS="--config $KOVA_CONFIG"
+        fi
+
+        case "$KOVA_MODE" in
+          fix)
+            ARGS="$ARGS fix"
+            if [ "$KOVA_ALL" = "true" ]; then
+              ARGS="$ARGS --all"
+            elif [ -n "$KOVA_ISSUE" ]; then
+              ARGS="$ARGS $KOVA_ISSUE"
+            else
+              echo "::error::issue_number is required for fix mode (or set all: true)"
+              exit 1
+            fi
+            [ -n "$KOVA_FILTER" ] && ARGS="$ARGS --filter $KOVA_FILTER"
+            [ -n "$KOVA_MAX" ] && ARGS="$ARGS --max $KOVA_MAX"
+            [ -n "$KOVA_BUDGET" ] && ARGS="$ARGS --budget $KOVA_BUDGET"
+            [ "$KOVA_FORCE" = "true" ] && ARGS="$ARGS --force"
+            ;;
+          auto)
+            ARGS="$ARGS auto"
+            [ -n "$KOVA_FILTER" ] && ARGS="$ARGS --filter $KOVA_FILTER"
+            [ -n "$KOVA_MAX" ] && ARGS="$ARGS --max $KOVA_MAX"
+            [ "$KOVA_FORCE" = "true" ] && ARGS="$ARGS --force"
+            ;;
+          brainstorm)
+            ARGS="$ARGS brainstorm --yes"
+            [ -n "$KOVA_FOCUS" ] && ARGS="$ARGS --focus $KOVA_FOCUS"
+            ;;
+          *)
+            echo "::error::Unknown mode: $KOVA_MODE"
+            exit 1
+            ;;
+        esac
+
+        echo "::group::Running kova $ARGS"
+        set +e
+        $KOVA $ARGS 2>&1 | tee /tmp/kova-output.log
+        EXIT_CODE=${PIPESTATUS[0]}
+        set -e
+        echo "::endgroup::"
+
+        # Extract outputs
+        if [ $EXIT_CODE -eq 0 ]; then
+          echo "status=success" >> "$GITHUB_OUTPUT"
+
+          # Extract PR URL from output (fix mode)
+          PR_URL=$(grep -oE 'https://github\.com/[^ ]+/pull/[0-9]+' /tmp/kova-output.log | tail -1 || true)
+          if [ -n "$PR_URL" ]; then
+            echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
+          fi
+
+          # Extract issues fixed count from loop output
+          FIXED=$(grep -oE '[0-9]+/[0-9]+ succeeded' /tmp/kova-output.log | head -1 | grep -oE '^[0-9]+' || true)
+          if [ -n "$FIXED" ]; then
+            echo "issues_fixed=$FIXED" >> "$GITHUB_OUTPUT"
+          fi
+        else
+          echo "status=failed" >> "$GITHUB_OUTPUT"
+          echo "::error::kova exited with code $EXIT_CODE"
+          exit $EXIT_CODE
+        fi
