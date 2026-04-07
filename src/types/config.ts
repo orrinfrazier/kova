@@ -56,11 +56,16 @@ export const VectorDBConfigSchema = z
 
 export type VectorDBConfig = z.infer<typeof VectorDBConfigSchema>;
 
-export const EpisodicMemoryConfigSchema = z.object({
-  enabled: z.boolean(),
-  endpoint: z.string().optional(),
-  max_episodes: z.number().default(3),
-});
+export const EpisodicMemoryConfigSchema = z
+  .object({
+    enabled: z.boolean(),
+    endpoint: z.string().optional(),
+    max_episodes: z.number().int().positive().default(3),
+  })
+  .refine((cfg) => !cfg.enabled || cfg.endpoint != null, {
+    message: 'endpoint is required when episodes is enabled',
+    path: ['endpoint'],
+  });
 
 export type EpisodicMemoryConfig = z.infer<typeof EpisodicMemoryConfigSchema>;
 
