@@ -24,6 +24,8 @@ export interface ContextOptions {
   isReimpl?: boolean;
   /** Token budget for truncation (default: 8000). */
   tokenBudget?: number;
+  /** Escalation hint injected after diagnosis (APPROACH_WRONG / MISSING_CONTEXT). */
+  escalationHint?: string;
 }
 
 type Handoffs = Partial<Record<string, WaveResult>>;
@@ -119,6 +121,10 @@ function buildTestContext(handoffs: Handoffs): string {
 
 function buildImplContext(handoffs: Handoffs, options: ContextOptions): string {
   const sections: string[] = [];
+
+  if (options.escalationHint) {
+    sections.push(`## Escalation\n\n${options.escalationHint}`);
+  }
 
   if (options.isReimpl) {
     const review = handoffs.review?.artifact;

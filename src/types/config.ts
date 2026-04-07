@@ -73,6 +73,15 @@ export interface WaveResult {
   model?: string | undefined;
 }
 
+export interface FailedPiece {
+  pieceName: string;
+  diagnosis: {
+    category: string;
+    theory: string;
+    tests_still_failing: string[];
+  };
+}
+
 export interface FixState {
   issue: Issue;
   repo: string;
@@ -83,4 +92,5 @@ export interface FixState {
   waveResults: Partial<Record<WaveName, WaveResult>>;
   status: 'running' | 'completed' | 'failed' | 'interrupted';
   error?: string | undefined;
+  failedPieces?: FailedPiece[] | undefined;
 }

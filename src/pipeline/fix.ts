@@ -15,8 +15,23 @@ import {
   removeWorktree,
   worktreeExists,
 } from '../services/worktree.js';
-import type { FixState, Issue, RepoConfig, WaveName, WaveResult } from '../types/index.js';
-import { type AssessResult, AssessResultSchema, ReviewResultSchema, SpecResultSchema } from '../types/index.js';
+import type {
+  FailedPiece,
+  FixState,
+  ImplDiagnosis,
+  ImplResult,
+  Issue,
+  RepoConfig,
+  WaveName,
+  WaveResult,
+} from '../types/index.js';
+import {
+  type AssessResult,
+  AssessResultSchema,
+  ImplResultSchema,
+  ReviewResultSchema,
+  SpecResultSchema,
+} from '../types/index.js';
 import { log } from '../utils/logger.js';
 import { buildWaveContext } from './context.js';
 import { buildCostReport, printRunSummary, writeCostReport } from './cost-report.js';
@@ -136,10 +151,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
     }
 
     if (!shouldSkip('impl')) {
-      const result = await runWave('impl', workDir, config, {
-        userMessage: buildWaveContext('impl', issue, state.waveResults, { prContext }),
-      });
-      state.waveResults.impl = toWaveResult('impl', result);
+      await runImplWithEscalation(workDir, config, issue, state, prContext);
       state.completedWaves.push('impl');
       await saveCheckpoint(workDir, state);
 
@@ -257,6 +269,127 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       await removeWorktree(repoPath, worktree.path);
     }
   }
+}
+
+const MAX_IMPL_RETRIES = 3;
+
+async function runImplWithEscalation(
+  workDir: string,
+  config: RepoConfig,
+  issue: Issue,
+  state: FixState,
+  prContext: string,
+): Promise<void> {
+  let lastDiagnosis: ImplDiagnosis | undefined;
+
+  for (let attempt = 1; attempt <= MAX_IMPL_RETRIES; attempt++) {
+    const result = await runWave('impl', workDir, config, {
+      userMessage: buildWaveContext('impl', issue, state.waveResults, { prContext }),
+      outputFormat: toOutputFormat(ImplResultSchema),
+    });
+    state.waveResults.impl = toWaveResult('impl', result);
+
+    const implResult = result.structuredOutput as ImplResult | undefined;
+
+    if (implResult?.tests_passing) {
+      return;
+    }
+
+    lastDiagnosis = implResult?.diagnosis;
+
+    if (attempt < MAX_IMPL_RETRIES) {
+      log.warn(`[impl] Attempt ${attempt}/${MAX_IMPL_RETRIES} — tests failing, retrying...`);
+    }
+  }
+
+  // All retries exhausted — escalate based on diagnosis
+  log.warn('[impl] All retries exhausted — escalating');
+  await handleEscalation(lastDiagnosis, workDir, config, issue, state, prContext);
+}
+
+async function handleEscalation(
+  diagnosis: ImplDiagnosis | undefined,
+  workDir: string,
+  config: RepoConfig,
+  issue: Issue,
+  state: FixState,
+  prContext: string,
+): Promise<void> {
+  const category = diagnosis?.category ?? 'STUCK';
+
+  if (category === 'SPEC_WRONG') {
+    log.info('[escalation] SPEC_WRONG — re-running spec then T→I');
+    const specResult = await runWave('spec', workDir, config, {
+      userMessage: buildWaveContext('spec', issue, state.waveResults, { prContext }),
+      outputFormat: toOutputFormat(SpecResultSchema),
+    });
+    state.waveResults.spec = toWaveResult('spec', specResult);
+
+    const testResult = await runWave('test', workDir, config, {
+      userMessage: buildWaveContext('test', issue, state.waveResults),
+    });
+    state.waveResults.test = toWaveResult('test', testResult);
+
+    const implResult = await runWave('impl', workDir, config, {
+      userMessage: buildWaveContext('impl', issue, state.waveResults, { prContext }),
+      outputFormat: toOutputFormat(ImplResultSchema),
+    });
+    state.waveResults.impl = toWaveResult('impl', implResult);
+
+    const impl = implResult.structuredOutput as ImplResult | undefined;
+    if (!impl?.tests_passing) {
+      trackFailedPiece(state, diagnosis);
+    }
+    return;
+  }
+
+  if (category === 'APPROACH_WRONG') {
+    log.info('[escalation] APPROACH_WRONG — re-running impl with approach hint');
+    const hint = `Previous approach failed. Diagnosis: ${diagnosis?.theory ?? 'unknown'}. Try a fundamentally different algorithm, pattern, or architecture.`;
+    const result = await runWave('impl', workDir, config, {
+      userMessage: buildWaveContext('impl', issue, state.waveResults, { prContext, escalationHint: hint }),
+      outputFormat: toOutputFormat(ImplResultSchema),
+    });
+    state.waveResults.impl = toWaveResult('impl', result);
+
+    const impl = result.structuredOutput as ImplResult | undefined;
+    if (!impl?.tests_passing) {
+      trackFailedPiece(state, diagnosis);
+    }
+    return;
+  }
+
+  if (category === 'MISSING_CONTEXT') {
+    log.info('[escalation] MISSING_CONTEXT — re-running impl with additional context');
+    const hint = `Missing context detected: ${diagnosis?.theory ?? 'unknown'}. Read additional source files, dependencies, and type definitions before implementing.`;
+    const result = await runWave('impl', workDir, config, {
+      userMessage: buildWaveContext('impl', issue, state.waveResults, { prContext, escalationHint: hint }),
+      outputFormat: toOutputFormat(ImplResultSchema),
+    });
+    state.waveResults.impl = toWaveResult('impl', result);
+
+    const impl = result.structuredOutput as ImplResult | undefined;
+    if (!impl?.tests_passing) {
+      trackFailedPiece(state, diagnosis);
+    }
+    return;
+  }
+
+  // STUCK or unknown — mark failed, continue
+  log.info('[escalation] STUCK — marking piece as failed');
+  trackFailedPiece(state, diagnosis);
+}
+
+function trackFailedPiece(state: FixState, diagnosis: ImplDiagnosis | undefined): void {
+  const piece: FailedPiece = {
+    pieceName: 'impl',
+    diagnosis: {
+      category: diagnosis?.category ?? 'STUCK',
+      theory: diagnosis?.theory ?? 'No diagnosis provided',
+      tests_still_failing: diagnosis?.tests_still_failing ?? [],
+    },
+  };
+  state.failedPieces = [...(state.failedPieces ?? []), piece];
 }
 
 async function runWave(

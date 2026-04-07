@@ -1,4 +1,5 @@
 export type {
+  FailedPiece,
   FixState,
   IsolationMode,
   Issue,
@@ -13,6 +14,8 @@ export type { WaveHandoff } from './handoffs.js';
 export { loadAllHandoffs, loadHandoff, saveHandoff, WaveHandoffSchema } from './handoffs.js';
 export type {
   AssessResult,
+  DiagnosisCategory,
+  ImplDiagnosis,
   ImplResult,
   QualityResult,
   ReviewResult,
@@ -21,6 +24,8 @@ export type {
 } from './waves.js';
 export {
   AssessResultSchema,
+  DiagnosisCategorySchema,
+  ImplDiagnosisSchema,
   ImplResultSchema,
   QualityResultSchema,
   ReviewResultSchema,
