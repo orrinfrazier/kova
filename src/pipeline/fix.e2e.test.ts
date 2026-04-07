@@ -596,7 +596,7 @@ describe('fix — E2E with mock pi-mono', () => {
       expect(mockAgentConstructor).toHaveBeenCalledTimes(8);
 
       // The 7th prompt (index 6) is the re-impl with review findings
-      expect(allPrompts[6]).toContain('review findings');
+      expect(allPrompts[6]).toContain('Review findings');
       expect(allPrompts[6]).toContain('Unused import');
     });
   });
