@@ -17,6 +17,13 @@ import { clearCheckpoint, loadCheckpoint, saveCheckpoint } from '../services/che
 import { commentOnIssue, createPR, listOpenPRs } from '../services/github.js';
 import { detectTooling } from '../services/language-detect.js';
 import { formatPRContext, type OpenPR } from '../services/pr-context.js';
+import {
+  DEFAULT_SANDBOX_LIMITS,
+  getContainerStats,
+  killContainer,
+  parseTimeout,
+  startSandboxContainer,
+} from '../services/sandbox.js';
 import { shutdownRequested } from '../services/shutdown.js';
 import {
   buildEpisodeRecord,
@@ -174,6 +181,33 @@ export async function fix(options: FixOptions): Promise<FixResult> {
 
   const worktree = config.isolation === 'worktree' ? await createWorktree(repoPath, issue.number) : undefined;
   const workDir = worktree?.path ?? repoPath;
+
+  // Docker sandbox: start container with resource limits
+  let sandboxContainerId: string | undefined;
+  let sandboxContainerName: string | undefined;
+  let sandboxTimeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  let sandboxTimedOut = false;
+  const sandboxStartTime = Date.now();
+
+  if (config.isolation === 'docker') {
+    const sandbox = await startSandboxContainer({
+      repoName,
+      issueNumber: issue.number,
+      repoPath: workDir,
+      config: config.sandbox,
+    });
+    sandboxContainerId = sandbox.containerId;
+    sandboxContainerName = sandbox.containerName;
+
+    // Set up timeout kill
+    const timeoutStr = config.sandbox?.timeout ?? DEFAULT_SANDBOX_LIMITS.timeout;
+    const timeoutMs = parseTimeout(timeoutStr);
+    sandboxTimeoutHandle = setTimeout(async () => {
+      sandboxTimedOut = true;
+      log.warn(`[sandbox] Timeout (${timeoutStr}) exceeded — killing container ${sandboxContainerName}`);
+      if (sandboxContainerId) await killContainer(sandboxContainerId);
+    }, timeoutMs);
+  }
 
   if (fresh) {
     await clearCheckpoint(workDir);
@@ -512,6 +546,34 @@ export async function fix(options: FixOptions): Promise<FixResult> {
     await saveCheckpoint(workDir, state);
     return { success: false, error: msg, state };
   } finally {
+    // Sandbox cleanup: collect stats then kill container
+    if (sandboxContainerId) {
+      if (sandboxTimeoutHandle) clearTimeout(sandboxTimeoutHandle);
+
+      // Collect resource usage before killing
+      const stats = await getContainerStats(sandboxContainerId).catch(() => ({ memoryMB: 0, cpuPercent: 0 }));
+      const wallTimeMs = Date.now() - sandboxStartTime;
+      const cpuCount = config.sandbox?.cpus ?? DEFAULT_SANDBOX_LIMITS.cpus;
+
+      state.sandboxResourceUsage = {
+        peakMemoryMB: stats.memoryMB,
+        cpuSeconds: (stats.cpuPercent / 100) * cpuCount * (wallTimeMs / 1000),
+        wallTimeMs,
+        containerName: sandboxContainerName ?? 'unknown',
+        limitsApplied: {
+          cpus: cpuCount,
+          memory: config.sandbox?.memory ?? DEFAULT_SANDBOX_LIMITS.memory,
+          timeout: config.sandbox?.timeout ?? DEFAULT_SANDBOX_LIMITS.timeout,
+        },
+      };
+
+      if (sandboxTimedOut) {
+        log.warn('[sandbox] Container was killed due to timeout');
+      }
+
+      await killContainer(sandboxContainerId).catch(() => {});
+    }
+
     const costReport = buildCostReport(state);
     printRunSummary(costReport);
     await writeCostReport(workDir, costReport).catch((err) => {

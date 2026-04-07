@@ -1,7 +1,7 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { isLocalProvider } from '../ai/index.js';
-import type { FixState, WaveName } from '../types/index.js';
+import type { FixState, SandboxResourceUsage, WaveName } from '../types/index.js';
 import { log } from '../utils/logger.js';
 
 export interface CostReport {
@@ -23,6 +23,7 @@ export interface CostReport {
   fallbackCount: number;
   startedAt: string;
   completedAt: string;
+  sandboxResourceUsage?: SandboxResourceUsage | undefined;
 }
 
 const WAVE_ORDER: WaveName[] = ['assess', 'spec', 'test', 'impl', 'quality', 'review', 'ship'];
@@ -76,6 +77,7 @@ export function buildCostReport(state: FixState): CostReport {
     fallbackCount,
     startedAt: state.startedAt,
     completedAt: new Date().toISOString(),
+    sandboxResourceUsage: state.sandboxResourceUsage,
   };
 }
 
@@ -106,6 +108,18 @@ export function printRunSummary(report: CostReport): void {
   log.info(`Duration: ${formatDuration(report.totalDuration)}`);
   if (report.fallbackCount > 0) {
     log.info(`Fallbacks: ${report.fallbackCount} (local cost: $${report.localCost.toFixed(2)})`);
+  }
+  if (report.sandboxResourceUsage) {
+    const usage = report.sandboxResourceUsage;
+    log.info('');
+    log.info('Sandbox Resources:');
+    log.info(`  Container: ${usage.containerName}`);
+    log.info(`  Peak Mem:  ${usage.peakMemoryMB.toFixed(0)} MB`);
+    log.info(`  CPU Time:  ${usage.cpuSeconds.toFixed(1)}s`);
+    log.info(`  Wall Time: ${formatDuration(usage.wallTimeMs)}`);
+    log.info(
+      `  Limits:    ${usage.limitsApplied.cpus} CPUs, ${usage.limitsApplied.memory} mem, ${usage.limitsApplied.timeout} timeout`,
+    );
   }
   if (report.waves.length > 0) {
     log.info('');
