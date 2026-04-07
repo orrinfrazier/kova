@@ -475,6 +475,65 @@ describe('spawnWaveAgent', () => {
       }),
     ).rejects.toThrow();
   });
+
+  it('uses default thinking level per wave type', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+
+    // Reasoning wave should get 'medium'
+    await spawnWaveAgent({
+      wave: 'assess',
+      model: 'claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Message.',
+      cwd: '/tmp/test',
+    });
+
+    const agentConfig = vi.mocked(Agent).mock.calls[0]?.[0] as {
+      initialState: { thinkingLevel: string };
+    };
+    expect(agentConfig.initialState.thinkingLevel).toBe('medium');
+  });
+
+  it('coding waves default to thinking off', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+
+    await spawnWaveAgent({
+      wave: 'impl',
+      model: 'claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Message.',
+      cwd: '/tmp/test',
+    });
+
+    const agentConfig = vi.mocked(Agent).mock.calls[0]?.[0] as {
+      initialState: { thinkingLevel: string };
+    };
+    expect(agentConfig.initialState.thinkingLevel).toBe('off');
+  });
+
+  it('allows thinkingLevel override via config', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+
+    await spawnWaveAgent({
+      wave: 'impl',
+      model: 'claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Message.',
+      cwd: '/tmp/test',
+      thinkingLevel: 'high',
+    });
+
+    const agentConfig = vi.mocked(Agent).mock.calls[0]?.[0] as {
+      initialState: { thinkingLevel: string };
+    };
+    expect(agentConfig.initialState.thinkingLevel).toBe('high');
+  });
 });
 
 describe('executeWave backward compat (delegates internally)', () => {

@@ -3,7 +3,7 @@
 // and explicit handoff context. Returns WaveHandoff<T>.
 // executeWave() is a backward-compat wrapper that resolves model/tools internally.
 
-import { Agent, type AgentTool } from '@mariozechner/pi-agent-core';
+import { Agent, type AgentTool, type ThinkingLevel } from '@mariozechner/pi-agent-core';
 import { streamSimple } from '@mariozechner/pi-ai';
 import { convertToLlm } from '@mariozechner/pi-coding-agent';
 import type { z } from 'zod';
@@ -11,7 +11,7 @@ import type { ModelTier, WaveHandoff, WaveName } from '../types/index.js';
 import { log } from '../utils/logger.js';
 import { classifyError, isSpendingCapBehavior, KovaError } from './errors.js';
 import { resolveModel, resolveModelFromString } from './models.js';
-import { getWaveTools } from './wave-tools.js';
+import { DEFAULT_THINKING_LEVELS, getWaveTools } from './wave-tools.js';
 
 export interface OutputFormat {
   type: 'json_schema';
@@ -44,6 +44,8 @@ export interface SpawnWaveAgentConfig {
   outputFormat?: OutputFormat;
   maxTurns?: number;
   timeoutMs?: number;
+  maxCostUsd?: number;
+  thinkingLevel?: ThinkingLevel;
 }
 
 export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig): Promise<WaveHandoff<T>> {
@@ -58,9 +60,12 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
     outputFormat,
     maxTurns = 5_000,
     timeoutMs: explicitTimeout,
+    maxCostUsd,
+    thinkingLevel: explicitThinking,
   } = config;
 
   const timeoutMs = explicitTimeout ?? DEFAULT_WAVE_TIMEOUTS[wave];
+  const thinkingLevel = explicitThinking ?? DEFAULT_THINKING_LEVELS[wave];
 
   const model = resolveModelFromString(modelString);
   const startTime = Date.now();
@@ -79,7 +84,7 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
     initialState: {
       systemPrompt: effectiveSystemPrompt,
       model,
-      thinkingLevel: 'off',
+      thinkingLevel,
       tools,
     },
     streamFn: streamSimple,
@@ -89,6 +94,8 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
 
   let turnCount = 0;
   let aborted = false;
+  let costCapExceeded = false;
+  let accumulatedCost = 0;
   let lastErrorMessage: string | undefined;
 
   const unsubscribe = agent.subscribe((event) => {
@@ -101,9 +108,21 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
         role?: string;
         stopReason?: string;
         errorMessage?: string;
+        usage?: { cost?: { total?: number } };
       };
       if (msg?.role === 'assistant' && (msg.stopReason === 'error' || msg.stopReason === 'aborted')) {
         lastErrorMessage = msg.errorMessage ?? `Agent ${msg.stopReason} during ${wave}`;
+      }
+      // Track cost incrementally from assistant turn_end events
+      if (msg?.role === 'assistant') {
+        const turnCost = msg.usage?.cost?.total ?? 0;
+        accumulatedCost += turnCost;
+        if (maxCostUsd != null && accumulatedCost >= maxCostUsd && !aborted) {
+          costCapExceeded = true;
+          aborted = true;
+          log.warn(`[${wave}] Cost cap exceeded ($${accumulatedCost.toFixed(4)} >= $${maxCostUsd}), aborting`);
+          agent.abort();
+        }
       }
     }
     if (event.type === 'tool_execution_start') {
@@ -129,6 +148,15 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
       await Promise.race([agent.prompt(effectiveUserMessage), timeoutPromise]);
     } else {
       await agent.prompt(effectiveUserMessage);
+    }
+
+    // Cost cap exceeded during execution — throw before processing results
+    if (costCapExceeded) {
+      throw new KovaError(
+        `Wave ${wave} cost cap exceeded ($${accumulatedCost.toFixed(4)} >= $${maxCostUsd})`,
+        'billing',
+        false,
+      );
     }
 
     // Extract cost from all assistant messages
