@@ -4,6 +4,8 @@ export {
   executeWave,
   executeWaveWithRetry,
   type OutputFormat,
+  type SpawnWaveAgentConfig,
+  spawnWaveAgent,
   type WaveExecutionResult,
   type WaveOptions,
 } from './wave-executor.js';

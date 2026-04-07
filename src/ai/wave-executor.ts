@@ -1,19 +1,195 @@
-// Core wave executor — wraps pi-mono Agent for each pipeline wave.
-// Each wave creates a fresh Agent instance, sends a prompt, and collects results.
+// Per-wave agent spawner — creates a fresh pi-mono Agent for each pipeline wave.
+// spawnWaveAgent() is the primary interface: takes resolved model string, pre-built tools,
+// and explicit handoff context. Returns WaveHandoff<T>.
+// executeWave() is a backward-compat wrapper that resolves model/tools internally.
 
-import { Agent } from '@mariozechner/pi-agent-core';
+import { Agent, type AgentTool } from '@mariozechner/pi-agent-core';
 import { streamSimple } from '@mariozechner/pi-ai';
 import { convertToLlm } from '@mariozechner/pi-coding-agent';
-import type { ModelTier, WaveName } from '../types/index.js';
+import type { ModelTier, WaveHandoff, WaveName } from '../types/index.js';
 import { log } from '../utils/logger.js';
 import { classifyError, isSpendingCapBehavior, KovaError } from './errors.js';
-import { resolveModel } from './models.js';
+import { resolveModel, resolveModelFromString } from './models.js';
 import { getWaveTools } from './wave-tools.js';
 
 export interface OutputFormat {
   type: 'json_schema';
   schema: Record<string, unknown>;
 }
+
+// biome-ignore lint/suspicious/noExplicitAny: pi-mono AgentTool uses any for tool parameter schemas
+type AnyTool = AgentTool<any>;
+
+export interface SpawnWaveAgentConfig {
+  wave: WaveName;
+  model: string;
+  tools: AnyTool[];
+  systemPrompt: string;
+  handoffContext: string;
+  userMessage: string;
+  cwd: string;
+  outputFormat?: OutputFormat;
+  maxTurns?: number;
+}
+
+export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig): Promise<WaveHandoff<T>> {
+  const {
+    wave,
+    model: modelString,
+    tools,
+    systemPrompt,
+    handoffContext,
+    userMessage,
+    cwd,
+    outputFormat,
+    maxTurns = 5_000,
+  } = config;
+
+  const model = resolveModelFromString(modelString);
+  const startTime = Date.now();
+
+  log.info(`[${wave}] Starting wave — model=${model.id}, cwd=${cwd}`);
+
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+
+  const effectiveSystemPrompt = outputFormat
+    ? `${systemPrompt}\n\n${buildStructuredOutputInstructions(outputFormat.schema)}`
+    : systemPrompt;
+
+  const effectiveUserMessage = handoffContext ? `${handoffContext}\n\n---\n\n${userMessage}` : userMessage;
+
+  const agent = new Agent({
+    initialState: {
+      systemPrompt: effectiveSystemPrompt,
+      model,
+      thinkingLevel: 'off',
+      tools,
+    },
+    streamFn: streamSimple,
+    convertToLlm,
+    getApiKey: () => apiKey,
+  });
+
+  let turnCount = 0;
+  let aborted = false;
+  let lastErrorMessage: string | undefined;
+
+  const unsubscribe = agent.subscribe((event) => {
+    if (event.type === 'turn_end') {
+      turnCount++;
+      if (turnCount % 50 === 0) {
+        log.info(`[${wave}] Turn ${turnCount}...`);
+      }
+      const msg = event.message as {
+        role?: string;
+        stopReason?: string;
+        errorMessage?: string;
+      };
+      if (msg?.role === 'assistant' && (msg.stopReason === 'error' || msg.stopReason === 'aborted')) {
+        lastErrorMessage = msg.errorMessage ?? `Agent ${msg.stopReason} during ${wave}`;
+      }
+    }
+    if (event.type === 'tool_execution_start') {
+      log.debug(`[${wave}] Tool: ${event.toolName}`);
+    }
+    if (event.type === 'turn_end' && turnCount >= maxTurns && !aborted) {
+      aborted = true;
+      log.warn(`[${wave}] Max turns (${maxTurns}) reached, aborting`);
+      agent.abort();
+    }
+  });
+
+  try {
+    await agent.prompt(effectiveUserMessage);
+
+    // Extract cost from all assistant messages
+    let cost = 0;
+    const messages = agent.state.messages;
+    for (const msg of messages) {
+      if (msg.role === 'assistant') {
+        const assistantMsg = msg as {
+          role: 'assistant';
+          usage?: { cost?: { total?: number } };
+        };
+        cost += assistantMsg.usage?.cost?.total ?? 0;
+      }
+    }
+
+    // Get the final assistant text
+    let resultText: string | null = null;
+    const lastAssistant = [...messages].reverse().find((m) => m.role === 'assistant');
+    if (lastAssistant) {
+      const textContent = (lastAssistant as { content?: Array<{ type: string; text?: string }> }).content;
+      if (textContent) {
+        resultText = textContent
+          .filter((c): c is { type: 'text'; text: string } => c.type === 'text' && typeof c.text === 'string')
+          .map((c) => c.text)
+          .join('');
+      }
+    }
+
+    // Parse structured output if expected
+    let structuredOutput: unknown | undefined;
+    if (outputFormat && resultText) {
+      structuredOutput = parseStructuredOutput(resultText);
+      if (!structuredOutput) {
+        log.warn(`[${wave}] Failed to parse structured output from response`);
+      }
+    }
+
+    // Detect pi-mono errors reported via state or event subscription
+    const piMonoError = agent.state.errorMessage ?? lastErrorMessage;
+    if (piMonoError) {
+      const classified = classifyError(piMonoError);
+      throw new KovaError(
+        `${classified.type === 'billing' ? 'Billing/rate limit' : classified.type === 'config' ? 'Config' : 'Agent'} error during ${wave}: ${piMonoError}`,
+        classified.type,
+        classified.retryable,
+      );
+    }
+
+    // Defense-in-depth: detect spending cap behavior
+    if (isSpendingCapBehavior(turnCount, cost, resultText ?? '')) {
+      throw new KovaError(`Spending cap likely reached (turns=${turnCount}, cost=$0)`, 'billing', true);
+    }
+
+    const duration = Date.now() - startTime;
+    log.info(
+      `[${wave}] Completed — turns=${turnCount}, cost=$${cost.toFixed(4)}, duration=${(duration / 1000).toFixed(1)}s`,
+    );
+
+    // Determine confidence from structured output parsing
+    const confidence: 'high' | 'medium' | 'low' = structuredOutput != null ? 'high' : 'medium';
+
+    return {
+      wave,
+      timestamp: new Date().toISOString(),
+      model: model.id,
+      cost,
+      turns: turnCount,
+      confidence,
+      artifact: (structuredOutput ?? resultText) as T,
+      approach_notes: '',
+    };
+  } catch (error) {
+    if (error instanceof KovaError) throw error;
+
+    const err = error instanceof Error ? error : new Error(String(error));
+    const classified = classifyError(err);
+
+    if (classified.type === 'billing' || classified.type === 'config') {
+      const label = classified.type === 'billing' ? 'Billing/rate limit' : 'Config';
+      throw new KovaError(`${label} error during ${wave}: ${err.message}`, classified.type, classified.retryable);
+    }
+
+    log.error(`[${wave}] Failed — ${err.message}`);
+    throw new KovaError(`Wave ${wave} failed: ${err.message}`, 'agent', false);
+  } finally {
+    unsubscribe();
+  }
+}
+
+// --- Backward-compat wrapper ---
 
 export interface WaveOptions {
   wave: WaveName;
@@ -36,162 +212,55 @@ export interface WaveExecutionResult {
 }
 
 export async function executeWave(options: WaveOptions): Promise<WaveExecutionResult> {
-  const { wave, systemPrompt, userMessage, cwd, modelTier, outputFormat, maxTurns = 5_000 } = options;
+  const { wave, systemPrompt, userMessage, cwd, modelTier, outputFormat, maxTurns } = options;
 
   const model = resolveModel(modelTier);
+  const tools = getWaveTools(wave, cwd);
   const startTime = Date.now();
 
-  log.info(`[${wave}] Starting wave — model=${model.id}, cwd=${cwd}`);
-
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-
-  const effectiveSystemPrompt = outputFormat
-    ? `${systemPrompt}\n\n${buildStructuredOutputInstructions(outputFormat.schema)}`
-    : systemPrompt;
-
-  const agent = new Agent({
-    initialState: {
-      systemPrompt: effectiveSystemPrompt,
-      model,
-      thinkingLevel: 'off',
-      tools: getWaveTools(wave, cwd),
-    },
-    streamFn: streamSimple,
-    convertToLlm,
-    getApiKey: () => apiKey,
-  });
-
-  let turnCount = 0;
-  let aborted = false;
-  let lastErrorMessage: string | undefined;
-
-  const unsubscribe = agent.subscribe((event) => {
-    if (event.type === 'turn_end') {
-      turnCount++;
-      if (turnCount % 50 === 0) {
-        log.info(`[${wave}] Turn ${turnCount}...`);
-      }
-      // Detect pi-mono error events: turn_end with an assistant message carrying stopReason "error"/"aborted"
-      const msg = event.message as {
-        role?: string;
-        stopReason?: string;
-        errorMessage?: string;
-      };
-      if (msg?.role === 'assistant' && (msg.stopReason === 'error' || msg.stopReason === 'aborted')) {
-        lastErrorMessage = msg.errorMessage ?? `Agent ${msg.stopReason} during ${wave}`;
-      }
-    }
-    if (event.type === 'tool_execution_start') {
-      log.debug(`[${wave}] Tool: ${event.toolName}`);
-    }
-    // Enforce max turns
-    if (event.type === 'turn_end' && turnCount >= maxTurns && !aborted) {
-      aborted = true;
-      log.warn(`[${wave}] Max turns (${maxTurns}) reached, aborting`);
-      agent.abort();
-    }
-  });
-
-  let result: string | null = null;
-  let cost = 0;
-  let structuredOutput: unknown | undefined;
-
   try {
-    await agent.prompt(userMessage);
-
-    // Extract cost from all assistant messages
-    const messages = agent.state.messages;
-    for (const msg of messages) {
-      if (msg.role === 'assistant') {
-        const assistantMsg = msg as {
-          role: 'assistant';
-          usage?: { cost?: { total?: number } };
-          content?: Array<{ type: string; text?: string }>;
-        };
-        cost += assistantMsg.usage?.cost?.total ?? 0;
-      }
-    }
-
-    // Get the final assistant text
-    const lastAssistant = [...messages].reverse().find((m) => m.role === 'assistant');
-    if (lastAssistant) {
-      const textContent = (lastAssistant as { content?: Array<{ type: string; text?: string }> }).content;
-      if (textContent) {
-        result = textContent
-          .filter((c): c is { type: 'text'; text: string } => c.type === 'text' && typeof c.text === 'string')
-          .map((c) => c.text)
-          .join('');
-      }
-    }
-
-    // Parse structured output if expected
-    if (outputFormat && result) {
-      structuredOutput = parseStructuredOutput(result);
-      if (!structuredOutput) {
-        log.warn(`[${wave}] Failed to parse structured output from response`);
-      }
-    }
-
-    // Detect pi-mono errors reported via state or event subscription
-    const piMonoError = agent.state.errorMessage ?? lastErrorMessage;
-    if (piMonoError) {
-      const classified = classifyError(piMonoError);
-      throw new KovaError(
-        `${classified.type === 'billing' ? 'Billing/rate limit' : classified.type === 'config' ? 'Config' : 'Agent'} error during ${wave}: ${piMonoError}`,
-        classified.type,
-        classified.retryable,
-      );
-    }
-
-    // Defense-in-depth: detect spending cap behavior
-    if (isSpendingCapBehavior(turnCount, cost, result ?? '')) {
-      throw new KovaError(`Spending cap likely reached (turns=${turnCount}, cost=$0)`, 'billing', true);
-    }
+    const handoff = await spawnWaveAgent({
+      wave,
+      model: model.id,
+      tools,
+      systemPrompt,
+      handoffContext: '',
+      userMessage,
+      cwd,
+      ...(outputFormat && { outputFormat }),
+      ...(maxTurns != null && { maxTurns }),
+    });
 
     const duration = Date.now() - startTime;
-    log.info(
-      `[${wave}] Completed — turns=${turnCount}, cost=$${cost.toFixed(4)}, duration=${(duration / 1000).toFixed(1)}s`,
-    );
 
     return {
-      result,
+      result: typeof handoff.artifact === 'string' ? handoff.artifact : JSON.stringify(handoff.artifact),
       success: true,
       duration,
-      turns: turnCount,
-      cost,
-      model: model.id,
-      ...(structuredOutput !== undefined && { structuredOutput }),
+      turns: handoff.turns,
+      cost: handoff.cost,
+      model: handoff.model,
+      ...(handoff.confidence === 'high' && { structuredOutput: handoff.artifact }),
     };
   } catch (error) {
-    // Re-throw KovaErrors (already classified from pi-mono error detection above)
     if (error instanceof KovaError) throw error;
 
     const duration = Date.now() - startTime;
     const err = error instanceof Error ? error : new Error(String(error));
-    const classified = classifyError(err);
-
-    // Throw classified retryable/config errors so callers can handle them
-    if (classified.type === 'billing' || classified.type === 'config') {
-      const label = classified.type === 'billing' ? 'Billing/rate limit' : 'Config';
-      throw new KovaError(`${label} error during ${wave}: ${err.message}`, classified.type, classified.retryable);
-    }
-
     log.error(`[${wave}] Failed — ${err.message} (${(duration / 1000).toFixed(1)}s)`);
 
     return {
       result: null,
       success: false,
       duration,
-      turns: turnCount,
-      cost,
+      turns: 0,
+      cost: 0,
       model: model.id,
     };
-  } finally {
-    unsubscribe();
   }
 }
 
-export async function executeWaveWithRetry(options: WaveOptions, maxRetries: number = 2): Promise<WaveExecutionResult> {
+export async function executeWaveWithRetry(options: WaveOptions, maxRetries = 2): Promise<WaveExecutionResult> {
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     const result = await executeWave(options);
 
@@ -206,6 +275,8 @@ export async function executeWaveWithRetry(options: WaveOptions, maxRetries: num
 
   throw new KovaError(`Wave ${options.wave} failed after ${maxRetries + 1} attempts`, 'agent', false);
 }
+
+// --- Helpers ---
 
 function buildStructuredOutputInstructions(schema: Record<string, unknown>): string {
   return [
