@@ -27,10 +27,11 @@ program
   .option('--max <n>', 'Maximum issues to fix', '10')
   .option('--repo <path>', 'Repository path', '.')
   .option('--fresh', 'Force restart — delete checkpoint and worktree')
+  .option('--no-comment', 'Suppress GitHub comment on grade D/F skip')
   .action(
     async (
       issueArg: string | undefined,
-      opts: { all?: boolean; filter?: string; max?: string; repo?: string; fresh?: boolean },
+      opts: { all?: boolean; filter?: string; max?: string; repo?: string; fresh?: boolean; comment?: boolean },
     ) => {
       const repoPath = resolve(opts.repo ?? '.');
       const repoName = detectRepoName(repoPath);
@@ -65,7 +66,14 @@ program
 
       log.info(`Fixing issue #${issueNumber} in ${repoName}`);
       const issue = await fetchIssue(repoPath, issueNumber);
-      const result = await fix({ issue, repoPath, repoName, config, fresh: opts.fresh });
+      const result = await fix({
+        issue,
+        repoPath,
+        repoName,
+        config,
+        fresh: opts.fresh,
+        noComment: opts.comment === false,
+      });
 
       if (result.success) {
         log.info(`Done! PR: ${result.prUrl}`);

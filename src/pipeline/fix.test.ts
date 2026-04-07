@@ -27,6 +27,7 @@ vi.mock('../ai/index.js', () => ({
 vi.mock('../services/github.js', () => ({
   listOpenPRs: vi.fn().mockResolvedValue([]),
   createPR: vi.fn().mockResolvedValue('https://github.com/test/repo/pull/1'),
+  commentOnIssue: vi.fn().mockResolvedValue(undefined),
 }));
 
 // Mock worktree — tests don't have real git repos
@@ -59,7 +60,7 @@ function makeConfig(overrides?: Partial<RepoConfig>): RepoConfig {
     path: '/tmp/test',
     rules: { coverage: 80, auto_merge: false, max_issues_per_run: 10 },
     model: { assess: 'large', spec: 'large', test: 'medium', impl: 'medium', quality: 'small', review: 'large' },
-    isolation: 'none', // Use 'none' so we control workDir via repoPath
+    isolation: 'none',
     ...overrides,
   };
 }
@@ -76,7 +77,6 @@ describe('fix — resume from checkpoint', () => {
   });
 
   it('skips completed waves when checkpoint exists', async () => {
-    // Pre-save a checkpoint with assess + spec completed
     const existingState: FixState = {
       issue: makeIssue(42),
       repo: 'test-repo',
@@ -114,17 +114,14 @@ describe('fix — resume from checkpoint', () => {
       config: makeConfig(),
     });
 
-    // Should NOT have called assess or spec waves (they were checkpointed)
     const waveCalls = mockExecute.mock.calls.map((c) => c[0].wave);
     expect(waveCalls).not.toContain('assess');
     expect(waveCalls).not.toContain('spec');
-    // Should have called the remaining waves
     expect(waveCalls).toContain('test');
     expect(waveCalls).toContain('impl');
   });
 
   it('starts fresh when fresh option is true', async () => {
-    // Pre-save a checkpoint
     const existingState: FixState = {
       issue: makeIssue(42),
       repo: 'test-repo',
@@ -148,14 +145,10 @@ describe('fix — resume from checkpoint', () => {
       fresh: true,
     });
 
-    // Checkpoint should have been cleared — all waves should run
     const waveCalls = mockExecute.mock.calls.map((c) => c[0].wave);
     expect(waveCalls).toContain('assess');
     expect(waveCalls).toContain('spec');
     expect(waveCalls).toContain('test');
-
-    // Verify checkpoint was cleared before run
-    // (the new state should have all waves, not just the pre-existing ones)
   });
 
   it('prints resume message when loading checkpoint', async () => {
@@ -188,7 +181,6 @@ describe('fix — resume from checkpoint', () => {
       config: makeConfig(),
     });
 
-    // Should print resume message mentioning completed waves
     const logMessages = consoleSpy.mock.calls.map((c) => c[0] as string);
     const resumeMsg = logMessages.find((m) => m.includes('Resuming'));
     expect(resumeMsg).toBeDefined();
@@ -196,5 +188,150 @@ describe('fix — resume from checkpoint', () => {
     expect(resumeMsg).toContain('spec');
 
     consoleSpy.mockRestore();
+  });
+});
+
+describe('fix — grade D/F issue comment', () => {
+  let workDir: string;
+
+  beforeEach(async () => {
+    workDir = await mkdtemp(join(tmpdir(), 'kova-fix-'));
+  });
+
+  afterEach(async () => {
+    await rm(workDir, { recursive: true, force: true });
+  });
+
+  it('posts GitHub comment when assess returns grade D', async () => {
+    const { executeWaveWithRetry } = await import('../ai/index.js');
+    const mockExecute = vi.mocked(executeWaveWithRetry);
+    mockExecute.mockClear();
+    mockExecute.mockResolvedValueOnce({
+      result: 'done',
+      success: true,
+      duration: 100,
+      turns: 1,
+      cost: 0.01,
+      model: 'test-model',
+      structuredOutput: {
+        grade: 'D',
+        surface_area: { files: ['src/a.ts', 'src/b.ts'], estimated_lines: 500, modules_affected: ['core', 'api'] },
+        risk: 'high',
+        reasoning: 'Too many interconnected changes required',
+        should_proceed: false,
+      },
+    });
+
+    const { commentOnIssue } = await import('../services/github.js');
+    const mockComment = vi.mocked(commentOnIssue);
+    mockComment.mockClear();
+
+    const result = await fix({
+      issue: makeIssue(42),
+      repoPath: workDir,
+      repoName: 'test-repo',
+      config: makeConfig(),
+    });
+
+    expect(result.success).toBe(false);
+    expect(mockComment).toHaveBeenCalledOnce();
+
+    const commentBody = mockComment.mock.calls[0]?.[2] as string;
+    expect(commentBody).toContain('D');
+    expect(commentBody).toContain('high');
+    expect(commentBody).toContain('src/a.ts');
+    expect(commentBody).toContain('Too many interconnected changes');
+  });
+
+  it('posts GitHub comment when assess returns grade F', async () => {
+    const { executeWaveWithRetry } = await import('../ai/index.js');
+    const mockExecute = vi.mocked(executeWaveWithRetry);
+    mockExecute.mockClear();
+    mockExecute.mockResolvedValueOnce({
+      result: 'done',
+      success: true,
+      duration: 100,
+      turns: 1,
+      cost: 0.01,
+      model: 'test-model',
+      structuredOutput: {
+        grade: 'F',
+        surface_area: { files: [], estimated_lines: 2000, modules_affected: ['everything'] },
+        risk: 'critical',
+        reasoning: 'Complete rewrite needed',
+        should_proceed: false,
+      },
+    });
+
+    const { commentOnIssue } = await import('../services/github.js');
+    const mockComment = vi.mocked(commentOnIssue);
+    mockComment.mockClear();
+
+    const result = await fix({
+      issue: makeIssue(99),
+      repoPath: workDir,
+      repoName: 'test-repo',
+      config: makeConfig(),
+    });
+
+    expect(result.success).toBe(false);
+    expect(mockComment).toHaveBeenCalledOnce();
+    const commentBody = mockComment.mock.calls[0]?.[2] as string;
+    expect(commentBody).toContain('F');
+    expect(commentBody).toContain('critical');
+  });
+
+  it('does NOT post comment when noComment option is true', async () => {
+    const { executeWaveWithRetry } = await import('../ai/index.js');
+    const mockExecute = vi.mocked(executeWaveWithRetry);
+    mockExecute.mockClear();
+    mockExecute.mockResolvedValueOnce({
+      result: 'done',
+      success: true,
+      duration: 100,
+      turns: 1,
+      cost: 0.01,
+      model: 'test-model',
+      structuredOutput: {
+        grade: 'D',
+        surface_area: { files: [], estimated_lines: 500, modules_affected: [] },
+        risk: 'high',
+        reasoning: 'Too complex',
+        should_proceed: false,
+      },
+    });
+
+    const { commentOnIssue } = await import('../services/github.js');
+    const mockComment = vi.mocked(commentOnIssue);
+    mockComment.mockClear();
+
+    await fix({
+      issue: makeIssue(42),
+      repoPath: workDir,
+      repoName: 'test-repo',
+      config: makeConfig(),
+      noComment: true,
+    });
+
+    expect(mockComment).not.toHaveBeenCalled();
+  });
+
+  it('does NOT post comment when assess grade allows proceeding', async () => {
+    const { executeWaveWithRetry } = await import('../ai/index.js');
+    const mockExecute = vi.mocked(executeWaveWithRetry);
+    mockExecute.mockClear();
+
+    const { commentOnIssue } = await import('../services/github.js');
+    const mockComment = vi.mocked(commentOnIssue);
+    mockComment.mockClear();
+
+    await fix({
+      issue: makeIssue(42),
+      repoPath: workDir,
+      repoName: 'test-repo',
+      config: makeConfig(),
+    });
+
+    expect(mockComment).not.toHaveBeenCalled();
   });
 });
