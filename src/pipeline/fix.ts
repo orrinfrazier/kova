@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { executeWaveWithRetry, type WaveExecutionResult } from '../ai/index.js';
 import { clearCheckpoint, loadCheckpoint, saveCheckpoint } from '../services/checkpoint.js';
 import { commentOnIssue, createPR, listOpenPRs } from '../services/github.js';
+import { detectTooling, formatToolingContext } from '../services/language-detect.js';
 import {
   commitAndPush,
   createWorktree,
@@ -142,8 +143,11 @@ export async function fix(options: FixOptions): Promise<FixResult> {
 
     // === QUALITY ===
     if (!shouldSkip('quality')) {
+      const tooling = await detectTooling(workDir);
+      const toolingContext = formatToolingContext(tooling);
+
       const result = await runWave('quality', workDir, config, {
-        userMessage: `Run all quality gates: lint, typecheck, tests, coverage (threshold: ${config.rules.coverage}%). Fix any failures.`,
+        userMessage: `Run all quality gates: lint, typecheck, tests, coverage (threshold: ${config.rules.coverage}%). Fix any failures.\n\n## Detected Tooling\n${toolingContext}`,
       });
 
       state.waveResults.quality = toWaveResult('quality', result);
