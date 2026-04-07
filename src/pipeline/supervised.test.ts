@@ -123,7 +123,15 @@ const SAMPLE_ISSUES: BrainstormIssue[] = [
 const DEFAULT_CONFIG: RepoConfig = {
   path: '/tmp/repo',
   rules: { coverage: 80, auto_merge: false, max_issues_per_run: 10 },
-  model: { assess: 'large', spec: 'large', test: 'medium', impl: 'medium', quality: 'small', review: 'large' },
+  model: {
+    assess: 'large',
+    spec: 'large',
+    test: 'medium',
+    impl: 'medium',
+    quality: 'small',
+    review: 'large',
+    brainstorm: 'large',
+  },
   isolation: 'worktree',
 };
 

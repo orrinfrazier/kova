@@ -40,6 +40,7 @@ const DEFAULT_CONFIG: RepoConfig = {
     impl: 'medium',
     quality: 'small',
     review: 'large',
+    brainstorm: 'large',
   },
   isolation: 'worktree',
 };

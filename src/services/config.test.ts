@@ -257,6 +257,7 @@ describe('findRepoByName', () => {
           impl: 'medium' as const,
           quality: 'small' as const,
           review: 'large' as const,
+          brainstorm: 'large' as const,
         },
         isolation: 'worktree' as const,
       },
@@ -270,6 +271,7 @@ describe('findRepoByName', () => {
           impl: 'medium' as const,
           quality: 'small' as const,
           review: 'large' as const,
+          brainstorm: 'large' as const,
         },
         isolation: 'worktree' as const,
       },
@@ -312,6 +314,7 @@ describe('resolveRepoConfig', () => {
     expect(config.model.impl).toBe('medium');
     expect(config.model.quality).toBe('small');
     expect(config.model.review).toBe('large');
+    expect(config.model.brainstorm).toBe('large');
     expect(config.isolation).toBe('worktree');
   });
 
@@ -329,6 +332,103 @@ describe('resolveRepoConfig', () => {
     const config = resolveRepoConfig('/tmp/repo');
     expect(config.rules.budget_usd).toBeUndefined();
     expect(config.rules.focus).toBeUndefined();
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/*  per-repo model tier overrides                                      */
+/* ------------------------------------------------------------------ */
+
+describe('per-repo model tier overrides', () => {
+  it('different repos get different model tiers from repos.yaml', async () => {
+    const yaml = `
+repos:
+  repo-a:
+    path: /tmp/repo-a
+    model:
+      review: large
+      brainstorm: large
+  repo-b:
+    path: /tmp/repo-b
+    model:
+      review: small
+      brainstorm: small
+`;
+    await writeFile(join(tempDir, 'repos.yaml'), yaml);
+
+    const config = await loadConfig(join(tempDir, 'repos.yaml'));
+    const repoA = config.repos['repo-a'];
+    const repoB = config.repos['repo-b'];
+    expect(repoA).toBeDefined();
+    expect(repoB).toBeDefined();
+    if (!repoA || !repoB) return;
+
+    expect(repoA.model.review).toBe('large');
+    expect(repoA.model.brainstorm).toBe('large');
+    expect(repoB.model.review).toBe('small');
+    expect(repoB.model.brainstorm).toBe('small');
+  });
+
+  it('brainstorm model tier defaults to large', () => {
+    const config = resolveRepoConfig('/tmp/repo');
+    expect(config.model.brainstorm).toBe('large');
+  });
+
+  it('allows brainstorm model tier override', async () => {
+    const yaml = `
+repos:
+  test-repo:
+    path: /tmp/test
+    model:
+      brainstorm: small
+`;
+    await writeFile(join(tempDir, 'repos.yaml'), yaml);
+
+    const config = await loadConfig(join(tempDir, 'repos.yaml'));
+    const repo = config.repos['test-repo'];
+    expect(repo?.model.brainstorm).toBe('small');
+  });
+
+  it('allows brainstorm thinking level override', async () => {
+    const yaml = `
+repos:
+  test-repo:
+    path: /tmp/test
+    model:
+      thinking:
+        brainstorm: high
+`;
+    await writeFile(join(tempDir, 'repos.yaml'), yaml);
+
+    const config = await loadConfig(join(tempDir, 'repos.yaml'));
+    const repo = config.repos['test-repo'];
+    expect(repo?.model.thinking?.brainstorm).toBe('high');
+  });
+
+  it('model overrides merge with defaults for unspecified waves', async () => {
+    const yaml = `
+repos:
+  partial-repo:
+    path: /tmp/partial
+    model:
+      review: small
+`;
+    await writeFile(join(tempDir, 'repos.yaml'), yaml);
+
+    const config = await loadConfig(join(tempDir, 'repos.yaml'));
+    const repo = config.repos['partial-repo'];
+    expect(repo).toBeDefined();
+    if (!repo) return;
+
+    // Overridden
+    expect(repo.model.review).toBe('small');
+    // Defaults preserved
+    expect(repo.model.assess).toBe('large');
+    expect(repo.model.spec).toBe('large');
+    expect(repo.model.test).toBe('medium');
+    expect(repo.model.impl).toBe('medium');
+    expect(repo.model.quality).toBe('small');
+    expect(repo.model.brainstorm).toBe('large');
   });
 });
 
