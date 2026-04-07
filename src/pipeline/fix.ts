@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { executeWaveWithRetry, type WaveExecutionResult } from '../ai/index.js';
 import { clearCheckpoint, loadCheckpoint, saveCheckpoint } from '../services/checkpoint.js';
 import { commentOnIssue, createPR, listOpenPRs } from '../services/github.js';
+import { shutdownRequested } from '../services/shutdown.js';
 import { formatPRContext, type OpenPR } from '../services/pr-context.js';
 import {
   commitAndPush,
@@ -76,6 +77,14 @@ export async function fix(options: FixOptions): Promise<FixResult> {
   const shouldSkip = (wave: WaveName): boolean => state.completedWaves.includes(wave);
   const prContext = formatPRContext(pendingPRs ?? []);
 
+  const interruptIfShutdown = async (): Promise<FixResult | undefined> => {
+    if (!shutdownRequested()) return undefined;
+    log.info(`[shutdown] Interrupted after wave [${state.completedWaves.at(-1) ?? 'none'}] for #${issue.number}`);
+    state.status = 'interrupted';
+    await saveCheckpoint(workDir, state);
+    return { success: false, error: 'Interrupted by signal', state };
+  };
+
   try {
     if (!shouldSkip('assess')) {
       const result = await runWave('assess', workDir, config, {
@@ -96,6 +105,9 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         state.status = 'completed';
         return { success: false, error: `Issue graded ${assess.grade}, skipped`, state };
       }
+
+      const interrupted = await interruptIfShutdown();
+      if (interrupted) return interrupted;
     }
 
     if (!shouldSkip('spec')) {
@@ -107,6 +119,9 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       state.waveResults.spec = toWaveResult('spec', result);
       state.completedWaves.push('spec');
       await saveCheckpoint(workDir, state);
+
+      const interrupted = await interruptIfShutdown();
+      if (interrupted) return interrupted;
     }
 
     if (!shouldSkip('test')) {
@@ -117,6 +132,9 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       state.waveResults.test = toWaveResult('test', result);
       state.completedWaves.push('test');
       await saveCheckpoint(workDir, state);
+
+      const interrupted = await interruptIfShutdown();
+      if (interrupted) return interrupted;
     }
 
     if (!shouldSkip('impl')) {
@@ -127,6 +145,9 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       state.waveResults.impl = toWaveResult('impl', result);
       state.completedWaves.push('impl');
       await saveCheckpoint(workDir, state);
+
+      const interrupted = await interruptIfShutdown();
+      if (interrupted) return interrupted;
     }
 
     if (!shouldSkip('quality')) {
@@ -136,6 +157,9 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       state.waveResults.quality = toWaveResult('quality', result);
       state.completedWaves.push('quality');
       await saveCheckpoint(workDir, state);
+
+      const interrupted = await interruptIfShutdown();
+      if (interrupted) return interrupted;
     }
 
     if (!shouldSkip('review')) {
@@ -159,6 +183,9 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         });
         state.waveResults.quality = toWaveResult('quality', requality);
       }
+
+      const interrupted = await interruptIfShutdown();
+      if (interrupted) return interrupted;
     }
 
     if (!shouldSkip('ship')) {

@@ -14,6 +14,13 @@ import { fix } from '../pipeline/fix.js';
 import { fixLoop } from '../pipeline/loop.js';
 import { detectRepoName, resolveRepoConfig } from '../services/config.js';
 import { fetchIssue, hasExistingWork } from '../services/github.js';
+import {
+  exitCodeForSignal,
+  getShutdownSignal,
+  installSignalHandlers,
+  removeSignalHandlers,
+  shutdownRequested,
+} from '../services/shutdown.js';
 import { log } from '../utils/logger.js';
 
 const program = new Command();
@@ -52,6 +59,7 @@ program
 
       if (opts.all) {
         // Loop mode: fix all open issues
+        installSignalHandlers();
         log.info(`Starting fix loop for ${repoName}`);
         const result = await fixLoop({
           repoPath,
@@ -62,8 +70,12 @@ program
           budgetUsd: opts.budget ? Number.parseFloat(opts.budget) : undefined,
           force: opts.force,
         });
+        removeSignalHandlers();
 
         log.info(`\nResults: ${result.succeeded}/${result.total} succeeded`);
+        if (shutdownRequested()) {
+          process.exit(exitCodeForSignal(getShutdownSignal()));
+        }
         process.exit(result.failed > 0 ? 1 : 0);
       }
 
@@ -120,6 +132,7 @@ program
     const repoName = detectRepoName(repoPath);
     const config = resolveRepoConfig(repoPath);
 
+    installSignalHandlers();
     const result = await runAuto({
       repoPath,
       repoName,
@@ -128,7 +141,11 @@ program
       max: opts.max ? Number.parseInt(opts.max, 10) : undefined,
       force: opts.force,
     });
+    removeSignalHandlers();
 
+    if (shutdownRequested()) {
+      process.exit(exitCodeForSignal(getShutdownSignal()));
+    }
     process.exit(result.exitCode);
   });
 

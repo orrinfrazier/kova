@@ -129,9 +129,7 @@ function renderMarkdown(report: RunReport): string {
 export function printRunReport(report: RunReport): void {
   log.info('');
   log.info('=== Auto Mode Run Report ===');
-  log.info(
-    `${report.succeeded} succeeded, ${report.failed} failed, ${report.skipped} skipped (${report.total} total)`,
-  );
+  log.info(`${report.succeeded} succeeded, ${report.failed} failed, ${report.skipped} skipped (${report.total} total)`);
   log.info(
     `Total cost: $${report.totalCost.toFixed(2)} | ${report.totalTurns} turns | ${formatDuration(report.totalDuration)}`,
   );

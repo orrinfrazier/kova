@@ -81,6 +81,6 @@ export interface FixState {
   startedAt: string;
   completedWaves: WaveName[];
   waveResults: Partial<Record<WaveName, WaveResult>>;
-  status: 'running' | 'completed' | 'failed';
+  status: 'running' | 'completed' | 'failed' | 'interrupted';
   error?: string | undefined;
 }
