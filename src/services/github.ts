@@ -136,6 +136,20 @@ export async function fetchKovaPRs(repoPath: string): Promise<KovaPR[]> {
     }));
 }
 
+/** Create a comment on an issue via the GitHub API. Returns the comment ID for later edits. */
+export async function createIssueComment(ownerRepo: string, issueNumber: number, body: string): Promise<number> {
+  const result = await $`gh api repos/${ownerRepo}/issues/${issueNumber}/comments -f body=${body}`;
+  const parsed = JSON.parse(result.stdout) as { id: number };
+  log.info(`Created progress comment on #${issueNumber} (id: ${parsed.id})`);
+  return parsed.id;
+}
+
+/** Edit an existing issue comment by ID via the GitHub API. */
+export async function editIssueComment(ownerRepo: string, commentId: number, body: string): Promise<void> {
+  await $`gh api repos/${ownerRepo}/issues/comments/${commentId} -X PATCH -f body=${body}`;
+  log.info(`Updated progress comment (id: ${commentId})`);
+}
+
 export async function hasExistingWork(repoPath: string, issueNumber: number): Promise<ExistingWork | undefined> {
   const branch = `kova/fix-${issueNumber}`;
   const [branchExists, prUrl] = await Promise.all([

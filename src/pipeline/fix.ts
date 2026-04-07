@@ -24,6 +24,7 @@ import { validateIsolation } from '../services/isolation.js';
 import { detectTooling } from '../services/language-detect.js';
 import { ensureScreenshotsDir, isPlaywrightEnabled, resolvePlaywrightEnv } from '../services/playwright.js';
 import { formatPRContext, type OpenPR } from '../services/pr-context.js';
+import { ProgressTracker } from '../services/progress.js';
 import {
   formatRepoContext,
   formatRepoSearch,
@@ -301,6 +302,16 @@ export async function fix(options: FixOptions): Promise<FixResult> {
   const shouldSkip = (wave: WaveName): boolean => state.completedWaves.includes(wave);
   const prContext = formatPRContext(pendingPRs ?? []);
 
+  // Derive owner/repo from issue URL for repo-intel calls
+  const ownerRepo = extractOwnerRepo(issue.url);
+
+  // Progress tracker: create/update a single GitHub comment as waves complete
+  let progress: ProgressTracker | undefined;
+  if (config.github?.progress_comments && ownerRepo) {
+    progress = new ProgressTracker({ repoPath, ownerRepo, issue });
+    await progress.start();
+  }
+
   const interruptIfShutdown = async (): Promise<FixResult | undefined> => {
     if (!shutdownRequested()) return undefined;
     log.info(`[shutdown] Interrupted after wave [${state.completedWaves.at(-1) ?? 'none'}] for #${issue.number}`);
@@ -310,9 +321,6 @@ export async function fix(options: FixOptions): Promise<FixResult> {
   };
 
   try {
-    // Derive owner/repo from issue URL for repo-intel calls
-    const ownerRepo = extractOwnerRepo(issue.url);
-
     // Detect tooling and set up Playwright if applicable
     const tooling = await detectTooling(workDir);
     const playwrightEnabled = isPlaywrightEnabled(config, tooling);
@@ -370,6 +378,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       state.waveResults.assess = handoffToResult(handoff, waveProvider(config, 'assess'));
       state.completedWaves.push('assess');
       await saveCheckpoint(workDir, state);
+      await progress?.waveCompleted('assess', state);
 
       // Gate: only check when structured output parsed successfully
       if (handoff.confidence === 'high') {
@@ -426,6 +435,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       state.waveResults.spec = handoffToResult(handoff, waveProvider(config, 'spec'));
       state.completedWaves.push('spec');
       await saveCheckpoint(workDir, state);
+      await progress?.waveCompleted('spec', state);
 
       const interrupted = await interruptIfShutdown();
       if (interrupted) return interrupted;
@@ -474,6 +484,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       if (!state.completedWaves.includes('test')) state.completedWaves.push('test');
       if (!state.completedWaves.includes('impl')) state.completedWaves.push('impl');
       await saveCheckpoint(workDir, state);
+      await progress?.waveCompleted('impl', state);
 
       // Escalation: SPEC_WRONG → re-run spec + TI loop
       if (!tiResult.testsPassing && tiResult.diagnosis === 'SPEC_WRONG') {
@@ -544,6 +555,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       state.waveResults.quality = handoffToResult(handoff, waveProvider(config, 'quality'));
       state.completedWaves.push('quality');
       await saveCheckpoint(workDir, state);
+      await progress?.waveCompleted('quality', state);
 
       const interrupted = await interruptIfShutdown();
       if (interrupted) return interrupted;
@@ -579,6 +591,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       }
       state.completedWaves.push('review');
       await saveCheckpoint(workDir, state);
+      await progress?.waveCompleted('review', state);
 
       const interrupted = await interruptIfShutdown();
       if (interrupted) return interrupted;
@@ -651,6 +664,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       state.completedWaves.push('ship');
       state.status = 'completed';
       await saveCheckpoint(workDir, state);
+      await progress?.complete(prUrl);
       log.info(`Fix complete: ${prUrl}`);
       return { success: true, prUrl, state };
     }
@@ -663,6 +677,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
     state.status = 'failed';
     state.error = msg;
     await saveCheckpoint(workDir, state);
+    await progress?.failed(msg);
     return { success: false, error: msg, state };
   } finally {
     // Sandbox cleanup: collect stats then kill container

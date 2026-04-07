@@ -153,6 +153,14 @@ export const PlaywrightConfigSchema = z
     }),
   );
 
+export const GitHubConfigSchema = z
+  .object({
+    progress_comments: z.boolean().default(false),
+  })
+  .default(() => ({ progress_comments: false }));
+
+export type GitHubConfig = z.infer<typeof GitHubConfigSchema>;
+
 export const RepoConfigSchema = z.object({
   path: z.string(),
   vectordb: VectorDBConfigSchema.optional(),
@@ -161,6 +169,7 @@ export const RepoConfigSchema = z.object({
   sandbox: SandboxConfigSchema.optional(),
   playwright: PlaywrightConfigSchema.optional(),
   tools: z.array(CustomToolSchema).optional(),
+  github: GitHubConfigSchema.optional(),
   rules: z
     .object({
       coverage: z.number().default(80),

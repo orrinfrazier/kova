@@ -3,6 +3,7 @@ export type {
   EpisodicMemoryConfig,
   FailedPiece,
   FixState,
+  GitHubConfig,
   IsolationMode,
   Issue,
   KovaConfig,
@@ -28,6 +29,7 @@ export type {
 export {
   CustomToolSchema,
   EpisodicMemoryConfigSchema,
+  GitHubConfigSchema,
   IsolationModeSchema,
   KovaConfigSchema,
   MCPConfigSchema,
