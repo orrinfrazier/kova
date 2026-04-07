@@ -1,4 +1,4 @@
-import type { RepoConfig } from '../types/index.js';
+import type { KovaConfig, RepoConfig } from '../types/index.js';
 import { log } from '../utils/logger.js';
 import { fixLoop, type LoopResult } from './loop.js';
 
@@ -43,4 +43,56 @@ export async function runAuto(options: AutoOptions): Promise<AutoResult> {
   log.info(`[auto] Complete: ${loopResult.succeeded}/${loopResult.total} succeeded`);
 
   return { exitCode, loopResult };
+}
+
+/* ------------------------------------------------------------------ */
+/*  Multi-repo auto mode                                               */
+/* ------------------------------------------------------------------ */
+
+export interface MultiRepoAutoOptions {
+  config: KovaConfig;
+  filter?: string | undefined;
+  max?: number | undefined;
+  force?: boolean | undefined;
+}
+
+export interface MultiRepoAutoResult {
+  exitCode: number;
+  repoResults: Array<{ repoName: string; loopResult: LoopResult }>;
+}
+
+/** Run auto mode across all repos in a KovaConfig, in config order. */
+export async function runAutoMultiRepo(options: MultiRepoAutoOptions): Promise<MultiRepoAutoResult> {
+  const { config, filter, max, force } = options;
+  const repoEntries = Object.entries(config.repos);
+
+  log.info(`[auto] Multi-repo mode: ${repoEntries.length} repos`);
+
+  const repoResults: Array<{ repoName: string; loopResult: LoopResult }> = [];
+  let anyFailed = false;
+
+  for (const [name, repoConfig] of repoEntries) {
+    log.info(`\n${'─'.repeat(60)}`);
+    log.info(`[auto] Repo: ${name} (${repoConfig.path})`);
+    log.info('─'.repeat(60));
+
+    const result = await runAuto({
+      repoPath: repoConfig.path,
+      repoName: name,
+      config: repoConfig,
+      filter,
+      max,
+      force,
+    });
+
+    repoResults.push({ repoName: name, loopResult: result.loopResult });
+    if (result.exitCode !== 0) {
+      anyFailed = true;
+    }
+  }
+
+  const exitCode = anyFailed ? 1 : 0;
+  log.info(`\n[auto] Multi-repo complete: ${repoResults.length} repos processed, exit ${exitCode}`);
+
+  return { exitCode, repoResults };
 }
