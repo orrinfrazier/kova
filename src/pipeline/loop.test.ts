@@ -8,6 +8,7 @@ vi.mock('../services/github.js', () => ({
   ]),
   listOpenPRs: vi.fn().mockResolvedValue([]),
   createPR: vi.fn().mockResolvedValue('https://github.com/test/repo/pull/1'),
+  hasExistingWork: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock('./fix.js', () => ({
@@ -140,5 +141,103 @@ describe('fixLoop — budget cap', () => {
     const output = consoleSpy.mock.calls.map((c) => c[0] as string).join('\n');
     expect(output).toMatch(/budget/i);
     consoleSpy.mockRestore();
+  });
+});
+
+describe('fixLoop — skip issues with existing work', () => {
+  it('skips issue when branch already exists on remote', async () => {
+    const { hasExistingWork } = await import('../services/github.js');
+    const mocked = vi.mocked(hasExistingWork);
+    // Issue 1 has existing branch, issue 2 does not
+    mocked
+      .mockResolvedValueOnce({ reason: 'Branch kova/fix-1 already exists on remote' })
+      .mockResolvedValueOnce(undefined);
+
+    const { fix } = await import('./fix.js');
+    const fixMock = vi.mocked(fix);
+    fixMock.mockClear();
+
+    const result = await fixLoop({ repoPath: '/tmp/test', repoName: 'test-repo', config: makeConfig() });
+    expect(result.skipped).toBe(1);
+    expect(result.succeeded).toBe(1);
+    // fix() should only be called for issue 2
+    expect(fixMock).toHaveBeenCalledTimes(1);
+    expect(fixMock.mock.calls[0]?.[0].issue.number).toBe(2);
+
+    mocked.mockResolvedValue(undefined); // reset
+  });
+
+  it('skips issue when open PR exists for branch', async () => {
+    const { hasExistingWork } = await import('../services/github.js');
+    const mocked = vi.mocked(hasExistingWork);
+    mocked
+      .mockResolvedValueOnce({
+        reason: 'Open PR #5 exists for kova/fix-1',
+        prUrl: 'https://github.com/test/repo/pull/5',
+      })
+      .mockResolvedValueOnce(undefined);
+
+    const { fix } = await import('./fix.js');
+    vi.mocked(fix).mockClear();
+
+    const result = await fixLoop({ repoPath: '/tmp/test', repoName: 'test-repo', config: makeConfig() });
+    expect(result.skipped).toBe(1);
+    expect(result.succeeded).toBe(1);
+
+    mocked.mockResolvedValue(undefined);
+  });
+
+  it('skips all issues when all have existing work', async () => {
+    const { hasExistingWork } = await import('../services/github.js');
+    const mocked = vi.mocked(hasExistingWork);
+    mocked.mockResolvedValue({ reason: 'Branch already exists' });
+
+    const { fix } = await import('./fix.js');
+    vi.mocked(fix).mockClear();
+
+    const result = await fixLoop({ repoPath: '/tmp/test', repoName: 'test-repo', config: makeConfig() });
+    expect(result.skipped).toBe(2);
+    expect(result.succeeded).toBe(0);
+    expect(result.failed).toBe(0);
+    expect(vi.mocked(fix)).not.toHaveBeenCalled();
+
+    mocked.mockResolvedValue(undefined);
+  });
+
+  it('does not skip when force is true', async () => {
+    const { hasExistingWork } = await import('../services/github.js');
+    const mocked = vi.mocked(hasExistingWork);
+    mocked.mockClear();
+    mocked.mockResolvedValue({ reason: 'Branch already exists' });
+
+    const { fix } = await import('./fix.js');
+    vi.mocked(fix).mockClear();
+
+    const result = await fixLoop({
+      repoPath: '/tmp/test',
+      repoName: 'test-repo',
+      config: makeConfig(),
+      force: true,
+    });
+    expect(result.skipped).toBe(0);
+    expect(result.succeeded).toBe(2);
+    // hasExistingWork should not be called when force is true
+    expect(mocked).not.toHaveBeenCalled();
+
+    mocked.mockResolvedValue(undefined);
+  });
+
+  it('logs skip reason for each skipped issue', async () => {
+    const { hasExistingWork } = await import('../services/github.js');
+    const mocked = vi.mocked(hasExistingWork);
+    mocked.mockResolvedValue({ reason: 'Branch kova/fix-1 already exists on remote' });
+
+    const consoleSpy = vi.spyOn(console, 'log');
+    await fixLoop({ repoPath: '/tmp/test', repoName: 'test-repo', config: makeConfig() });
+    const output = consoleSpy.mock.calls.map((c) => c[0] as string).join('\n');
+    expect(output).toMatch(/skip/i);
+    consoleSpy.mockRestore();
+
+    mocked.mockResolvedValue(undefined);
   });
 });
