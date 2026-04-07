@@ -50,8 +50,8 @@ describe('checkpoint', () => {
 
     const loaded = await loadCheckpoint(workDir);
     expect(loaded).not.toBeNull();
-    expect(loaded!.completedWaves).toEqual(['assess', 'spec']);
-    expect(loaded!.issue.number).toBe(42);
+    expect(loaded?.completedWaves).toEqual(['assess', 'spec']);
+    expect(loaded?.issue.number).toBe(42);
   });
 
   it('clearCheckpoint removes the state file', async () => {
@@ -77,6 +77,6 @@ describe('checkpoint', () => {
     await saveCheckpoint(workDir, state2);
 
     const loaded = await loadCheckpoint(workDir);
-    expect(loaded!.completedWaves).toEqual(['assess', 'spec', 'test']);
+    expect(loaded?.completedWaves).toEqual(['assess', 'spec', 'test']);
   });
 });

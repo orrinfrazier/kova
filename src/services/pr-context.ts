@@ -41,7 +41,7 @@ export function formatPRContext(prs: OpenPR[]): string {
 
   for (const pr of prs) {
     const fileList = pr.files.length > 0 ? pr.files.join(', ') : 'unknown';
-    lines.push('- #' + pr.number + ': ' + pr.title + ' (branch: ' + pr.branch + ', files: ' + fileList + ')');
+    lines.push(`- #${pr.number}: ${pr.title} (branch: ${pr.branch}, files: ${fileList})`);
   }
 
   return lines.join('\n');
@@ -62,7 +62,7 @@ export function extractPRFromResult(
   return {
     number: prNumber,
     title: issue.title,
-    branch: 'kova/fix-' + issue.number,
+    branch: `kova/fix-${issue.number}`,
     files,
   };
 }

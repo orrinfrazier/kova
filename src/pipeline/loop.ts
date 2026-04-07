@@ -53,9 +53,9 @@ export async function fixLoop(options: LoopOptions): Promise<LoopResult> {
   const startedAt = new Date().toISOString();
   const limit = maxIssues ?? config.auto?.max_per_run ?? config.rules.max_issues_per_run;
   const budget = budgetUsd ?? config.rules.budget_usd;
-  log.info('Fetching open issues for ' + repoName + '...');
+  log.info(`Fetching open issues for ${repoName}...`);
   if (budget !== undefined) {
-    log.info('Budget cap: $' + budget.toFixed(2));
+    log.info(`Budget cap: $${budget.toFixed(2)}`);
   }
   const issues = await fetchIssues(repoPath, filter);
   if (issues.length === 0) {
@@ -73,17 +73,17 @@ export async function fixLoop(options: LoopOptions): Promise<LoopResult> {
       results: [],
     };
   }
-  log.info('Found ' + issues.length + ' issues, prioritizing...');
+  log.info(`Found ${issues.length} issues, prioritizing...`);
   const prioritized = prioritizeIssues(issues);
   const toFix = prioritized.slice(0, limit).map((p) => p.issue);
-  log.info('Processing ' + toFix.length + ' issues (prioritized by score + dependencies)');
+  log.info(`Processing ${toFix.length} issues (prioritized by score + dependencies)`);
 
   const pendingPRs: OpenPR[] = await fetchOpenPRsDetailed(repoPath).catch((err) => {
-    log.warn('Failed to fetch open PRs for context: ' + (err instanceof Error ? err.message : String(err)));
+    log.warn(`Failed to fetch open PRs for context: ${err instanceof Error ? err.message : String(err)}`);
     return [] as OpenPR[];
   });
   if (pendingPRs.length > 0) {
-    log.info('Loaded ' + pendingPRs.length + ' open PRs for conflict awareness');
+    log.info(`Loaded ${pendingPRs.length} open PRs for conflict awareness`);
   }
   const results: Array<{ issue: Issue; result: FixResult }> = [];
   let succeeded = 0;
@@ -94,8 +94,8 @@ export async function fixLoop(options: LoopOptions): Promise<LoopResult> {
   let totalDuration = 0;
   let budgetExceeded = false;
   for (const issue of toFix) {
-    log.info('\n' + '='.repeat(60));
-    log.info('Fixing #' + issue.number + ': ' + issue.title);
+    log.info(`\n${'='.repeat(60)}`);
+    log.info(`Fixing #${issue.number}: ${issue.title}`);
     log.info('='.repeat(60));
     const result = await fix({ issue, repoPath, repoName, config, pendingPRs });
     results.push({ issue, result });
@@ -105,28 +105,26 @@ export async function fixLoop(options: LoopOptions): Promise<LoopResult> {
     totalDuration += waveCosts.duration;
     if (result.success) {
       succeeded++;
-      log.info('#' + issue.number + ' — PR created: ' + result.prUrl);
+      log.info(`#${issue.number} — PR created: ${result.prUrl}`);
       const newPR = extractPRFromResult(issue, result);
       if (newPR) {
         pendingPRs.push(newPR);
       }
     } else {
       failed++;
-      log.error('#' + issue.number + ' — Failed: ' + result.error);
+      log.error(`#${issue.number} — Failed: ${result.error}`);
     }
     if (budget !== undefined && totalCost >= budget) {
       budgetExceeded = true;
-      log.info(
-        'Budget exceeded: $' + totalCost.toFixed(2) + ' spent of $' + budget.toFixed(2) + ' budget — stopping loop',
-      );
+      log.info(`Budget exceeded: $${totalCost.toFixed(2)} spent of $${budget.toFixed(2)} budget — stopping loop`);
       break;
     }
     if (shutdownRequested()) {
-      log.info('Shutdown requested — stopping loop after #' + issue.number);
+      log.info(`Shutdown requested — stopping loop after #${issue.number}`);
       break;
     }
   }
-  log.info('\n' + '='.repeat(60));
+  log.info(`\n${'='.repeat(60)}`);
   log.info(
     'Loop complete: ' +
       succeeded +
@@ -165,7 +163,7 @@ export async function fixLoop(options: LoopOptions): Promise<LoopResult> {
   const runReport = buildRunReport(loopResult);
   printRunReport(runReport);
   await writeRunReport(repoPath, runReport).catch((err) => {
-    log.warn('Failed to write run report: ' + (err instanceof Error ? err.message : String(err)));
+    log.warn(`Failed to write run report: ${err instanceof Error ? err.message : String(err)}`);
   });
 
   return loopResult;

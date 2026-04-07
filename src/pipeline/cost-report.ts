@@ -47,24 +47,24 @@ export async function writeCostReport(workDir: string, report: CostReport): Prom
 
 function formatDuration(ms: number): string {
   const seconds = Math.floor(ms / 1000);
-  if (seconds < 60) return seconds + 's';
+  if (seconds < 60) return `${seconds}s`;
   const minutes = Math.floor(seconds / 60);
   const remaining = seconds % 60;
-  return minutes + 'm ' + remaining + 's';
+  return `${minutes}m ${remaining}s`;
 }
 
 export function printRunSummary(report: CostReport): void {
   log.info('');
   log.info('=== Run Summary ===');
-  log.info('Issue:    #' + report.issueNumber);
-  log.info('Cost:     $' + report.totalCost.toFixed(2));
-  log.info('Turns:    ' + report.totalTurns);
-  log.info('Duration: ' + formatDuration(report.totalDuration));
+  log.info(`Issue:    #${report.issueNumber}`);
+  log.info(`Cost:     $${report.totalCost.toFixed(2)}`);
+  log.info(`Turns:    ${report.totalTurns}`);
+  log.info(`Duration: ${formatDuration(report.totalDuration)}`);
   if (report.waves.length > 0) {
     log.info('');
     log.info('Per-wave breakdown:');
     for (const wave of report.waves) {
-      const model = wave.model ? ' (' + wave.model + ')' : '';
+      const model = wave.model ? ` (${wave.model})` : '';
       log.info(
         '  ' +
           wave.wave.padEnd(8) +
