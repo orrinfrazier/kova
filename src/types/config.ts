@@ -9,6 +9,17 @@ export type ThinkingLevel = z.infer<typeof ThinkingLevelSchema>;
 export const IsolationModeSchema = z.enum(['worktree', 'docker', 'none']);
 export type IsolationMode = z.infer<typeof IsolationModeSchema>;
 
+export const SandboxConfigSchema = z.object({
+  image: z.string().default('node:20-bookworm'),
+  extra_packages: z.array(z.string()).default([]),
+  restrict_network: z.boolean().default(false),
+  cpus: z.number().positive().default(2),
+  memory: z.string().default('4g'),
+  timeout: z.string().default('30m'),
+});
+
+export type SandboxConfig = z.infer<typeof SandboxConfigSchema>;
+
 export const OllamaModelSchema = z.object({
   id: z.string(),
   name: z.string().optional(),
@@ -76,6 +87,7 @@ export const RepoConfigSchema = z.object({
   path: z.string(),
   vectordb: VectorDBConfigSchema.optional(),
   episodes: EpisodicMemoryConfigSchema.optional(),
+  sandbox: SandboxConfigSchema.optional(),
   rules: z
     .object({
       coverage: z.number().default(80),
@@ -175,6 +187,14 @@ export interface ReviewKnownIssue {
   severity: string;
 }
 
+export interface SandboxResourceUsage {
+  peakMemoryMB: number;
+  cpuSeconds: number;
+  wallTimeMs: number;
+  containerName: string;
+  limitsApplied: { cpus: number; memory: string; timeout: string };
+}
+
 export interface FixState {
   issue: Issue;
   repo: string;
@@ -187,4 +207,5 @@ export interface FixState {
   error?: string | undefined;
   failedPieces?: FailedPiece[] | undefined;
   reviewKnownIssues?: ReviewKnownIssue[] | undefined;
+  sandboxResourceUsage?: SandboxResourceUsage | undefined;
 }
