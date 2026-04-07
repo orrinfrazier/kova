@@ -46,7 +46,15 @@ program
   .name('kova')
   .description('Autonomous code agent — brainstorm issues, fix them, ship PRs')
   .version('0.2.75')
-  .option('--config <path>', 'Path to repos.yaml config file');
+  .option('--config <path>', 'Path to repos.yaml config file')
+  .option('--router [url]', 'Route all LLM requests through claude-code-router proxy')
+  .hook('preAction', () => {
+    const routerOpt = program.opts().router;
+    if (routerOpt) {
+      process.env.ANTHROPIC_BASE_URL = typeof routerOpt === 'string' ? routerOpt : 'http://localhost:4141';
+      log.info(`Router mode enabled: ${process.env.ANTHROPIC_BASE_URL}`);
+    }
+  });
 
 /** Resolve --repo: look up by name in config, fall back to path. */
 function resolveRepo(
