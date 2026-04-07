@@ -117,6 +117,71 @@ describe('models', () => {
     });
   });
 
+  describe('isLocalModel', () => {
+    it('returns true for ollama provider', async () => {
+      const { isLocalModel } = await import('./models.js');
+      expect(isLocalModel('ollama:llama3')).toBe(true);
+    });
+
+    it('returns true for lmstudio provider', async () => {
+      const { isLocalModel } = await import('./models.js');
+      expect(isLocalModel('lmstudio:codellama')).toBe(true);
+    });
+
+    it('returns true for vllm provider', async () => {
+      const { isLocalModel } = await import('./models.js');
+      expect(isLocalModel('vllm:mistral-7b')).toBe(true);
+    });
+
+    it('returns true for llamacpp provider', async () => {
+      const { isLocalModel } = await import('./models.js');
+      expect(isLocalModel('llamacpp:llama3')).toBe(true);
+    });
+
+    it('returns false for anthropic provider', async () => {
+      const { isLocalModel } = await import('./models.js');
+      expect(isLocalModel('anthropic:claude-sonnet-4-6')).toBe(false);
+    });
+
+    it('returns false for bare model ID (defaults to anthropic)', async () => {
+      const { isLocalModel } = await import('./models.js');
+      expect(isLocalModel('claude-sonnet-4-6')).toBe(false);
+    });
+
+    it('returns false for openai provider', async () => {
+      const { isLocalModel } = await import('./models.js');
+      expect(isLocalModel('openai:gpt-4o')).toBe(false);
+    });
+
+    it('returns false for google provider', async () => {
+      const { isLocalModel } = await import('./models.js');
+      expect(isLocalModel('google:gemini-2.5-pro')).toBe(false);
+    });
+  });
+
+  describe('getApiFallbackModelString', () => {
+    it('returns default API model for small tier', async () => {
+      const { getApiFallbackModelString } = await import('./models.js');
+      expect(getApiFallbackModelString('small')).toBe('claude-haiku-4-5-20251001');
+    });
+
+    it('returns default API model for medium tier', async () => {
+      const { getApiFallbackModelString } = await import('./models.js');
+      expect(getApiFallbackModelString('medium')).toBe('claude-sonnet-4-6');
+    });
+
+    it('returns default API model for large tier', async () => {
+      const { getApiFallbackModelString } = await import('./models.js');
+      expect(getApiFallbackModelString('large')).toBe('claude-opus-4-6');
+    });
+
+    it('ignores env overrides (always returns built-in default)', async () => {
+      process.env.KOVA_MEDIUM_MODEL = 'ollama:llama3';
+      const { getApiFallbackModelString } = await import('./models.js');
+      expect(getApiFallbackModelString('medium')).toBe('claude-sonnet-4-6');
+    });
+  });
+
   describe('provider registration', () => {
     it('non-anthropic models resolve successfully (proves providers are registered)', async () => {
       process.env.KOVA_MEDIUM_MODEL = 'openai:gpt-4o';
