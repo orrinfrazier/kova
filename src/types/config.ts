@@ -42,8 +42,22 @@ export type WaveModelOverride = z.infer<typeof WaveModelOverrideSchema>;
 export const WaveModelConfigSchema = z.union([ModelTierSchema, WaveModelOverrideSchema]);
 export type WaveModelConfig = z.infer<typeof WaveModelConfigSchema>;
 
+export const VectorDBConfigSchema = z
+  .object({
+    enabled: z.boolean(),
+    endpoint: z.string().optional(),
+    top_k: z.number().default(10),
+  })
+  .refine((cfg) => !cfg.enabled || cfg.endpoint != null, {
+    message: 'endpoint is required when vectordb is enabled',
+    path: ['endpoint'],
+  });
+
+export type VectorDBConfig = z.infer<typeof VectorDBConfigSchema>;
+
 export const RepoConfigSchema = z.object({
   path: z.string(),
+  vectordb: VectorDBConfigSchema.optional(),
   rules: z
     .object({
       coverage: z.number().default(80),
