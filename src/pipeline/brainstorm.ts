@@ -19,6 +19,7 @@ function toOutputFormat(schema: z.ZodType): OutputFormat {
 export interface BrainstormOptions {
   repoPath: string;
   config: RepoConfig;
+  focus?: string[] | undefined;
 }
 
 export interface BrainstormReturn {
@@ -31,12 +32,19 @@ export interface BrainstormReturn {
 }
 
 export async function brainstorm(options: BrainstormOptions): Promise<BrainstormReturn> {
-  const { repoPath, config } = options;
+  const { repoPath, config, focus } = options;
 
   const model = resolveModel('large');
   const tools = getWaveTools('brainstorm', repoPath);
   const systemPrompt = await loadPrompt('brainstorm');
   const thinkingLevel = resolveThinkingLevel(config, 'brainstorm');
+
+  const focusAreas = focus ?? config.rules.focus;
+
+  let userMessage = `Analyze the codebase at ${repoPath} and identify improvements. Read key files, understand the architecture, then produce a structured list of issues.`;
+  if (focusAreas && focusAreas.length > 0) {
+    userMessage += `\n\nIMPORTANT: ONLY generate issues within these focus areas: ${focusAreas.join(', ')}. Do not generate issues outside these categories.`;
+  }
 
   try {
     const handoff = await spawnWaveAgent<BrainstormResult>({
@@ -45,7 +53,7 @@ export async function brainstorm(options: BrainstormOptions): Promise<Brainstorm
       tools,
       systemPrompt,
       handoffContext: '',
-      userMessage: `Analyze the codebase at ${repoPath} and identify improvements. Read key files, understand the architecture, then produce a structured list of issues.`,
+      userMessage,
       cwd: repoPath,
       thinkingLevel,
       outputFormat: toOutputFormat(BrainstormResultSchema),

@@ -140,4 +140,67 @@ describe('brainstorm', () => {
     expect(result.success).toBe(false);
     expect(result.issues).toHaveLength(0);
   });
+
+  describe('focus areas', () => {
+    it('injects CLI focus areas into the agent user message', async () => {
+      mockSpawnWaveAgent.mockResolvedValueOnce(makeBrainstormHandoff(SAMPLE_ISSUES));
+
+      await brainstorm({
+        repoPath: '/tmp/repo',
+        config: DEFAULT_CONFIG,
+        focus: ['security', 'performance'],
+      });
+
+      const callConfig = mockSpawnWaveAgent.mock.calls[0]?.[0] as Record<string, unknown>;
+      const userMessage = callConfig.userMessage as string;
+      expect(userMessage).toContain('security');
+      expect(userMessage).toContain('performance');
+    });
+
+    it('falls back to config.rules.focus when no CLI focus provided', async () => {
+      mockSpawnWaveAgent.mockResolvedValueOnce(makeBrainstormHandoff(SAMPLE_ISSUES));
+
+      const configWithFocus: RepoConfig = {
+        ...DEFAULT_CONFIG,
+        rules: { ...DEFAULT_CONFIG.rules, focus: ['bugs', 'tech-debt'] },
+      };
+
+      await brainstorm({ repoPath: '/tmp/repo', config: configWithFocus });
+
+      const callConfig = mockSpawnWaveAgent.mock.calls[0]?.[0] as Record<string, unknown>;
+      const userMessage = callConfig.userMessage as string;
+      expect(userMessage).toContain('bugs');
+      expect(userMessage).toContain('tech-debt');
+    });
+
+    it('CLI focus overrides config.rules.focus', async () => {
+      mockSpawnWaveAgent.mockResolvedValueOnce(makeBrainstormHandoff(SAMPLE_ISSUES));
+
+      const configWithFocus: RepoConfig = {
+        ...DEFAULT_CONFIG,
+        rules: { ...DEFAULT_CONFIG.rules, focus: ['bugs'] },
+      };
+
+      await brainstorm({
+        repoPath: '/tmp/repo',
+        config: configWithFocus,
+        focus: ['security'],
+      });
+
+      const callConfig = mockSpawnWaveAgent.mock.calls[0]?.[0] as Record<string, unknown>;
+      const userMessage = callConfig.userMessage as string;
+      expect(userMessage).toContain('security');
+      expect(userMessage).not.toContain('ONLY generate issues within these focus areas: bugs');
+    });
+
+    it('does not inject focus when neither CLI nor config provides it', async () => {
+      mockSpawnWaveAgent.mockResolvedValueOnce(makeBrainstormHandoff(SAMPLE_ISSUES));
+
+      await brainstorm({ repoPath: '/tmp/repo', config: DEFAULT_CONFIG });
+
+      const callConfig = mockSpawnWaveAgent.mock.calls[0]?.[0] as Record<string, unknown>;
+      const userMessage = callConfig.userMessage as string;
+      expect(userMessage).not.toContain('focus areas');
+    });
+  });
 });
