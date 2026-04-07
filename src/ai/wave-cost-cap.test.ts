@@ -73,7 +73,11 @@ describe('per-wave cost cap (maxCostUsd)', () => {
         });
         subscribeCb?.({
           type: 'turn_end',
-          message: { role: 'assistant', usage: { cost: { total: turnCost } } },
+          message: {
+            role: 'assistant',
+            content: [{ type: 'text', text: 'working...' }],
+            usage: { input: 100, cost: { total: turnCost } },
+          },
         });
       }
     });
