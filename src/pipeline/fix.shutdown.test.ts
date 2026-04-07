@@ -100,8 +100,13 @@ vi.mock('../services/worktree.js', async (importOriginal) => {
       filesStaged: ['src/fix.ts'],
       commitMessage: 'fix: Test issue (#42)',
     }),
+    rebaseOnDefault: vi.fn().mockResolvedValue({ success: true, conflicted: false }),
   };
 });
+
+vi.mock('../services/conflict-resolver.js', () => ({
+  resolveConflicts: vi.fn().mockResolvedValue({ resolved: true, filesResolved: [] }),
+}));
 
 const { fix } = await import('./fix.js');
 const { loadCheckpoint } = await import('../services/checkpoint.js');

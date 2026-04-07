@@ -163,6 +163,42 @@ export async function commitAndPush(
   return { committed: true, filesStaged: files, commitMessage };
 }
 
+export interface RebaseResult {
+  success: boolean;
+  conflicted: boolean;
+  conflictFiles?: string[];
+}
+
+export async function rebaseOnDefault(workDir: string): Promise<RebaseResult> {
+  const defaultBranch = await detectDefaultBranch(workDir);
+
+  // Fetch latest from origin
+  await $`git -C ${workDir} fetch origin`;
+
+  // Attempt rebase onto origin/defaultBranch
+  try {
+    await $`git -C ${workDir} rebase origin/${defaultBranch}`;
+    return { success: true, conflicted: false };
+  } catch {
+    // Rebase failed — collect conflict files then abort
+    log.debug('Rebase conflict detected, collecting conflict files');
+    try {
+      const status = await $`git -C ${workDir} diff --name-only --diff-filter=U`;
+      const conflictFiles = status.stdout.trim().split('\n').filter(Boolean);
+      await $`git -C ${workDir} rebase --abort`;
+      return { success: false, conflicted: true, conflictFiles };
+    } catch {
+      // Best effort abort
+      try {
+        await $`git -C ${workDir} rebase --abort`;
+      } catch {
+        /* best effort */
+      }
+      return { success: false, conflicted: true, conflictFiles: [] };
+    }
+  }
+}
+
 export async function cleanupWorktrees(repoPath: string): Promise<void> {
   try {
     await $`git -C ${repoPath} worktree prune`;

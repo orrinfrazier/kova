@@ -19,6 +19,7 @@ import {
   stopAllMCPServers,
 } from '../ai/index.js';
 import { clearCheckpoint, loadCheckpoint, saveCheckpoint } from '../services/checkpoint.js';
+import { resolveConflicts } from '../services/conflict-resolver.js';
 import { collectPRFeedback } from '../services/feedback-collector.js';
 import { commentOnIssue, createPR, listOpenPRs } from '../services/github.js';
 import { appendHistoryEntry } from '../services/history.js';
@@ -60,7 +61,9 @@ import {
 import {
   commitAndPush,
   createWorktree,
+  detectDefaultBranch,
   worktreePath as getWorktreePath,
+  rebaseOnDefault,
   removeWorktree,
   worktreeExists,
 } from '../services/worktree.js';
@@ -715,6 +718,33 @@ export async function fix(options: FixOptions): Promise<FixResult> {
     if (!shouldSkip('ship')) {
       const shipStart = Date.now();
       const branch = worktree?.branch ?? `kova/fix-${issue.number}`;
+
+      // Rebase on default branch before shipping
+      const rebaseResult = await rebaseOnDefault(workDir);
+      metrics.recordRebaseAttempt();
+
+      if (!rebaseResult.success && rebaseResult.conflicted) {
+        metrics.recordConflictDetected();
+
+        // Attempt auto-resolution — resolveConflicts completes the rebase if successful
+        const defaultBranch = await detectDefaultBranch(workDir);
+        const resolution = await resolveConflicts(workDir, defaultBranch);
+
+        if (resolution.resolved) {
+          metrics.recordConflictResolved();
+          flog.info(`Conflicts auto-resolved in: ${resolution.filesResolved.join(', ')}`);
+        } else {
+          metrics.recordConflictFailed();
+          const filesUnresolved = (resolution as { filesUnresolved?: string[] }).filesUnresolved ?? [];
+          flog.error('Merge conflicts could not be resolved');
+          state.status = 'failed';
+          state.error = `Unresolvable merge conflicts in: ${filesUnresolved.join(', ')}`;
+          await saveCheckpoint(workDir, state);
+          metrics.recordIssueFailed();
+          return { success: false, error: state.error, state };
+        }
+      }
+
       const commitResult = await commitAndPush(workDir, branch, issue);
       if (!commitResult.committed) {
         flog.child({ wave: 'ship' }).warn('No changes to commit — skipping PR');
