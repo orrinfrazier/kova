@@ -1,4 +1,5 @@
 export type {
+  CustomTool,
   EpisodicMemoryConfig,
   FailedPiece,
   FixState,
@@ -21,6 +22,7 @@ export type {
   WaveResult,
 } from './config.js';
 export {
+  CustomToolSchema,
   EpisodicMemoryConfigSchema,
   IsolationModeSchema,
   KovaConfigSchema,

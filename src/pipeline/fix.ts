@@ -15,9 +15,9 @@ import {
 } from '../ai/index.js';
 import { clearCheckpoint, loadCheckpoint, saveCheckpoint } from '../services/checkpoint.js';
 import { commentOnIssue, createPR, listOpenPRs } from '../services/github.js';
+import { validateIsolation } from '../services/isolation.js';
 import { detectTooling } from '../services/language-detect.js';
 import { formatPRContext, type OpenPR } from '../services/pr-context.js';
-import { validateIsolation } from '../services/isolation.js';
 import {
   buildSandboxImage,
   DEFAULT_SANDBOX_LIMITS,
@@ -134,8 +134,8 @@ async function spawnWave<T>(
   outputFormat?: OutputFormat,
 ): Promise<WaveHandoff<T>> {
   const model = resolveWaveModel(config.model[wave]);
-  const tools = getWaveTools(wave, workDir);
-  const systemPrompt = await loadPrompt(wave);
+  const tools = getWaveTools(wave, workDir, config.tools);
+  const systemPrompt = await loadPrompt(wave, config.tools);
   const thinkingLevel = resolveThinkingLevel(config, wave);
   const modelString = model.id;
   const fallbackModel = waveFallbackModel(config.model[wave], modelString, config.model.fallback);
