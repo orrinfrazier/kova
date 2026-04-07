@@ -8,7 +8,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { z } from 'zod';
-import { executeWaveWithRetry, type OutputFormat } from '../ai/index.js';
+import { executeWaveWithRetry, type OutputFormat, resolveThinkingLevel } from '../ai/index.js';
 import { detectTooling } from '../services/language-detect.js';
 import type { Issue, RepoConfig, ReviewFinding, ReviewResult, WaveName, WaveResult } from '../types/index.js';
 import { ReviewResultSchema } from '../types/index.js';
@@ -267,6 +267,7 @@ export async function runTILoop(config: TILoopConfig): Promise<TILoopResult> {
     userMessage: buildWaveContext('test', issue, waveResults),
     cwd: workDir,
     modelTier: repoConfig.model.test,
+    thinkingLevel: resolveThinkingLevel(repoConfig, 'test'),
   });
 
   const testWaveResult = toWaveResult('test', testExecResult);
@@ -312,6 +313,7 @@ export async function runTILoop(config: TILoopConfig): Promise<TILoopResult> {
       userMessage: implContext,
       cwd: workDir,
       modelTier: repoConfig.model.impl,
+      thinkingLevel: resolveThinkingLevel(repoConfig, 'impl'),
     });
 
     implWaveResult = toWaveResult('impl', implExecResult);
@@ -423,6 +425,7 @@ export async function runReviewLoop(config: ReviewLoopConfig): Promise<ReviewLoo
       cwd: workDir,
       modelTier: repoConfig.model.review,
       outputFormat: reviewOutputFormat(),
+      thinkingLevel: resolveThinkingLevel(repoConfig, 'review'),
     });
 
     reviewWaveResult = toWaveResult('review', reviewExecResult);
@@ -474,6 +477,7 @@ export async function runReviewLoop(config: ReviewLoopConfig): Promise<ReviewLoo
             userMessage: implContext,
             cwd: workDir,
             modelTier: repoConfig.model.impl,
+            thinkingLevel: resolveThinkingLevel(repoConfig, 'impl'),
           });
           totalCost += implExecResult.cost;
           waveResults.impl = toWaveResult('impl', implExecResult);
@@ -498,6 +502,7 @@ export async function runReviewLoop(config: ReviewLoopConfig): Promise<ReviewLoo
         userMessage: implContext,
         cwd: workDir,
         modelTier: repoConfig.model.impl,
+        thinkingLevel: resolveThinkingLevel(repoConfig, 'impl'),
       });
       totalCost += implExecResult.cost;
       waveResults.impl = toWaveResult('impl', implExecResult);
@@ -521,6 +526,7 @@ export async function runReviewLoop(config: ReviewLoopConfig): Promise<ReviewLoo
         }),
         cwd: workDir,
         modelTier: repoConfig.model.quality,
+        thinkingLevel: resolveThinkingLevel(repoConfig, 'quality'),
       });
       qualityWaveResult = toWaveResult('quality', qualityExecResult);
       totalCost += qualityExecResult.cost;

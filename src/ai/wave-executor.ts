@@ -310,6 +310,7 @@ export interface WaveOptions {
   modelTier: ModelTier;
   outputFormat?: OutputFormat;
   maxTurns?: number;
+  thinkingLevel?: ThinkingLevel;
 }
 
 export interface WaveExecutionResult {
@@ -323,7 +324,7 @@ export interface WaveExecutionResult {
 }
 
 export async function executeWave(options: WaveOptions): Promise<WaveExecutionResult> {
-  const { wave, systemPrompt, userMessage, cwd, modelTier, outputFormat, maxTurns } = options;
+  const { wave, systemPrompt, userMessage, cwd, modelTier, outputFormat, maxTurns, thinkingLevel } = options;
 
   const model = resolveModel(modelTier);
   const tools = getWaveTools(wave, cwd);
@@ -340,6 +341,7 @@ export async function executeWave(options: WaveOptions): Promise<WaveExecutionRe
       cwd,
       ...(outputFormat && { outputFormat }),
       ...(maxTurns != null && { maxTurns }),
+      ...(thinkingLevel != null && { thinkingLevel }),
     });
 
     const duration = Date.now() - startTime;

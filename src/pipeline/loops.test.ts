@@ -2,9 +2,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Issue, RepoConfig, WaveName, WaveResult } from '../types/index.js';
 
 // Mock the AI layer — no real Agent SDK calls in tests
-vi.mock('../ai/index.js', () => ({
-  executeWaveWithRetry: vi.fn(),
-}));
+vi.mock('../ai/index.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../ai/index.js')>();
+  return {
+    executeWaveWithRetry: vi.fn(),
+    resolveThinkingLevel: actual.resolveThinkingLevel,
+  };
+});
 
 // Mock language detection
 vi.mock('../services/language-detect.js', () => ({

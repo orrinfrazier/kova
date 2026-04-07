@@ -87,6 +87,48 @@ repos:
     expect(repo.isolation).toBe('docker');
   });
 
+  it('loads config with per-wave thinking levels', async () => {
+    const yaml = `
+repos:
+  thinking-repo:
+    path: /tmp/thinking
+    model:
+      assess: large
+      spec: large
+      test: medium
+      impl: medium
+      quality: small
+      review: large
+      thinking:
+        spec: high
+        review: high
+`;
+    await writeFile(join(tempDir, 'repos.yaml'), yaml);
+
+    const config = await loadConfig(join(tempDir, 'repos.yaml'));
+    const repo = config.repos['thinking-repo'];
+    expect(repo).toBeDefined();
+    if (!repo) return;
+
+    expect(repo.model.thinking?.spec).toBe('high');
+    expect(repo.model.thinking?.review).toBe('high');
+    expect(repo.model.thinking?.assess).toBeUndefined();
+  });
+
+  it('rejects invalid thinking level values', async () => {
+    const yaml = `
+repos:
+  bad-thinking:
+    path: /tmp/bad
+    model:
+      thinking:
+        assess: invalid_level
+`;
+    await writeFile(join(tempDir, 'repos.yaml'), yaml);
+
+    await expect(loadConfig(join(tempDir, 'repos.yaml'))).rejects.toThrow(ZodError);
+  });
+
   it('throws on invalid YAML syntax', async () => {
     await writeFile(join(tempDir, 'bad.yaml'), '{{not: valid: yaml:::');
 
@@ -136,6 +178,11 @@ describe('resolveRepoConfig', () => {
     expect(config.model.quality).toBe('small');
     expect(config.model.review).toBe('large');
     expect(config.isolation).toBe('worktree');
+  });
+
+  it('thinking config is undefined by default', () => {
+    const config = resolveRepoConfig('/tmp/repo');
+    expect(config.model.thinking).toBeUndefined();
   });
 
   it('auto field is undefined by default', () => {
