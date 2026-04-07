@@ -1,4 +1,4 @@
-import { fetchIssues } from '../services/github.js';
+import { fetchIssue, fetchIssues } from '../services/github.js';
 import { extractPRFromResult, fetchOpenPRsDetailed, type OpenPR } from '../services/pr-context.js';
 import { prioritizeIssues } from '../services/prioritize.js';
 import { shutdownRequested } from '../services/shutdown.js';
@@ -147,6 +147,170 @@ export async function fixLoop(options: LoopOptions): Promise<LoopResult> {
       Math.floor(totalDuration / 1000) +
       's',
   );
+  const loopResult: LoopResult = {
+    total: results.length,
+    succeeded,
+    failed,
+    skipped,
+    totalCost,
+    totalTurns,
+    totalDuration,
+    budgetExceeded,
+    startedAt,
+    results,
+  };
+
+  const runReport = buildRunReport(loopResult);
+  printRunReport(runReport);
+  await writeRunReport(repoPath, runReport).catch((err) => {
+    log.warn(`Failed to write run report: ${err instanceof Error ? err.message : String(err)}`);
+  });
+
+  return loopResult;
+}
+
+export interface FixByNumbersOptions {
+  repoPath: string;
+  repoName: string;
+  config: RepoConfig;
+  issueNumbers: number[];
+  budgetUsd?: number | undefined;
+  force?: boolean | undefined;
+}
+
+export async function fixByNumbers(options: FixByNumbersOptions): Promise<LoopResult> {
+  const { repoPath, repoName, config, issueNumbers, budgetUsd } = options;
+  const startedAt = new Date().toISOString();
+  const budget = budgetUsd;
+
+  if (budget !== undefined) {
+    log.info(`Budget cap: $${budget.toFixed(2)}`);
+  }
+
+  if (issueNumbers.length === 0) {
+    log.info('No issue numbers provided.');
+    return {
+      total: 0,
+      succeeded: 0,
+      failed: 0,
+      skipped: 0,
+      totalCost: 0,
+      totalTurns: 0,
+      totalDuration: 0,
+      budgetExceeded: false,
+      startedAt,
+      results: [],
+    };
+  }
+
+  log.info(`Processing ${issueNumbers.length} issues by number`);
+
+  const initialPRs: OpenPR[] = await fetchOpenPRsDetailed(repoPath).catch((err) => {
+    log.warn(`Failed to fetch open PRs for context: ${err instanceof Error ? err.message : String(err)}`);
+    return [] as OpenPR[];
+  });
+  const pendingPRs: OpenPR[] = [...initialPRs];
+  if (pendingPRs.length > 0) {
+    log.info(`Loaded ${pendingPRs.length} open PRs for conflict awareness`);
+  }
+
+  const results: Array<{ issue: Issue; result: FixResult }> = [];
+  let succeeded = 0;
+  let failed = 0;
+  const skipped = 0;
+  let totalCost = 0;
+  let totalTurns = 0;
+  let totalDuration = 0;
+  let budgetExceeded = false;
+
+  for (const issueNumber of issueNumbers) {
+    if (shutdownRequested()) {
+      log.info(`Shutdown requested — stopping loop before #${issueNumber}`);
+      break;
+    }
+
+    log.info(`\n${'='.repeat(60)}`);
+    log.info(`Fetching issue #${issueNumber}...`);
+
+    let issue: Issue;
+    try {
+      issue = await fetchIssue(repoPath, issueNumber);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.error(`#${issueNumber} — Failed to fetch: ${msg}`);
+      failed++;
+      results.push({
+        issue: { number: issueNumber, title: `(unfetchable #${issueNumber})`, body: '', labels: [], url: '' },
+        result: {
+          success: false,
+          error: msg,
+          state: {
+            issue: { number: issueNumber, title: '', body: '', labels: [], url: '' },
+            repo: repoName,
+            repoPath,
+            startedAt: new Date().toISOString(),
+            completedWaves: [],
+            waveResults: {},
+            status: 'failed',
+          },
+        },
+      });
+      continue;
+    }
+
+    log.info(`Fixing #${issue.number}: ${issue.title}`);
+    log.info('='.repeat(60));
+
+    const result = await fix({ issue, repoPath, repoName, config, pendingPRs: [...pendingPRs] });
+    results.push({ issue, result });
+    const waveCosts = aggregateWaveCosts(result.state.waveResults);
+    totalCost += waveCosts.cost;
+    totalTurns += waveCosts.turns;
+    totalDuration += waveCosts.duration;
+
+    if (result.success) {
+      succeeded++;
+      log.info(`#${issue.number} — PR created: ${result.prUrl}`);
+      const newPR = extractPRFromResult(issue, result);
+      if (newPR) {
+        pendingPRs.push(newPR);
+      }
+    } else {
+      failed++;
+      log.error(`#${issue.number} — Failed: ${result.error}`);
+    }
+
+    if (budget !== undefined && totalCost >= budget) {
+      budgetExceeded = true;
+      log.info(`Budget exceeded: $${totalCost.toFixed(2)} spent of $${budget.toFixed(2)} budget — stopping loop`);
+      break;
+    }
+  }
+
+  log.info(`\n${'='.repeat(60)}`);
+  log.info(
+    'Loop complete: ' +
+      succeeded +
+      ' succeeded, ' +
+      failed +
+      ' failed, ' +
+      skipped +
+      ' skipped (' +
+      results.length +
+      '/' +
+      issueNumbers.length +
+      ' total)',
+  );
+  log.info(
+    'Cumulative cost: $' +
+      totalCost.toFixed(2) +
+      ' | ' +
+      totalTurns +
+      ' turns | ' +
+      Math.floor(totalDuration / 1000) +
+      's',
+  );
+
   const loopResult: LoopResult = {
     total: results.length,
     succeeded,
