@@ -3,7 +3,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { $ } from 'zx';
-import { commitAndPush, createWorktree, detectDefaultBranch, worktreeExists } from './worktree.js';
+import {
+  commitAndPush,
+  createSubWorktree,
+  createWorktree,
+  detectDefaultBranch,
+  removeSubWorktree,
+  subWorktreePath,
+  worktreeExists,
+} from './worktree.js';
 
 $.verbose = false;
 
@@ -141,6 +149,175 @@ describe('createWorktree', () => {
     expect(worktree.branch).toBe('kova/fix-42');
     const currentBranch = (await $`git -C ${worktree.path} rev-parse --abbrev-ref HEAD`).stdout.trim();
     expect(currentBranch).toBe('kova/fix-42');
+  });
+});
+
+describe('subWorktreePath', () => {
+  it('returns deterministic path as sibling of fix worktree', () => {
+    const fixWtPath = '/tmp/kova/.kova-worktrees/fix-42';
+    const result = subWorktreePath(fixWtPath, 42, 0);
+    expect(result).toBe('/tmp/kova/.kova-worktrees/fix-42-piece-0');
+  });
+
+  it('uses issue number and piece index in path', () => {
+    const fixWtPath = '/tmp/kova/.kova-worktrees/fix-99';
+    expect(subWorktreePath(fixWtPath, 99, 3)).toBe('/tmp/kova/.kova-worktrees/fix-99-piece-3');
+  });
+});
+
+/**
+ * Creates a bare remote + cloned local + fix worktree to mirror kova's
+ * real workflow for sub-worktree tests.
+ */
+async function setupFixWorktree(): Promise<{
+  remote: string;
+  local: string;
+  fixWorktree: string;
+  fixBranch: string;
+  issueNumber: number;
+}> {
+  const base = await mkdtemp(join(tmpdir(), 'kova-sub-'));
+  const remote = join(base, 'remote.git');
+  const local = join(base, 'local');
+  const fixWtDir = join(base, '.kova-worktrees');
+  const issueNumber = 42;
+  const fixBranch = `kova/fix-${issueNumber}`;
+  const fixWorktree = join(fixWtDir, `fix-${issueNumber}`);
+
+  await $`git init --bare ${remote}`;
+  await $`git clone ${remote} ${local}`;
+  await $`git -C ${local} config user.email "test@kova.dev"`;
+  await $`git -C ${local} config user.name "Kova Test"`;
+  await writeFile(join(local, 'README.md'), '# Test repo\n');
+  await $`git -C ${local} add README.md`;
+  await $`git -C ${local} commit -m "init on main"`;
+  await $`git -C ${local} push origin main`;
+
+  // Create fix branch with an extra commit so it diverges from main
+  await $`git -C ${local} branch ${fixBranch}`;
+  await mkdir(fixWtDir, { recursive: true });
+  await $`git -C ${local} worktree add ${fixWorktree} ${fixBranch}`;
+  await $`git -C ${fixWorktree} config user.email "test@kova.dev"`;
+  await $`git -C ${fixWorktree} config user.name "Kova Test"`;
+  await writeFile(join(fixWorktree, 'fix.ts'), 'export const fix = true;\n');
+  await $`git -C ${fixWorktree} add fix.ts`;
+  await $`git -C ${fixWorktree} commit -m "fix commit on fix branch"`;
+
+  return { remote, local, fixWorktree, fixBranch, issueNumber };
+}
+
+describe('createSubWorktree', () => {
+  let repos: Awaited<ReturnType<typeof setupFixWorktree>>;
+  const subWorktrees: string[] = [];
+
+  beforeEach(async () => {
+    repos = await setupFixWorktree();
+    subWorktrees.length = 0;
+  });
+
+  afterEach(async () => {
+    for (const swt of subWorktrees) {
+      try {
+        await $`git -C ${repos.local} worktree remove ${swt} --force`;
+      } catch {
+        // best effort
+      }
+    }
+    try {
+      await $`git -C ${repos.local} worktree remove ${repos.fixWorktree} --force`;
+    } catch {
+      // best effort
+    }
+    await rm(join(repos.fixWorktree, '../..'), { recursive: true, force: true }).catch(() => {});
+  });
+
+  it('branches from the fix branch, not main', async () => {
+    const fixSha = (await $`git -C ${repos.fixWorktree} rev-parse HEAD`).stdout.trim();
+    const mainSha = (await $`git -C ${repos.local} rev-parse main`).stdout.trim();
+    expect(fixSha).not.toBe(mainSha);
+
+    const sub = await createSubWorktree(repos.fixWorktree, repos.issueNumber, 0);
+    subWorktrees.push(sub.path);
+
+    const subSha = (await $`git -C ${sub.path} rev-parse HEAD`).stdout.trim();
+    expect(subSha).toBe(fixSha);
+  });
+
+  it('uses deterministic branch naming: kova/fix-{issue}-piece-{index}', async () => {
+    const sub = await createSubWorktree(repos.fixWorktree, repos.issueNumber, 2);
+    subWorktrees.push(sub.path);
+
+    expect(sub.branch).toBe('kova/fix-42-piece-2');
+    const currentBranch = (await $`git -C ${sub.path} rev-parse --abbrev-ref HEAD`).stdout.trim();
+    expect(currentBranch).toBe('kova/fix-42-piece-2');
+  });
+
+  it('returns SubWorktree with path and branch', async () => {
+    const sub = await createSubWorktree(repos.fixWorktree, repos.issueNumber, 1);
+    subWorktrees.push(sub.path);
+
+    expect(sub).toHaveProperty('path');
+    expect(sub).toHaveProperty('branch');
+    expect(sub.path).toContain('fix-42-piece-1');
+    expect(sub.branch).toBe('kova/fix-42-piece-1');
+  });
+
+  it('handles resume case when sub-worktree already exists', async () => {
+    const sub1 = await createSubWorktree(repos.fixWorktree, repos.issueNumber, 0);
+    subWorktrees.push(sub1.path);
+
+    // Second call should not throw
+    const sub2 = await createSubWorktree(repos.fixWorktree, repos.issueNumber, 0);
+    expect(sub2.path).toBe(sub1.path);
+    expect(sub2.branch).toBe(sub1.branch);
+  });
+});
+
+describe('removeSubWorktree', () => {
+  let repos: Awaited<ReturnType<typeof setupFixWorktree>>;
+
+  beforeEach(async () => {
+    repos = await setupFixWorktree();
+  });
+
+  afterEach(async () => {
+    try {
+      await $`git -C ${repos.local} worktree remove ${repos.fixWorktree} --force`;
+    } catch {
+      // best effort
+    }
+    await rm(join(repos.fixWorktree, '../..'), { recursive: true, force: true }).catch(() => {});
+  });
+
+  it('removes the sub-worktree directory and deletes the branch', async () => {
+    const sub = await createSubWorktree(repos.fixWorktree, repos.issueNumber, 0);
+
+    await removeSubWorktree(repos.local, sub.path, sub.branch);
+
+    // Worktree directory should be gone
+    const { stat } = await import('node:fs/promises');
+    await expect(stat(sub.path)).rejects.toThrow();
+
+    // Branch should be gone
+    const branches = (await $`git -C ${repos.local} branch`).stdout;
+    expect(branches).not.toContain('kova/fix-42-piece-0');
+  });
+
+  it('handles already-removed worktree gracefully', async () => {
+    const sub = await createSubWorktree(repos.fixWorktree, repos.issueNumber, 0);
+    await $`git -C ${repos.local} worktree remove ${sub.path} --force`;
+
+    // Should not throw
+    await expect(removeSubWorktree(repos.local, sub.path, sub.branch)).resolves.toBeUndefined();
+  });
+
+  it('handles already-removed branch gracefully', async () => {
+    const sub = await createSubWorktree(repos.fixWorktree, repos.issueNumber, 0);
+    await $`git -C ${repos.local} worktree remove ${sub.path} --force`;
+    await $`git -C ${repos.local} branch -D ${sub.branch}`;
+
+    // Should not throw
+    await expect(removeSubWorktree(repos.local, sub.path, sub.branch)).resolves.toBeUndefined();
   });
 });
 
