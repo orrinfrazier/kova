@@ -8,6 +8,7 @@ export interface AutoOptions {
   config: RepoConfig;
   filter?: string | undefined;
   max?: number | undefined;
+  force?: boolean | undefined;
 }
 
 export interface AutoResult {
@@ -16,7 +17,7 @@ export interface AutoResult {
 }
 
 export async function runAuto(options: AutoOptions): Promise<AutoResult> {
-  const { repoPath, repoName, config, filter, max } = options;
+  const { repoPath, repoName, config, filter, max, force } = options;
   const autoConfig = config.auto;
 
   const resolvedFilter = filter ?? autoConfig?.filter;
@@ -34,6 +35,7 @@ export async function runAuto(options: AutoOptions): Promise<AutoResult> {
     config,
     filter: resolvedFilter,
     maxIssues: resolvedMax,
+    force,
   });
 
   const exitCode = loopResult.failed > 0 ? 1 : 0;
