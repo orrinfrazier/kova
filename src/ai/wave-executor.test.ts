@@ -1379,3 +1379,40 @@ describe('isAssistantMessage', () => {
     expect(isAssistantMessage({ role: 'assistant', content: [], usage: 'bad' })).toBe(false);
   });
 });
+
+describe('resolveApiKey', () => {
+  afterEach(() => {
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    delete process.env.GOOGLE_API_KEY;
+  });
+
+  it('returns ANTHROPIC_API_KEY for anthropic provider', async () => {
+    process.env.ANTHROPIC_API_KEY = 'sk-ant-test';
+    const { resolveApiKey } = await import('./wave-executor.js');
+    expect(resolveApiKey('anthropic')).toBe('sk-ant-test');
+  });
+
+  it('returns OPENAI_API_KEY for openai provider', async () => {
+    process.env.OPENAI_API_KEY = 'sk-openai-test';
+    const { resolveApiKey } = await import('./wave-executor.js');
+    expect(resolveApiKey('openai')).toBe('sk-openai-test');
+  });
+
+  it('returns GOOGLE_API_KEY for google provider', async () => {
+    process.env.GOOGLE_API_KEY = 'google-test-key';
+    const { resolveApiKey } = await import('./wave-executor.js');
+    expect(resolveApiKey('google')).toBe('google-test-key');
+  });
+
+  it('returns undefined when provider key is not set', async () => {
+    const { resolveApiKey } = await import('./wave-executor.js');
+    expect(resolveApiKey('openai')).toBeUndefined();
+  });
+
+  it('falls back to ANTHROPIC_API_KEY for unknown providers', async () => {
+    process.env.ANTHROPIC_API_KEY = 'sk-ant-fallback';
+    const { resolveApiKey } = await import('./wave-executor.js');
+    expect(resolveApiKey('some-unknown-provider')).toBe('sk-ant-fallback');
+  });
+});
