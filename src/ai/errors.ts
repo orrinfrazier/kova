@@ -12,7 +12,34 @@ export class KovaError extends Error {
 
 const RETRYABLE_PATTERNS = [/rate.?limit/i, /timeout/i, /429/, /5\d{2}/, /billing/i, /spending.?cap/i];
 
-const NON_RETRYABLE_PATTERNS = [/authentication/i, /permission.?denied/i, /invalid.?api/i];
+const NON_RETRYABLE_PATTERNS = [/authentication/i, /permission.?denied/i, /invalid.?api/i, /401/];
+
+export interface ErrorClassification {
+  type: KovaError['type'];
+  retryable: boolean;
+}
+
+/**
+ * Classify an error into a KovaError type and retryability.
+ * Handles: KovaError (pass-through), Error, string, or pi-mono errorMessage strings.
+ */
+export function classifyError(error: unknown): ErrorClassification {
+  if (error instanceof KovaError) {
+    return { type: error.type, retryable: error.retryable };
+  }
+
+  const message = error instanceof Error ? error.message : String(error);
+
+  for (const pattern of NON_RETRYABLE_PATTERNS) {
+    if (pattern.test(message)) return { type: 'config', retryable: false };
+  }
+
+  for (const pattern of RETRYABLE_PATTERNS) {
+    if (pattern.test(message)) return { type: 'billing', retryable: true };
+  }
+
+  return { type: 'unknown', retryable: false };
+}
 
 export function isRetryable(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
