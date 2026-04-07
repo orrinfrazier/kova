@@ -569,7 +569,11 @@ describe('per-wave cost cap (maxCostUsd)', () => {
         });
         subscribeCb?.({
           type: 'turn_end',
-          message: { role: 'assistant', usage: { cost: { total: turnCost } } },
+          message: {
+            role: 'assistant',
+            content: [{ type: 'text', text: 'working...' }],
+            usage: { input: 100, cost: { total: turnCost } },
+          },
         });
       }
     });
@@ -630,7 +634,9 @@ describe('per-wave cost cap (maxCostUsd)', () => {
         cwd: '/tmp/test',
         maxCostUsd: 1.0,
       });
-    } catch { /* expected */ }
+    } catch {
+      /* expected */
+    }
     expect(mockAbort).toHaveBeenCalled();
   });
 
@@ -1037,5 +1043,68 @@ describe('buildStructuredOutputInstructions', () => {
     const schema = { type: 'object', properties: { grade: { type: 'string' } } };
     const instructions = buildStructuredOutputInstructions(schema);
     expect(instructions).toContain('"grade"');
+  });
+});
+
+describe('isAssistantMessage', () => {
+  it('returns true for a valid assistant message', async () => {
+    const { isAssistantMessage } = await import('./wave-executor.js');
+    const msg = {
+      role: 'assistant',
+      content: [{ type: 'text', text: 'hello' }],
+      usage: {
+        input: 100,
+        output: 50,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 150,
+        cost: { input: 0.01, output: 0.005, cacheRead: 0, cacheWrite: 0, total: 0.015 },
+      },
+      stopReason: 'stop',
+      timestamp: Date.now(),
+    };
+    expect(isAssistantMessage(msg)).toBe(true);
+  });
+
+  it('returns false for a user message', async () => {
+    const { isAssistantMessage } = await import('./wave-executor.js');
+    expect(isAssistantMessage({ role: 'user', content: 'hi', timestamp: 0 })).toBe(false);
+  });
+
+  it('returns false for a tool result message', async () => {
+    const { isAssistantMessage } = await import('./wave-executor.js');
+    expect(isAssistantMessage({ role: 'toolResult', toolCallId: '1', content: [] })).toBe(false);
+  });
+
+  it('returns false for null', async () => {
+    const { isAssistantMessage } = await import('./wave-executor.js');
+    expect(isAssistantMessage(null)).toBe(false);
+  });
+
+  it('returns false for undefined', async () => {
+    const { isAssistantMessage } = await import('./wave-executor.js');
+    expect(isAssistantMessage(undefined)).toBe(false);
+  });
+
+  it('returns false for non-object values', async () => {
+    const { isAssistantMessage } = await import('./wave-executor.js');
+    expect(isAssistantMessage('assistant')).toBe(false);
+    expect(isAssistantMessage(42)).toBe(false);
+    expect(isAssistantMessage(true)).toBe(false);
+  });
+
+  it('returns false for object without role field', async () => {
+    const { isAssistantMessage } = await import('./wave-executor.js');
+    expect(isAssistantMessage({ content: [], usage: {} })).toBe(false);
+  });
+
+  it('validates content is an array', async () => {
+    const { isAssistantMessage } = await import('./wave-executor.js');
+    expect(isAssistantMessage({ role: 'assistant', content: 'not-array' })).toBe(false);
+  });
+
+  it('validates usage is an object', async () => {
+    const { isAssistantMessage } = await import('./wave-executor.js');
+    expect(isAssistantMessage({ role: 'assistant', content: [], usage: 'bad' })).toBe(false);
   });
 });
