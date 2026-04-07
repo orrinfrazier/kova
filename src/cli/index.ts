@@ -13,7 +13,7 @@
 import { resolve } from 'node:path';
 import { Command } from 'commander';
 import { validateModelConfig } from '../ai/index.js';
-import { runAuto, runAutoMultiRepo } from '../pipeline/auto.js';
+import { runAuto, runAutoMultiRepo, runAutoMultiRepoParallel } from '../pipeline/auto.js';
 import { brainstorm, printBrainstormPreview } from '../pipeline/brainstorm.js';
 import { fix } from '../pipeline/fix.js';
 import { indexCodebase } from '../pipeline/index-codebase.js';
@@ -198,18 +198,60 @@ program
   .option('--max <n>', 'Maximum issues to fix per repo (overrides config)')
   .option('--force', 'Override skip — re-fix issues with existing branches/PRs')
   .option('--repo <name-or-path>', 'Single repository name or path (skip multi-repo)')
-  .action(async (opts: { filter?: string; max?: string; force?: boolean; repo?: string }) => {
-    const kovaConfig = await tryLoadConfig(program.opts().config);
+  .option('--parallel-repos', 'Process repos concurrently (default: sequential)')
+  .option('--budget <usd>', 'Shared budget cap across all repos (USD)')
+  .action(
+    async (opts: {
+      filter?: string;
+      max?: string;
+      force?: boolean;
+      repo?: string;
+      parallelRepos?: boolean;
+      budget?: string;
+    }) => {
+      const kovaConfig = await tryLoadConfig(program.opts().config);
 
-    installSignalHandlers();
+      installSignalHandlers();
 
-    // If --repo specified or no config, run single-repo mode
-    if (opts.repo || !kovaConfig) {
-      const { repoPath, repoName, config } = resolveRepo(opts.repo ?? '.', kovaConfig);
-      const result = await runAuto({
-        repoPath,
-        repoName,
-        config,
+      // If --repo specified or no config, run single-repo mode
+      if (opts.repo || !kovaConfig) {
+        const { repoPath, repoName, config } = resolveRepo(opts.repo ?? '.', kovaConfig);
+        const result = await runAuto({
+          repoPath,
+          repoName,
+          config,
+          filter: opts.filter,
+          max: opts.max ? Number.parseInt(opts.max, 10) : undefined,
+          force: opts.force,
+        });
+        removeSignalHandlers();
+
+        if (shutdownRequested()) {
+          process.exit(exitCodeForSignal(getShutdownSignal()));
+        }
+        process.exit(result.exitCode);
+      }
+
+      // Multi-repo mode: parallel or sequential
+      if (opts.parallelRepos) {
+        const result = await runAutoMultiRepoParallel({
+          config: kovaConfig,
+          filter: opts.filter,
+          max: opts.max ? Number.parseInt(opts.max, 10) : undefined,
+          force: opts.force,
+          budgetUsd: opts.budget ? Number.parseFloat(opts.budget) : undefined,
+        });
+        removeSignalHandlers();
+
+        if (shutdownRequested()) {
+          process.exit(exitCodeForSignal(getShutdownSignal()));
+        }
+        process.exit(result.exitCode);
+      }
+
+      // Sequential multi-repo mode (default)
+      const result = await runAutoMultiRepo({
+        config: kovaConfig,
         filter: opts.filter,
         max: opts.max ? Number.parseInt(opts.max, 10) : undefined,
         force: opts.force,
@@ -220,22 +262,8 @@ program
         process.exit(exitCodeForSignal(getShutdownSignal()));
       }
       process.exit(result.exitCode);
-    }
-
-    // Multi-repo mode: iterate all repos in config order
-    const result = await runAutoMultiRepo({
-      config: kovaConfig,
-      filter: opts.filter,
-      max: opts.max ? Number.parseInt(opts.max, 10) : undefined,
-      force: opts.force,
-    });
-    removeSignalHandlers();
-
-    if (shutdownRequested()) {
-      process.exit(exitCodeForSignal(getShutdownSignal()));
-    }
-    process.exit(result.exitCode);
-  });
+    },
+  );
 
 program
   .command('brainstorm')

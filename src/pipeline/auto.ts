@@ -2,6 +2,8 @@ import { collectChangedFilesFromPRs, reindexFiles } from '../services/reindex.js
 import type { KovaConfig, RepoConfig } from '../types/index.js';
 import { log } from '../utils/logger.js';
 import { fixLoop, type LoopResult } from './loop.js';
+import { buildMultiRepoRunReport, printMultiRepoRunReport } from './run-report.js';
+import { createSharedBudget, type SharedBudgetTracker } from './shared-budget.js';
 
 export interface AutoOptions {
   repoPath: string;
@@ -10,6 +12,7 @@ export interface AutoOptions {
   filter?: string | undefined;
   max?: number | undefined;
   force?: boolean | undefined;
+  budgetTracker?: SharedBudgetTracker | undefined;
 }
 
 export interface AutoResult {
@@ -18,7 +21,7 @@ export interface AutoResult {
 }
 
 export async function runAuto(options: AutoOptions): Promise<AutoResult> {
-  const { repoPath, repoName, config, filter, max, force } = options;
+  const { repoPath, repoName, config, filter, max, force, budgetTracker } = options;
   const autoConfig = config.auto;
 
   const resolvedFilter = filter ?? autoConfig?.filter;
@@ -37,6 +40,7 @@ export async function runAuto(options: AutoOptions): Promise<AutoResult> {
     filter: resolvedFilter,
     maxIssues: resolvedMax,
     force,
+    budgetTracker,
   });
 
   const exitCode = loopResult.failed > 0 ? 1 : 0;
@@ -101,6 +105,118 @@ export async function runAutoMultiRepo(options: MultiRepoAutoOptions): Promise<M
   log.info(`\n[auto] Multi-repo complete: ${repoResults.length} repos processed, exit ${exitCode}`);
 
   return { exitCode, repoResults };
+}
+
+/* ------------------------------------------------------------------ */
+/*  Multi-repo parallel auto mode                                      */
+/* ------------------------------------------------------------------ */
+
+export interface MultiRepoParallelOptions {
+  config: KovaConfig;
+  filter?: string | undefined;
+  max?: number | undefined;
+  force?: boolean | undefined;
+  budgetUsd?: number | undefined;
+}
+
+interface ParallelRepoResult {
+  repoName: string;
+  loopResult: LoopResult;
+  error?: string | undefined;
+}
+
+export interface MultiRepoParallelResult {
+  exitCode: number;
+  repoResults: ParallelRepoResult[];
+  aggregated: {
+    totalCost: number;
+    succeeded: number;
+    failed: number;
+  };
+}
+
+/** Run auto mode across all repos concurrently. Each repo gets its own sequential fix queue. */
+export async function runAutoMultiRepoParallel(options: MultiRepoParallelOptions): Promise<MultiRepoParallelResult> {
+  const { config, filter, max, force, budgetUsd } = options;
+  const repoEntries = Object.entries(config.repos);
+
+  log.info(`[auto] Multi-repo parallel mode: ${repoEntries.length} repos`);
+
+  const budgetTracker = budgetUsd !== undefined ? createSharedBudget(budgetUsd) : undefined;
+  if (budgetTracker) {
+    log.info(`[auto] Shared budget cap: $${budgetTracker.limitUsd.toFixed(2)}`);
+  }
+
+  const settled = await Promise.allSettled(
+    repoEntries.map(async ([name, repoConfig]) => {
+      log.info(`[auto] Starting repo: ${name} (${repoConfig.path})`);
+      const result = await runAuto({
+        repoPath: repoConfig.path,
+        repoName: name,
+        config: repoConfig,
+        filter,
+        max,
+        force,
+        budgetTracker,
+      });
+      return { repoName: name, loopResult: result.loopResult };
+    }),
+  );
+
+  const repoResults: ParallelRepoResult[] = settled.map((s, i) => {
+    const repoName = repoEntries[i]?.[0] ?? 'unknown';
+    if (s.status === 'fulfilled') {
+      return s.value;
+    }
+    const errorMsg = s.reason instanceof Error ? s.reason.message : String(s.reason);
+    log.error(`[auto] Repo ${repoName} failed: ${errorMsg}`);
+    return {
+      repoName,
+      loopResult: emptyLoopResult(),
+      error: errorMsg,
+    };
+  });
+
+  const anyFailed = repoResults.some((r) => r.error !== undefined || r.loopResult.failed > 0);
+  const exitCode = anyFailed ? 1 : 0;
+
+  const aggregated = {
+    totalCost: repoResults.reduce((sum, r) => sum + r.loopResult.totalCost, 0),
+    succeeded: repoResults.reduce((sum, r) => sum + r.loopResult.succeeded, 0),
+    failed: repoResults.reduce((sum, r) => sum + r.loopResult.failed, 0),
+  };
+
+  // Print aggregated report
+  const validResults = repoResults
+    .filter((r) => r.error === undefined)
+    .map((r) => ({ repoName: r.repoName, loopResult: r.loopResult }));
+  if (validResults.length > 0) {
+    const report = buildMultiRepoRunReport(validResults);
+    printMultiRepoRunReport(report);
+  }
+
+  log.info(
+    `\n[auto] Multi-repo parallel complete: ${repoResults.length} repos, ` +
+      `${aggregated.succeeded} succeeded, ${aggregated.failed} failed, ` +
+      `$${aggregated.totalCost.toFixed(2)} total cost`,
+  );
+
+  return { exitCode, repoResults, aggregated };
+}
+
+function emptyLoopResult(): LoopResult {
+  return {
+    total: 0,
+    succeeded: 0,
+    failed: 0,
+    skipped: 0,
+    totalCost: 0,
+    totalTurns: 0,
+    totalDuration: 0,
+    budgetExceeded: false,
+    startedAt: new Date().toISOString(),
+    results: [],
+  };
 }
 
 /* ------------------------------------------------------------------ */
