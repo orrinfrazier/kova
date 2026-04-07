@@ -1217,3 +1217,36 @@ describe('ci_merge config field', () => {
     await expect(loadConfig(join(tempDir, 'repos.yaml'))).rejects.toThrow(ZodError);
   });
 });
+
+/* ------------------------------------------------------------------ */
+/*  prompts_dir config field                                            */
+/* ------------------------------------------------------------------ */
+
+describe('prompts_dir config', () => {
+  it('accepts prompts_dir as optional string', async () => {
+    const yaml = `repos:\n  my-repo:\n    path: /tmp/my-repo\n    prompts_dir: ./kova-prompts/\n`;
+    await writeFile(join(tempDir, 'repos.yaml'), yaml);
+
+    const config = await loadConfig(join(tempDir, 'repos.yaml'));
+    const repo = config.repos['my-repo'];
+    expect(repo).toBeDefined();
+    expect(repo?.prompts_dir).toBe('./kova-prompts/');
+  });
+
+  it('defaults prompts_dir to undefined when not specified', async () => {
+    const yaml = `repos:\n  my-repo:\n    path: /tmp/my-repo\n`;
+    await writeFile(join(tempDir, 'repos.yaml'), yaml);
+
+    const config = await loadConfig(join(tempDir, 'repos.yaml'));
+    const repo = config.repos['my-repo'];
+    expect(repo).toBeDefined();
+    expect(repo?.prompts_dir).toBeUndefined();
+  });
+
+  it('rejects non-string prompts_dir', async () => {
+    const yaml = `repos:\n  my-repo:\n    path: /tmp/my-repo\n    prompts_dir:\n      - a\n      - b\n`;
+    await writeFile(join(tempDir, 'repos.yaml'), yaml);
+
+    await expect(loadConfig(join(tempDir, 'repos.yaml'))).rejects.toThrow(ZodError);
+  });
+});
