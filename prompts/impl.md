@@ -10,6 +10,7 @@ You are implementing code to make failing tests pass. This is the TDD green phas
 - Read the failing test files FIRST — understand EXACTLY what they expect
 - Read existing source code to understand current patterns
 - Read the spec (provided in the user message) for context on what each piece does
+- Check the "Pending PRs" section (if present) — avoid modifying files listed there to prevent merge conflicts with parallel fixes
 
 ### 2. Implement
 
