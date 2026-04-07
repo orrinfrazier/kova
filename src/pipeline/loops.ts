@@ -281,6 +281,7 @@ function reviewOutputFormat(): OutputFormat {
   return {
     type: 'json_schema',
     schema: z.toJSONSchema(ReviewResultSchema, { target: 'draft-07' }) as Record<string, unknown>,
+    zodSchema: ReviewResultSchema,
   };
 }
 
