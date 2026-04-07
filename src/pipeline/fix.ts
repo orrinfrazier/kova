@@ -3,7 +3,7 @@
 // and runReviewLoop() for review. Handoffs persist after every wave.
 
 import { z } from 'zod';
-import { getWaveTools, type OutputFormat, resolveModel, spawnWaveAgent } from '../ai/index.js';
+import { type AIWaveName, getWaveTools, type OutputFormat, resolveModel, spawnWaveAgent } from '../ai/index.js';
 import { clearCheckpoint, loadCheckpoint, saveCheckpoint } from '../services/checkpoint.js';
 import { commentOnIssue, createPR, listOpenPRs } from '../services/github.js';
 import { formatPRContext, type OpenPR } from '../services/pr-context.js';
@@ -59,13 +59,13 @@ export interface FixResult {
 
 /** Spawn a wave agent directly via spawnWaveAgent — no backward-compat wrapper. */
 async function spawnWave<T>(
-  wave: WaveName,
+  wave: AIWaveName,
   workDir: string,
   config: RepoConfig,
   userMessage: string,
   outputFormat?: OutputFormat,
 ): Promise<WaveHandoff<T>> {
-  const model = resolveModel(wave === 'ship' ? 'small' : config.model[wave]);
+  const model = resolveModel(config.model[wave]);
   const tools = getWaveTools(wave, workDir);
   const systemPrompt = await loadPrompt(wave);
   return spawnWaveAgent<T>({

@@ -11,7 +11,7 @@ import type { ModelTier, WaveHandoff, WaveName } from '../types/index.js';
 import { log } from '../utils/logger.js';
 import { classifyError, isSpendingCapBehavior, KovaError } from './errors.js';
 import { resolveModel, resolveModelFromString } from './models.js';
-import { DEFAULT_THINKING_LEVELS, getWaveTools } from './wave-tools.js';
+import { type AIWaveName, DEFAULT_THINKING_LEVELS, getWaveTools } from './wave-tools.js';
 
 export interface OutputFormat {
   type: 'json_schema';
@@ -296,7 +296,7 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
 // --- Backward-compat wrapper ---
 
 export interface WaveOptions {
-  wave: WaveName;
+  wave: AIWaveName;
   systemPrompt: string;
   userMessage: string;
   cwd: string;
