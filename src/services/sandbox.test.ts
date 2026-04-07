@@ -295,6 +295,61 @@ describe('buildRunArgs', () => {
     expect(args[envIdx + 1]).toMatch(/^ANTHROPIC_API_KEY=/);
   });
 
+  it('passes OPENAI_API_KEY as env var when set', () => {
+    process.env.OPENAI_API_KEY = 'sk-openai-test';
+    const args = buildRunArgs({
+      repoName: 'my-repo',
+      issueNumber: 42,
+      repoPath: '/tmp/my-repo',
+      imageTag: 'kova-sandbox-my-repo:latest',
+    });
+
+    const envArgs = args.filter((_, i) => i > 0 && args[i - 1] === '-e');
+    expect(envArgs).toContainEqual('OPENAI_API_KEY=sk-openai-test');
+    delete process.env.OPENAI_API_KEY;
+  });
+
+  it('passes GEMINI_API_KEY as env var when set', () => {
+    process.env.GEMINI_API_KEY = 'gemini-test-key';
+    const args = buildRunArgs({
+      repoName: 'my-repo',
+      issueNumber: 42,
+      repoPath: '/tmp/my-repo',
+      imageTag: 'kova-sandbox-my-repo:latest',
+    });
+
+    const envArgs = args.filter((_, i) => i > 0 && args[i - 1] === '-e');
+    expect(envArgs).toContainEqual('GEMINI_API_KEY=gemini-test-key');
+    delete process.env.GEMINI_API_KEY;
+  });
+
+  it('falls back to GOOGLE_API_KEY for GEMINI_API_KEY in sandbox', () => {
+    process.env.GOOGLE_API_KEY = 'google-fallback-key';
+    const args = buildRunArgs({
+      repoName: 'my-repo',
+      issueNumber: 42,
+      repoPath: '/tmp/my-repo',
+      imageTag: 'kova-sandbox-my-repo:latest',
+    });
+
+    const envArgs = args.filter((_, i) => i > 0 && args[i - 1] === '-e');
+    expect(envArgs).toContainEqual('GEMINI_API_KEY=google-fallback-key');
+    delete process.env.GOOGLE_API_KEY;
+  });
+
+  it('omits OPENAI_API_KEY when not set', () => {
+    delete process.env.OPENAI_API_KEY;
+    const args = buildRunArgs({
+      repoName: 'my-repo',
+      issueNumber: 42,
+      repoPath: '/tmp/my-repo',
+      imageTag: 'kova-sandbox-my-repo:latest',
+    });
+
+    const envArgs = args.filter((_, i) => i > 0 && args[i - 1] === '-e');
+    expect(envArgs.some((a) => a.startsWith('OPENAI_API_KEY='))).toBe(false);
+  });
+
   it('mounts kova root at /app when kovaRoot is provided', () => {
     const args = buildRunArgs({
       repoName: 'my-repo',

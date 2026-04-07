@@ -56,7 +56,17 @@ export function buildRunArgs(opts: {
   const cpus = opts.config?.cpus ?? DEFAULT_SANDBOX_LIMITS.cpus;
   const memory = opts.config?.memory ?? DEFAULT_SANDBOX_LIMITS.memory;
   const name = containerName(opts.repoName, opts.issueNumber);
-  const apiKey = process.env.ANTHROPIC_API_KEY ?? '';
+  const anthropicKey = process.env.ANTHROPIC_API_KEY ?? '';
+
+  // Collect API keys — always pass ANTHROPIC_API_KEY, conditionally pass others
+  const envFlags = ['-e', `ANTHROPIC_API_KEY=${anthropicKey}`];
+  if (process.env.OPENAI_API_KEY) {
+    envFlags.push('-e', `OPENAI_API_KEY=${process.env.OPENAI_API_KEY}`);
+  }
+  const googleKey = process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY;
+  if (googleKey) {
+    envFlags.push('-e', `GEMINI_API_KEY=${googleKey}`);
+  }
 
   return [
     'run',
@@ -70,8 +80,7 @@ export function buildRunArgs(opts: {
     '-v',
     `${opts.repoPath}:/workspace`,
     ...(opts.kovaRoot ? ['-v', `${opts.kovaRoot}:/app:ro`] : []),
-    '-e',
-    `ANTHROPIC_API_KEY=${apiKey}`,
+    ...envFlags,
     '-w',
     '/workspace',
     ...(opts.config?.restrict_network ? ['--network', 'none'] : []),
