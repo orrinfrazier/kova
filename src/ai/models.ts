@@ -2,6 +2,7 @@ import { getModel, getProviders, type Model, registerBuiltInApiProviders } from 
 import type { ModelTier, OllamaProvider, WaveModelConfig } from '../types/index.js';
 import { KovaError } from './errors.js';
 import { createOllamaModel, isOllamaProvider } from './ollama.js';
+import { createRouterModel, isRouterEnabled, isRouterProvider } from './router.js';
 
 const DEFAULT_MODELS: Readonly<Record<ModelTier, string>> = {
   small: 'claude-haiku-4-5-20251001',
@@ -98,8 +99,8 @@ export function parseModelSpec(modelString: string): ModelSpec {
   const colonIndex = modelString.indexOf(':');
   if (colonIndex > 0) {
     const candidate = modelString.slice(0, colonIndex);
-    // Ollama is not a pi-ai built-in provider — handle it explicitly
-    if (isOllamaProvider(candidate) || knownProviders().has(candidate)) {
+    // Ollama and router are not pi-ai built-in providers — handle explicitly
+    if (isOllamaProvider(candidate) || isRouterProvider(candidate) || knownProviders().has(candidate)) {
       return { provider: candidate, modelId: modelString.slice(colonIndex + 1) };
     }
   }
@@ -120,6 +121,11 @@ export function resolveModelFromString(modelString: string): Model<string> {
     return createOllamaModel(modelId);
   }
 
+  // Router models proxy through claude-code-router
+  if (isRouterProvider(provider)) {
+    return createRouterModel(modelId);
+  }
+
   const model = getModel(provider as Parameters<typeof getModel>[0], modelId as Parameters<typeof getModel>[1]);
   if (!model) {
     throw new KovaError(`Unknown model: ${provider}:${modelId}`, 'config', false);
@@ -134,14 +140,24 @@ export function resolveModel(tier: ModelTier = 'medium'): Model<string> {
 }
 
 function resolveModelString(tier: ModelTier): string {
+  let base: string;
   switch (tier) {
     case 'small':
-      return process.env.KOVA_SMALL_MODEL ?? DEFAULT_MODELS.small;
+      base = process.env.KOVA_SMALL_MODEL ?? DEFAULT_MODELS.small;
+      break;
     case 'large':
-      return process.env.KOVA_LARGE_MODEL ?? DEFAULT_MODELS.large;
+      base = process.env.KOVA_LARGE_MODEL ?? DEFAULT_MODELS.large;
+      break;
     default:
-      return process.env.KOVA_MEDIUM_MODEL ?? DEFAULT_MODELS.medium;
+      base = process.env.KOVA_MEDIUM_MODEL ?? DEFAULT_MODELS.medium;
+      break;
   }
+
+  // When router is active and the model has no explicit provider prefix, route through router
+  if (isRouterEnabled() && !base.includes(':')) {
+    return `router:${base}`;
+  }
+  return base;
 }
 
 /** Resolve a WaveModelConfig (tier string or {provider, model} override) to a Model. */

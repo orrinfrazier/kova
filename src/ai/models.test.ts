@@ -7,6 +7,8 @@ const ENV_KEYS = [
   'KOVA_LARGE_MODEL',
   'KOVA_OLLAMA_URL',
   'OLLAMA_HOST',
+  'ANTHROPIC_BASE_URL',
+  'ROUTER_DEFAULT',
 ] as const;
 
 describe('models', () => {
@@ -426,6 +428,113 @@ describe('models', () => {
     it('identifies google as non-local (API)', async () => {
       const { isLocalProvider } = await import('./models.js');
       expect(isLocalProvider('google')).toBe(false);
+    });
+  });
+
+  describe('router model resolution', () => {
+    it('parseModelSpec returns router provider for router: prefix', async () => {
+      const { parseModelSpec } = await import('./models.js');
+
+      const spec = parseModelSpec('router:some-model');
+      expect(spec).toEqual({ provider: 'router', modelId: 'some-model' });
+    });
+
+    it('parseModelSpec returns router provider for router: prefix with slash-scoped model', async () => {
+      const { parseModelSpec } = await import('./models.js');
+
+      const spec = parseModelSpec('router:claude-sonnet-4-6');
+      expect(spec).toEqual({ provider: 'router', modelId: 'claude-sonnet-4-6' });
+    });
+
+    it('resolveModelFromString returns a Model with provider === router for router: prefix', async () => {
+      const { resolveModelFromString } = await import('./models.js');
+
+      const model = resolveModelFromString('router:some-model');
+      expect(model.provider).toBe('router');
+    });
+
+    it('resolveModelFromString router model retains the modelId as its id', async () => {
+      const { resolveModelFromString } = await import('./models.js');
+
+      const model = resolveModelFromString('router:some-model');
+      expect(model.id).toBe('some-model');
+    });
+
+    it('parseModelSpec does not intercept openai: prefix as router', async () => {
+      const { parseModelSpec } = await import('./models.js');
+
+      const spec = parseModelSpec('openai:gpt-4o');
+      expect(spec.provider).toBe('openai');
+      expect(spec.modelId).toBe('gpt-4o');
+    });
+
+    it('resolveModelFromString does not route openai: prefix through router', async () => {
+      const { resolveModelFromString } = await import('./models.js');
+
+      const model = resolveModelFromString('openai:gpt-4o');
+      expect(model.provider).toBe('openai');
+    });
+  });
+
+  describe('router mode (ANTHROPIC_BASE_URL active)', () => {
+    it('resolveModel medium returns router provider when ANTHROPIC_BASE_URL is set', async () => {
+      process.env.ANTHROPIC_BASE_URL = 'http://router.example.com';
+      const { resolveModel } = await import('./models.js');
+
+      const model = resolveModel('medium');
+      expect(model.provider).toBe('router');
+    });
+
+    it('resolveModel medium router model baseUrl points to the router endpoint', async () => {
+      process.env.ANTHROPIC_BASE_URL = 'http://router.example.com';
+      const { resolveModel } = await import('./models.js');
+
+      const model = resolveModel('medium');
+      expect(model.baseUrl).toBe('http://router.example.com');
+    });
+
+    it('resolveModel small returns router provider when ANTHROPIC_BASE_URL is set', async () => {
+      process.env.ANTHROPIC_BASE_URL = 'http://router.example.com';
+      const { resolveModel } = await import('./models.js');
+
+      const model = resolveModel('small');
+      expect(model.provider).toBe('router');
+    });
+
+    it('resolveModel large returns router provider when ANTHROPIC_BASE_URL is set', async () => {
+      process.env.ANTHROPIC_BASE_URL = 'http://router.example.com';
+      const { resolveModel } = await import('./models.js');
+
+      const model = resolveModel('large');
+      expect(model.provider).toBe('router');
+    });
+
+    it('resolveModel medium returns default anthropic model when ANTHROPIC_BASE_URL is not set', async () => {
+      delete process.env.ANTHROPIC_BASE_URL;
+      const { resolveModel } = await import('./models.js');
+
+      const model = resolveModel('medium');
+      expect(model.provider).toBe('anthropic');
+      expect(model.id).toBe('claude-sonnet-4-6');
+    });
+
+    it('explicit openai: prefix is not intercepted by router mode even when ANTHROPIC_BASE_URL is set', async () => {
+      process.env.ANTHROPIC_BASE_URL = 'http://router.example.com';
+      process.env.KOVA_MEDIUM_MODEL = 'openai:gpt-4o';
+      const { resolveModel } = await import('./models.js');
+
+      const model = resolveModel('medium');
+      expect(model.provider).toBe('openai');
+      expect(model.id).toBe('gpt-4o');
+    });
+
+    it('explicit anthropic: prefix is not intercepted by router mode when ANTHROPIC_BASE_URL is set', async () => {
+      process.env.ANTHROPIC_BASE_URL = 'http://router.example.com';
+      process.env.KOVA_MEDIUM_MODEL = 'anthropic:claude-opus-4-6';
+      const { resolveModel } = await import('./models.js');
+
+      const model = resolveModel('medium');
+      expect(model.provider).toBe('anthropic');
     });
   });
 });
