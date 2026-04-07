@@ -1,8 +1,6 @@
 # kova
 
-Autonomous code agent — brainstorm issues, fix them, ship PRs.
-
-*Kova* means "forge" in Finnish. Issues go in, PRs come out.
+Autonomous code agent — brainstorm issues, fix them, ship PRs. Issues go in, PRs come out.
 
 ## What it does
 
