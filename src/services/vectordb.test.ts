@@ -1,13 +1,16 @@
 import type { Mock } from 'vitest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { VectorDBConfig } from '../types/config.js';
+import type { EpisodicMemoryConfig, VectorDBConfig } from '../types/config.js';
 import {
   type CodeChunk,
   createVectorDBClient,
+  type EpisodeContext,
   formatCodeChunks,
+  formatEpisodes,
   insertEpisode,
   queryCodeContext,
   queryCodeEmbeddings,
+  queryEpisodeContext,
   queryEpisodes,
   queryPatterns,
   runMigration,
@@ -178,6 +181,165 @@ describe('formatCodeChunks', () => {
     const result = formatCodeChunks(chunks);
     expect(result).toContain('src/utils.ts');
     expect(result).not.toContain('undefined');
+  });
+});
+
+/* ================================================================== */
+/*  Episodic memory REST client tests                                  */
+/* ================================================================== */
+
+const sampleEpisodes: EpisodeContext[] = [
+  {
+    issue_number: 10,
+    issue_title: 'Fix token expiry handling',
+    approach: 'Added TTL check in auth middleware',
+    outcome: 'success',
+    learnings: 'Token refresh must happen before the API call, not after',
+    score: 0.91,
+  },
+  {
+    issue_number: 7,
+    issue_title: 'Refactor session store',
+    approach: 'Tried replacing in-memory store with Redis',
+    outcome: 'partial',
+    learnings: 'Redis worked for sessions but broke websocket state — keep ws state in-memory',
+    score: 0.78,
+  },
+  {
+    issue_number: 3,
+    issue_title: 'Add rate limiting',
+    approach: 'Used sliding window algorithm',
+    outcome: 'failure',
+    learnings: 'Sliding window was too expensive — use token bucket instead',
+    score: 0.65,
+  },
+];
+
+function makeEpisodeConfig(overrides?: Partial<EpisodicMemoryConfig>): EpisodicMemoryConfig {
+  return {
+    enabled: true,
+    endpoint: ENDPOINT,
+    max_episodes: 3,
+    ...overrides,
+  };
+}
+
+describe('queryEpisodeContext', () => {
+  it('returns episodes from endpoint', async () => {
+    mockFetch.mockResolvedValueOnce(mockJsonResponse({ episodes: sampleEpisodes }));
+
+    const episodes = await queryEpisodeContext(makeEpisodeConfig(), 'fix token bug');
+
+    expect(episodes).toHaveLength(3);
+    expect(episodes[0]?.issue_title).toBe('Fix token expiry handling');
+    expect(episodes[0]?.score).toBe(0.91);
+  });
+
+  it('sends query and max_episodes in POST body', async () => {
+    mockFetch.mockResolvedValueOnce(mockJsonResponse({ episodes: [] }));
+
+    await queryEpisodeContext(makeEpisodeConfig({ max_episodes: 2 }), 'search query');
+
+    expect(mockFetch).toHaveBeenCalledOnce();
+    const [url, init] = mockFetch.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(ENDPOINT);
+    expect(init.method).toBe('POST');
+    const body = JSON.parse(init.body as string) as { query: string; top_k: number };
+    expect(body.query).toBe('search query');
+    expect(body.top_k).toBe(2);
+  });
+
+  it('returns empty array when disabled', async () => {
+    const episodes = await queryEpisodeContext(makeEpisodeConfig({ enabled: false }), 'query');
+
+    expect(episodes).toEqual([]);
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('returns empty array on network error (graceful degradation)', async () => {
+    mockFetch.mockRejectedValueOnce(new Error('ECONNREFUSED'));
+
+    const episodes = await queryEpisodeContext(makeEpisodeConfig(), 'query');
+
+    expect(episodes).toEqual([]);
+  });
+
+  it('returns empty array on non-200 response', async () => {
+    mockFetch.mockResolvedValueOnce(mockJsonResponse({ error: 'fail' }, 500));
+
+    const episodes = await queryEpisodeContext(makeEpisodeConfig(), 'query');
+
+    expect(episodes).toEqual([]);
+  });
+
+  it('returns empty array on malformed response', async () => {
+    mockFetch.mockResolvedValueOnce(mockJsonResponse({ wrong: 'shape' }));
+
+    const episodes = await queryEpisodeContext(makeEpisodeConfig(), 'query');
+
+    expect(episodes).toEqual([]);
+  });
+
+  it('caps results at max_episodes', async () => {
+    const base = sampleEpisodes[0] as EpisodeContext;
+    const manyEpisodes = Array.from({ length: 5 }, (_, i) => ({
+      ...base,
+      issue_number: i + 1,
+      score: 0.9 - i * 0.05,
+    }));
+    mockFetch.mockResolvedValueOnce(mockJsonResponse({ episodes: manyEpisodes }));
+
+    const episodes = await queryEpisodeContext(makeEpisodeConfig({ max_episodes: 3 }), 'query');
+
+    expect(episodes).toHaveLength(3);
+  });
+
+  it('returns empty array when endpoint is missing', async () => {
+    const episodes = await queryEpisodeContext(makeEpisodeConfig({ endpoint: undefined }), 'query');
+
+    expect(episodes).toEqual([]);
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+});
+
+describe('formatEpisodes', () => {
+  it('formats episodes with issue titles and learnings', () => {
+    const result = formatEpisodes(sampleEpisodes);
+
+    expect(result).toContain('## Learnings from similar past issues');
+    expect(result).toContain('#10: Fix token expiry handling');
+    expect(result).toContain('Token refresh must happen before the API call');
+    expect(result).toContain('#7: Refactor session store');
+    expect(result).toContain('Redis worked for sessions but broke websocket state');
+  });
+
+  it('includes approach and outcome', () => {
+    const result = formatEpisodes(sampleEpisodes);
+
+    expect(result).toContain('Added TTL check in auth middleware');
+    expect(result).toContain('success');
+    expect(result).toContain('failure');
+  });
+
+  it('returns empty string for empty episodes', () => {
+    expect(formatEpisodes([])).toBe('');
+  });
+
+  it('orders episodes by score descending', () => {
+    const [ep0, ep1, ep2] = sampleEpisodes as [EpisodeContext, EpisodeContext, EpisodeContext];
+    const unordered: EpisodeContext[] = [
+      { ...ep2, score: 0.5 },
+      { ...ep0, score: 0.95 },
+      { ...ep1, score: 0.7 },
+    ];
+
+    const result = formatEpisodes(unordered);
+    const highIdx = result.indexOf('#10');
+    const midIdx = result.indexOf('#7');
+    const lowIdx = result.indexOf('#3');
+
+    expect(highIdx).toBeLessThan(midIdx);
+    expect(midIdx).toBeLessThan(lowIdx);
   });
 });
 

@@ -339,6 +339,74 @@ describe('buildWaveContext', () => {
       expect(ctx).not.toContain('Relevant code from the codebase');
     });
   });
+
+  describe('episodic context (past learnings)', () => {
+    const episodicContext =
+      '## Learnings from similar past issues\n\n### #10: Fix token expiry handling\n- **Approach:** Added TTL check\n- **Outcome:** success\n- **Learning:** Token refresh must happen before the API call';
+
+    it('injects episodic context into assess wave', () => {
+      const ctx = buildWaveContext('assess', makeIssue(), {}, { episodicContext });
+      expect(ctx).toContain('Learnings from similar past issues');
+      expect(ctx).toContain('#10: Fix token expiry handling');
+    });
+
+    it('injects episodic context into spec wave', () => {
+      const handoffs: Partial<Record<string, WaveResult>> = {
+        assess: makeWaveResult('assess', assessArtifact),
+      };
+      const ctx = buildWaveContext('spec', makeIssue(), handoffs, { episodicContext });
+      expect(ctx).toContain('Learnings from similar past issues');
+    });
+
+    it('does NOT inject episodic context into test wave', () => {
+      const handoffs: Partial<Record<string, WaveResult>> = {
+        spec: makeWaveResult('spec', specArtifact),
+      };
+      const ctx = buildWaveContext('test', makeIssue(), handoffs, { episodicContext });
+      expect(ctx).not.toContain('Learnings from similar past issues');
+    });
+
+    it('does NOT inject episodic context into impl wave', () => {
+      const handoffs: Partial<Record<string, WaveResult>> = {
+        spec: makeWaveResult('spec', specArtifact),
+      };
+      const ctx = buildWaveContext('impl', makeIssue(), handoffs, { episodicContext });
+      expect(ctx).not.toContain('Learnings from similar past issues');
+    });
+
+    it('does NOT inject episodic context into quality wave', () => {
+      const ctx = buildWaveContext('quality', makeIssue(), {}, { episodicContext });
+      expect(ctx).not.toContain('Learnings from similar past issues');
+    });
+
+    it('does NOT inject episodic context into review wave', () => {
+      const handoffs: Partial<Record<string, WaveResult>> = {
+        spec: makeWaveResult('spec', specArtifact),
+        quality: makeWaveResult('quality', qualityArtifact),
+      };
+      const ctx = buildWaveContext('review', makeIssue(), handoffs, { episodicContext });
+      expect(ctx).not.toContain('Learnings from similar past issues');
+    });
+
+    it('omits episodic section when not provided', () => {
+      const ctx = buildWaveContext('assess', makeIssue(), {});
+      expect(ctx).not.toContain('Learnings from similar past issues');
+    });
+  });
+
+  describe('assess wave', () => {
+    it('includes issue title and body', () => {
+      const ctx = buildWaveContext('assess', makeIssue(), {});
+      expect(ctx).toContain('Issue #42: Fix the login bug');
+      expect(ctx).toContain('Users get 500 when token expires');
+    });
+
+    it('includes labels', () => {
+      const ctx = buildWaveContext('assess', makeIssue(), {});
+      expect(ctx).toContain('bug');
+      expect(ctx).toContain('auth');
+    });
+  });
 });
 
 describe('estimateTokens', () => {
