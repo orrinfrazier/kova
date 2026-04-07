@@ -25,6 +25,10 @@ vi.mock('../services/metrics.js', () => ({
   recordFixDuration: (...args: unknown[]) => mockRecordFixDuration(...args),
   recordFixCost: (...args: unknown[]) => mockRecordFixCost(...args),
   setCurrentCostUsd: (...args: unknown[]) => mockSetCurrentCostUsd(...args),
+  recordRebaseAttempt: vi.fn(),
+  recordConflictDetected: vi.fn(),
+  recordConflictResolved: vi.fn(),
+  recordConflictFailed: vi.fn(),
   serialize: vi.fn().mockReturnValue(''),
   reset: vi.fn(),
 }));
@@ -118,8 +122,14 @@ vi.mock('../services/worktree.js', async (importOriginal) => {
       filesStaged: ['src/fix.ts'],
       commitMessage: 'fix: Test issue (#42)',
     }),
+    detectDefaultBranch: vi.fn().mockResolvedValue('main'),
+    rebaseOnDefault: vi.fn().mockResolvedValue({ success: true, conflicted: false }),
   };
 });
+
+vi.mock('../services/conflict-resolver.js', () => ({
+  resolveConflicts: vi.fn().mockResolvedValue({ resolved: true, filesResolved: [] }),
+}));
 
 const mockProgressStart = vi.fn().mockResolvedValue(undefined);
 const mockProgressWaveCompleted = vi.fn().mockResolvedValue(undefined);

@@ -68,8 +68,13 @@ vi.mock('../services/worktree.js', async (importOriginal) => {
     createWorktree: (...args: unknown[]) => mockCreateWorktree(...args),
     removeWorktree: (...args: unknown[]) => mockRemoveWorktree(...args),
     commitAndPush: (...args: unknown[]) => mockCommitAndPush(...args),
+    rebaseOnDefault: vi.fn().mockResolvedValue({ success: true, conflicted: false }),
   };
 });
+
+vi.mock('../services/conflict-resolver.js', () => ({
+  resolveConflicts: vi.fn().mockResolvedValue({ resolved: true, filesResolved: [] }),
+}));
 
 const { fix } = await import('../pipeline/fix.js');
 const { loadCheckpoint } = await import('../services/checkpoint.js');
