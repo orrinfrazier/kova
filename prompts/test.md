@@ -6,7 +6,6 @@ You are writing failing tests for the TDD red phase. Tests define correct behavi
 
 ### 1. Read Context
 
-- Read CLAUDE.md for testing conventions
 - Read the spec (provided in the user message) to understand acceptance criteria
 - Read existing test files to match conventions (file naming, imports, assertion style)
 - Read the affected source files to understand current behavior and patterns
@@ -46,3 +45,7 @@ Run the tests after writing them:
 - Do NOT modify existing source files (only test files)
 - Tests are ground truth — they define correct behavior
 - Read the codebase and existing tests before writing anything
+
+## Project Conventions
+
+{{CLAUDE_MD}}

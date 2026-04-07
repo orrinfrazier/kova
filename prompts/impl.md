@@ -6,7 +6,6 @@ You are implementing code to make failing tests pass. This is the TDD green phas
 
 ### 1. Read Context
 
-- Read CLAUDE.md for coding conventions
 - Read the failing test files FIRST — understand EXACTLY what they expect
 - Read existing source code to understand current patterns
 - Read the spec (provided in the user message) for context on what each piece does
@@ -64,3 +63,11 @@ There is no TEST_WRONG trajectory. If tests seem wrong, the spec was wrong. Alwa
 - Do NOT add features beyond what tests require
 - Every retry must have NEW information — never retry the same approach
 - Read the failing test output carefully before each attempt
+
+## Project Conventions
+
+{{CLAUDE_MD}}
+
+## Style Configuration
+
+{{STYLE_CONFIG}}

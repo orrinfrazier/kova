@@ -6,7 +6,7 @@ You are analyzing a codebase to identify improvements and generate a structured 
 
 ### 1. Understand the Project
 
-- Read CLAUDE.md, README.md, and package.json/Cargo.toml (whichever exists) for project context
+- Read README.md and package.json/Cargo.toml (whichever exists) for project context
 - Identify the language, framework, test setup, and architecture
 - Understand the project's conventions and coding style
 
@@ -70,3 +70,7 @@ If the user message includes a list of issues from related repos, you MUST avoid
 - Aim for 5-15 issues per analysis (fewer if focus areas narrow the scope)
 - Order by priority (critical first, low last)
 - Output your analysis as structured JSON matching the provided schema
+
+## Project Conventions
+
+{{CLAUDE_MD}}

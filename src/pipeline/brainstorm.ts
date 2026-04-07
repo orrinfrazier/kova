@@ -16,6 +16,7 @@ import {
   loadHistory,
 } from '../services/brainstorm-history.js';
 import { type CrossRepoConfig, fetchCrossRepoIssues, formatCrossRepoContext } from '../services/cross-repo-issues.js';
+import { loadProjectContext } from '../services/project-context.js';
 import type { BrainstormIssue, BrainstormResult, RepoConfig } from '../types/index.js';
 import { BrainstormResultSchema } from '../types/index.js';
 import { log } from '../utils/logger.js';
@@ -55,7 +56,8 @@ export async function brainstorm(options: BrainstormOptions): Promise<Brainstorm
 
   const model = resolveWaveModel(config.model.brainstorm);
   const tools = getWaveTools('brainstorm', repoPath);
-  const systemPrompt = await loadPrompt('brainstorm');
+  const projectContext = await loadProjectContext(repoPath);
+  const systemPrompt = await loadPrompt('brainstorm', undefined, projectContext);
   const thinkingLevel = resolveThinkingLevel(config, 'brainstorm');
 
   const focusAreas = focus ?? config.rules.focus;

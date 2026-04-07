@@ -84,7 +84,18 @@ Files modified by auto-fix: (list or "none")
 
 ## Rules
 
-- Read CLAUDE.md for project-specific quality commands before running anything
 - Fix issues inline when possible — do not just report them
 - Re-run tests after any auto-fix to catch regressions
 - Report concisely — raw output stays in the terminal, not in the summary
+
+## Project Conventions
+
+{{CLAUDE_MD}}
+
+## Style Configuration
+
+{{STYLE_CONFIG}}
+
+## CI Configuration
+
+{{CI_CONFIG}}

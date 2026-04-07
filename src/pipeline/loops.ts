@@ -10,6 +10,7 @@ import { promisify } from 'node:util';
 import { z } from 'zod';
 import { executeWaveWithRetry, type OutputFormat, resolveThinkingLevel } from '../ai/index.js';
 import { detectTooling } from '../services/language-detect.js';
+import type { ProjectContext } from '../services/project-context.js';
 import type {
   Issue,
   RepoConfig,
@@ -53,6 +54,7 @@ export interface TILoopConfig {
   testCommand?: string;
   prContext?: string;
   codebaseContext?: string;
+  projectContext?: ProjectContext | undefined;
   testRunner?: TestRunner;
   diffRunner?: DiffRunner;
 }
@@ -80,6 +82,7 @@ export interface ReviewLoopConfig {
   testRunner?: TestRunner;
   fileWriter?: FileWriter;
   prContext?: string;
+  projectContext?: ProjectContext | undefined;
   playwright?: { enabled: boolean } | undefined;
   reviewFeedbackContext?: string;
 }
@@ -101,6 +104,7 @@ export interface PieceTILoopConfig {
   repoConfig: RepoConfig;
   maxRetries?: number | undefined;
   testCommand?: string | undefined;
+  projectContext?: ProjectContext | undefined;
   testRunner?: TestRunner | undefined;
   diffRunner?: DiffRunner | undefined;
 }
@@ -126,6 +130,7 @@ export interface ParallelPieceTILoopConfig {
   diffRunner?: DiffRunner | undefined;
   prContext?: string | undefined;
   codebaseContext?: string | undefined;
+  projectContext?: ProjectContext | undefined;
 }
 
 export interface ParallelPieceTILoopResult {
@@ -382,6 +387,7 @@ export async function runTILoop(config: TILoopConfig): Promise<TILoopResult> {
     maxRetries = 3,
     prContext,
     codebaseContext,
+    projectContext,
     testRunner = defaultTestRunner,
     diffRunner = defaultDiffRunner,
   } = config;
@@ -397,7 +403,7 @@ export async function runTILoop(config: TILoopConfig): Promise<TILoopResult> {
 
   // Step 1: Spawn test agent — writes tests, verifies they fail
   log.info('[ti-loop] Running test wave (write failing tests)');
-  const testSystemPrompt = await loadPrompt('test', repoConfig.tools);
+  const testSystemPrompt = await loadPrompt('test', repoConfig.tools, projectContext);
   const testExecResult = await executeWaveWithRetry({
     wave: 'test',
     systemPrompt: testSystemPrompt,
@@ -446,7 +452,7 @@ export async function runTILoop(config: TILoopConfig): Promise<TILoopResult> {
       implContext += `\n\n## Previous Test Failure Output\n\n\`\`\`\n${lastFailure}\n\`\`\``;
     }
 
-    const implSystemPrompt = await loadPrompt('impl', repoConfig.tools);
+    const implSystemPrompt = await loadPrompt('impl', repoConfig.tools, projectContext);
     const implExecResult = await executeWaveWithRetry({
       wave: 'impl',
       systemPrompt: implSystemPrompt,
@@ -506,7 +512,15 @@ export async function runTILoop(config: TILoopConfig): Promise<TILoopResult> {
 // --- Per-piece TI Loop ---
 
 export async function runPieceTILoop(config: PieceTILoopConfig): Promise<PieceTILoopResult> {
-  const { piece, pieceIndex, workDir, repoConfig, maxRetries = 3, testRunner = defaultTestRunner } = config;
+  const {
+    piece,
+    pieceIndex,
+    workDir,
+    repoConfig,
+    projectContext,
+    maxRetries = 3,
+    testRunner = defaultTestRunner,
+  } = config;
 
   if (maxRetries < 1) {
     throw new Error('maxRetries must be at least 1');
@@ -519,7 +533,7 @@ export async function runPieceTILoop(config: PieceTILoopConfig): Promise<PieceTI
 
   // Step 1: Test agent — scoped to this piece only
   log.info(`[piece-ti-loop] Piece ${pieceIndex}: running test wave`);
-  const testSystemPrompt = await loadPrompt('test', repoConfig.tools);
+  const testSystemPrompt = await loadPrompt('test', repoConfig.tools, projectContext);
   const testExecResult = await executeWaveWithRetry({
     wave: 'test',
     systemPrompt: testSystemPrompt,
@@ -557,7 +571,7 @@ export async function runPieceTILoop(config: PieceTILoopConfig): Promise<PieceTI
       ...(failureOutputs.length > 0 && { lastFailureOutput: failureOutputs.at(-1) }),
     });
 
-    const implSystemPrompt = await loadPrompt('impl', repoConfig.tools);
+    const implSystemPrompt = await loadPrompt('impl', repoConfig.tools, projectContext);
     const implExecResult = await executeWaveWithRetry({
       wave: 'impl',
       systemPrompt: implSystemPrompt,
@@ -623,6 +637,7 @@ export async function runParallelPieceTILoop(config: ParallelPieceTILoopConfig):
     testRunner = defaultTestRunner,
     prContext,
     codebaseContext,
+    projectContext,
   } = config;
 
   // Extract spec pieces
@@ -642,6 +657,7 @@ export async function runParallelPieceTILoop(config: ParallelPieceTILoopConfig):
       repoConfig,
       waveResults,
       testRunner,
+      projectContext,
       ...(prContext != null && { prContext }),
       ...(codebaseContext != null && { codebaseContext }),
       ...(config.diffRunner != null && { diffRunner: config.diffRunner }),
@@ -688,6 +704,7 @@ export async function runParallelPieceTILoop(config: ParallelPieceTILoopConfig):
         pieceIndex,
         workDir: pieceWorkDir,
         repoConfig,
+        projectContext,
         testRunner,
         ...(config.testCommand != null && { testCommand: config.testCommand }),
       });
@@ -788,6 +805,7 @@ export async function runReviewLoop(config: ReviewLoopConfig): Promise<ReviewLoo
     waveResults,
     maxIterations = 2,
     prContext,
+    projectContext,
     reviewFeedbackContext,
     testRunner = defaultTestRunner,
     fileWriter = defaultFileWriter,
@@ -807,7 +825,7 @@ export async function runReviewLoop(config: ReviewLoopConfig): Promise<ReviewLoo
     log.info(`[review-loop] Iteration ${iteration + 1}/${maxIterations}`);
 
     // Step 1: Fresh review agent — no prior review bias
-    const reviewSystemPrompt = await loadPrompt('review', repoConfig.tools);
+    const reviewSystemPrompt = await loadPrompt('review', repoConfig.tools, projectContext);
     const reviewExecResult = await executeWaveWithRetry({
       wave: 'review',
       systemPrompt: reviewSystemPrompt,
@@ -864,7 +882,7 @@ export async function runReviewLoop(config: ReviewLoopConfig): Promise<ReviewLoo
         } else {
           log.info('[review-loop] Ratchet confirmed — new tests fail, spawning impl agent');
           const implContext = buildNeedsNewTestsImplContext(needsNewTests, testFilesWritten, waveResults, prContext);
-          const implSystemPrompt = await loadPrompt('impl', repoConfig.tools);
+          const implSystemPrompt = await loadPrompt('impl', repoConfig.tools, projectContext);
           const implExecResult = await executeWaveWithRetry({
             wave: 'impl',
             systemPrompt: implSystemPrompt,
@@ -890,7 +908,7 @@ export async function runReviewLoop(config: ReviewLoopConfig): Promise<ReviewLoo
     if (mechanicalFixes.length > 0) {
       log.info(`[review-loop] Applying ${mechanicalFixes.length} mechanical fix(es)`);
       const implContext = buildMechanicalFixImplContext(mechanicalFixes, waveResults, prContext);
-      const implSystemPrompt = await loadPrompt('impl', repoConfig.tools);
+      const implSystemPrompt = await loadPrompt('impl', repoConfig.tools, projectContext);
       const implExecResult = await executeWaveWithRetry({
         wave: 'impl',
         systemPrompt: implSystemPrompt,
@@ -913,7 +931,7 @@ export async function runReviewLoop(config: ReviewLoopConfig): Promise<ReviewLoo
 
     // Step 5: Re-run quality gates (only if new code was written or mechanical fixes broke tests)
     if (needQualityRerun) {
-      const qualitySystemPrompt = await loadPrompt('quality', repoConfig.tools);
+      const qualitySystemPrompt = await loadPrompt('quality', repoConfig.tools, projectContext);
       const qualityExecResult = await executeWaveWithRetry({
         wave: 'quality',
         systemPrompt: qualitySystemPrompt,
