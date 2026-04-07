@@ -2,13 +2,7 @@ import { $ } from 'zx';
 import type { IsolationMode } from '../types/index.js';
 import { log } from '../utils/logger.js';
 
-const PUBLIC_HOSTS = new Set([
-  'github.com',
-  'gitlab.com',
-  'bitbucket.org',
-  'codeberg.org',
-  'sr.ht',
-]);
+const PUBLIC_HOSTS = new Set(['github.com', 'gitlab.com', 'bitbucket.org', 'codeberg.org', 'sr.ht']);
 
 /**
  * Extract the hostname from a git remote URL.

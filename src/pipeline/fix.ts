@@ -24,6 +24,14 @@ import { validateIsolation } from '../services/isolation.js';
 import { detectTooling } from '../services/language-detect.js';
 import { formatPRContext, type OpenPR } from '../services/pr-context.js';
 import {
+  formatRepoContext,
+  formatRepoSearch,
+  formatRepoStandards,
+  queryRepoContext,
+  queryRepoSearch,
+  queryRepoStandards,
+} from '../services/repo-intel.js';
+import {
   buildSandboxImage,
   DEFAULT_SANDBOX_LIMITS,
   getContainerStats,
@@ -144,8 +152,8 @@ async function spawnWave<T>(
     mcpHandles && mcpHandles.size > 0
       ? getMCPToolsForWave(wave, mcpHandles, config.mcp?.waves as Partial<Record<FixAIWaveName, string[]>> | undefined)
       : undefined;
-  const tools = getWaveTools(wave, workDir, mcpTools);
-  const systemPrompt = await loadPrompt(wave);
+  const tools = getWaveTools(wave, workDir, { customTools: config.tools, mcpTools });
+  const systemPrompt = await loadPrompt(wave, config.tools);
   const thinkingLevel = resolveThinkingLevel(config, wave);
   const modelString = model.id;
   const fallbackModel = waveFallbackModel(config.model[wave], modelString, config.model.fallback);
@@ -300,6 +308,9 @@ export async function fix(options: FixOptions): Promise<FixResult> {
   };
 
   try {
+    // Derive owner/repo from issue URL for repo-intel calls
+    const ownerRepo = extractOwnerRepo(issue.url);
+
     // Episodic memory: query for past learnings (before assess/spec waves)
     let episodicContext: string | undefined;
     if (config.episodes?.enabled) {
@@ -311,6 +322,15 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       });
       if (episodes.length > 0) {
         episodicContext = formatEpisodes(episodes, repoName);
+      }
+    }
+
+    // repo-intel: query for repository context (before assess wave)
+    let repoContextText: string | undefined;
+    if (config.repo_intel?.enabled && ownerRepo) {
+      const raw = await queryRepoContext(config.repo_intel, ownerRepo, `${issue.title}\n\n${issue.body}`);
+      if (raw.length > 0) {
+        repoContextText = formatRepoContext(raw);
       }
     }
 
@@ -326,6 +346,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           {},
           {
             ...(episodicContext != null && { episodicContext }),
+            ...(repoContextText != null && { repoContextText }),
           },
         ),
         toOutputFormat(AssessResultSchema),
@@ -363,6 +384,15 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       }
     }
 
+    // repo-intel: query for similar implementations (before spec wave)
+    let repoSearchText: string | undefined;
+    if (config.repo_intel?.enabled && ownerRepo) {
+      const raw = await queryRepoSearch(config.repo_intel, ownerRepo, `${issue.title}\n\n${issue.body}`);
+      if (raw.length > 0) {
+        repoSearchText = formatRepoSearch(raw);
+      }
+    }
+
     // WAVE S: Spec
     if (!shouldSkip('spec')) {
       const handoff = await spawnWave(
@@ -373,6 +403,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           prContext,
           ...(episodicContext != null && { episodicContext }),
           ...(codebaseContext != null && { codebaseContext }),
+          ...(repoSearchText != null && { repoSearchText }),
         }),
         toOutputFormat(SpecResultSchema),
         mcpHandles,
@@ -441,6 +472,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
             prContext,
             ...(episodicContext != null && { episodicContext }),
             ...(codebaseContext != null && { codebaseContext }),
+            ...(repoSearchText != null && { repoSearchText }),
           }),
           toOutputFormat(SpecResultSchema),
           mcpHandles,
@@ -472,6 +504,15 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       if (interrupted) return interrupted;
     }
 
+    // repo-intel: query for project standards (before quality wave)
+    let repoStandardsText: string | undefined;
+    if (config.repo_intel?.enabled && ownerRepo) {
+      const raw = await queryRepoStandards(config.repo_intel, ownerRepo);
+      if (raw.length > 0) {
+        repoStandardsText = formatRepoStandards(raw);
+      }
+    }
+
     // WAVE Q: Quality
     if (!shouldSkip('quality')) {
       const handoff = await spawnWave(
@@ -480,6 +521,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         config,
         buildWaveContext('quality', issue, state.waveResults, {
           coverageThreshold: config.rules.coverage,
+          ...(repoStandardsText != null && { repoStandardsText }),
         }),
         undefined,
         mcpHandles,
@@ -687,6 +729,12 @@ function createInitialState(issue: Issue, repo: string, repoPath: string, worktr
     waveResults: {},
     status: 'running',
   };
+}
+
+/** Extract "owner/repo" from a GitHub issue URL. Returns undefined if not parseable. */
+function extractOwnerRepo(issueUrl: string): string | undefined {
+  const match = issueUrl.match(/github\.com\/([^/]+\/[^/]+)/);
+  return match?.[1];
 }
 
 function formatSkipComment(assess: AssessResult, _issue: Issue): string {

@@ -35,6 +35,12 @@ export interface ContextOptions {
   codebaseContext?: string;
   /** Pre-formatted episodic memory context (only for assess/spec waves). */
   episodicContext?: string;
+  /** Pre-formatted repo-intel context — architecture overview (only for assess wave). */
+  repoContextText?: string;
+  /** Pre-formatted repo-intel search results — similar implementations (only for spec wave). */
+  repoSearchText?: string;
+  /** Pre-formatted repo-intel standards — project conventions (only for quality wave). */
+  repoStandardsText?: string;
 }
 
 export interface PieceContextOptions {
@@ -142,6 +148,10 @@ function buildAssessContext(issue: Issue, options: ContextOptions): string {
   sections.push(`# Issue #${issue.number}: ${issue.title}\n\n${issue.body}`);
   sections.push(`Labels: ${issue.labels.join(', ') || 'none'}`);
 
+  if (options.repoContextText) {
+    sections.push(options.repoContextText);
+  }
+
   if (options.episodicContext) {
     sections.push(options.episodicContext);
   }
@@ -161,6 +171,10 @@ function buildSpecContext(issue: Issue, handoffs: Handoffs, options: ContextOpti
 
   if (options.episodicContext) {
     sections.push(options.episodicContext);
+  }
+
+  if (options.repoSearchText) {
+    sections.push(options.repoSearchText);
   }
 
   if (options.codebaseContext) {
@@ -222,8 +236,17 @@ function buildImplContext(handoffs: Handoffs, options: ContextOptions): string {
 }
 
 function buildQualityContext(options: ContextOptions): string {
+  const sections: string[] = [];
   const threshold = options.coverageThreshold ?? 80;
-  return `Run all quality gates: lint, typecheck, tests, coverage (threshold: ${threshold}%). Fix any failures.`;
+  sections.push(
+    `Run all quality gates: lint, typecheck, tests, coverage (threshold: ${threshold}%). Fix any failures.`,
+  );
+
+  if (options.repoStandardsText) {
+    sections.push(options.repoStandardsText);
+  }
+
+  return sections.join('\n\n');
 }
 
 function buildReviewContext(handoffs: Handoffs): string {

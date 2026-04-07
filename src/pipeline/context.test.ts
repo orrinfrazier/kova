@@ -407,6 +407,80 @@ describe('buildWaveContext', () => {
       expect(ctx).toContain('auth');
     });
   });
+
+  describe('repo-intel context injection', () => {
+    const repoContextText = '## Repository context\n\nMonorepo with src/api and src/auth modules.';
+    const repoSearchText = '## Similar implementations\n\nfunction validateToken() {}';
+    const repoStandardsText = '## Project standards\n\nVitest for testing, Biome for linting';
+
+    it('injects repo context into assess wave', () => {
+      const ctx = buildWaveContext('assess', makeIssue(), {}, { repoContextText });
+      expect(ctx).toContain('Repository context');
+      expect(ctx).toContain('Monorepo with src/api and src/auth modules.');
+    });
+
+    it('does NOT inject repo context into spec wave', () => {
+      const handoffs: Partial<Record<string, WaveResult>> = {
+        assess: makeWaveResult('assess', assessArtifact),
+      };
+      const ctx = buildWaveContext('spec', makeIssue(), handoffs, { repoContextText });
+      expect(ctx).not.toContain('Repository context');
+    });
+
+    it('injects repo search into spec wave', () => {
+      const handoffs: Partial<Record<string, WaveResult>> = {
+        assess: makeWaveResult('assess', assessArtifact),
+      };
+      const ctx = buildWaveContext('spec', makeIssue(), handoffs, { repoSearchText });
+      expect(ctx).toContain('Similar implementations');
+      expect(ctx).toContain('validateToken');
+    });
+
+    it('does NOT inject repo search into assess wave', () => {
+      const ctx = buildWaveContext('assess', makeIssue(), {}, { repoSearchText });
+      expect(ctx).not.toContain('Similar implementations');
+    });
+
+    it('does NOT inject repo search into quality wave', () => {
+      const ctx = buildWaveContext('quality', makeIssue(), {}, { repoSearchText });
+      expect(ctx).not.toContain('Similar implementations');
+    });
+
+    it('injects repo standards into quality wave', () => {
+      const ctx = buildWaveContext('quality', makeIssue(), {}, { repoStandardsText });
+      expect(ctx).toContain('Project standards');
+      expect(ctx).toContain('Vitest for testing');
+    });
+
+    it('does NOT inject repo standards into assess wave', () => {
+      const ctx = buildWaveContext('assess', makeIssue(), {}, { repoStandardsText });
+      expect(ctx).not.toContain('Project standards');
+    });
+
+    it('does NOT inject repo standards into spec wave', () => {
+      const handoffs: Partial<Record<string, WaveResult>> = {
+        assess: makeWaveResult('assess', assessArtifact),
+      };
+      const ctx = buildWaveContext('spec', makeIssue(), handoffs, { repoStandardsText });
+      expect(ctx).not.toContain('Project standards');
+    });
+
+    it('does NOT inject repo standards into review wave', () => {
+      const handoffs: Partial<Record<string, WaveResult>> = {
+        spec: makeWaveResult('spec', specArtifact),
+        quality: makeWaveResult('quality', qualityArtifact),
+      };
+      const ctx = buildWaveContext('review', makeIssue(), handoffs, { repoStandardsText });
+      expect(ctx).not.toContain('Project standards');
+    });
+
+    it('omits all repo-intel sections when not provided', () => {
+      const ctx = buildWaveContext('assess', makeIssue(), {});
+      expect(ctx).not.toContain('Repository context');
+      expect(ctx).not.toContain('Similar implementations');
+      expect(ctx).not.toContain('Project standards');
+    });
+  });
 });
 
 describe('estimateTokens', () => {

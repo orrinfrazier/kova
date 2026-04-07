@@ -1,4 +1,5 @@
 export type {
+  CustomTool,
   EpisodicMemoryConfig,
   FailedPiece,
   FixState,
@@ -12,6 +13,7 @@ export type {
   OllamaProvider,
   Providers,
   RepoConfig,
+  RepoIntelConfig,
   ReviewKnownIssue,
   SandboxConfig,
   SandboxResourceUsage,
@@ -23,6 +25,7 @@ export type {
   WaveResult,
 } from './config.js';
 export {
+  CustomToolSchema,
   EpisodicMemoryConfigSchema,
   IsolationModeSchema,
   KovaConfigSchema,
@@ -33,6 +36,7 @@ export {
   OllamaProviderSchema,
   ProvidersSchema,
   RepoConfigSchema,
+  RepoIntelConfigSchema,
   SandboxConfigSchema,
   ThinkingLevelSchema,
   VectorDBConfigSchema,
