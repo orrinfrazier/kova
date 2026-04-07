@@ -1,4 +1,5 @@
 import { fetchIssues } from '../services/github.js';
+import { prioritizeIssues } from '../services/prioritize.js';
 import type { Issue, RepoConfig, WaveResult } from '../types/index.js';
 import { log } from '../utils/logger.js';
 import { type FixResult, fix } from './fix.js';
@@ -65,8 +66,10 @@ export async function fixLoop(options: LoopOptions): Promise<LoopResult> {
       results: [],
     };
   }
-  log.info('Found ' + issues.length + ' issues, processing up to ' + limit);
-  const toFix = issues.slice(0, limit);
+  log.info('Found ' + issues.length + ' issues, prioritizing...');
+  const prioritized = prioritizeIssues(issues);
+  const toFix = prioritized.slice(0, limit).map((p) => p.issue);
+  log.info('Processing ' + toFix.length + ' issues (prioritized by score + dependencies)');
   const results: Array<{ issue: Issue; result: FixResult }> = [];
   let succeeded = 0;
   let failed = 0;
