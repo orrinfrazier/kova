@@ -106,10 +106,17 @@ export function createCustomTools(tools: readonly CustomTool[], cwd: string): An
 export interface WaveToolOptions {
   customTools?: readonly CustomTool[] | undefined;
   mcpTools?: AnyTool[] | undefined;
+  playwright?: { enabled: boolean } | undefined;
 }
 
 export function getWaveTools(wave: AIWaveName, cwd: string, options?: WaveToolOptions): AnyTool[] {
-  const allowedNames = WAVE_TOOLS[wave];
+  const allowedNames = [...WAVE_TOOLS[wave]];
+
+  // When playwright is enabled, add bash to the review wave for screenshot capture
+  if (options?.playwright?.enabled && wave === 'review' && !allowedNames.includes('bash')) {
+    allowedNames.push('bash');
+  }
+
   const tools = allowedNames.map((name) => toolCreators[name](cwd));
 
   if (options?.customTools && options.customTools.length > 0 && CUSTOM_TOOL_WAVES.has(wave)) {

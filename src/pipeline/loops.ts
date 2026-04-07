@@ -80,6 +80,7 @@ export interface ReviewLoopConfig {
   testRunner?: TestRunner;
   fileWriter?: FileWriter;
   prContext?: string;
+  playwright?: { enabled: boolean } | undefined;
 }
 
 export interface ReviewLoopResult {
@@ -814,6 +815,7 @@ export async function runReviewLoop(config: ReviewLoopConfig): Promise<ReviewLoo
       outputFormat: reviewOutputFormat(),
       thinkingLevel: resolveThinkingLevel(repoConfig, 'review'),
       customTools: repoConfig.tools,
+      playwright: config.playwright,
     });
 
     reviewWaveResult = toWaveResult('review', reviewExecResult);

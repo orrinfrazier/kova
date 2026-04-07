@@ -22,6 +22,7 @@ import { clearCheckpoint, loadCheckpoint, saveCheckpoint } from '../services/che
 import { commentOnIssue, createPR, listOpenPRs } from '../services/github.js';
 import { validateIsolation } from '../services/isolation.js';
 import { detectTooling } from '../services/language-detect.js';
+import { ensureScreenshotsDir, isPlaywrightEnabled, resolvePlaywrightEnv } from '../services/playwright.js';
 import { formatPRContext, type OpenPR } from '../services/pr-context.js';
 import {
   formatRepoContext,
@@ -146,13 +147,14 @@ async function spawnWave<T>(
   userMessage: string,
   outputFormat?: OutputFormat,
   mcpHandles?: Map<string, MCPServerHandle>,
+  playwright?: { enabled: boolean },
 ): Promise<WaveHandoff<T>> {
   const model = resolveWaveModel(config.model[wave]);
   const mcpTools =
     mcpHandles && mcpHandles.size > 0
       ? getMCPToolsForWave(wave, mcpHandles, config.mcp?.waves as Partial<Record<FixAIWaveName, string[]>> | undefined)
       : undefined;
-  const tools = getWaveTools(wave, workDir, { customTools: config.tools, mcpTools });
+  const tools = getWaveTools(wave, workDir, { customTools: config.tools, mcpTools, playwright });
   const systemPrompt = await loadPrompt(wave, config.tools);
   const thinkingLevel = resolveThinkingLevel(config, wave);
   const modelString = model.id;
@@ -311,11 +313,23 @@ export async function fix(options: FixOptions): Promise<FixResult> {
     // Derive owner/repo from issue URL for repo-intel calls
     const ownerRepo = extractOwnerRepo(issue.url);
 
+    // Detect tooling and set up Playwright if applicable
+    const tooling = await detectTooling(workDir);
+    const playwrightEnabled = isPlaywrightEnabled(config, tooling);
+    const playwrightOption = playwrightEnabled ? { enabled: true } : undefined;
+    if (playwrightEnabled) {
+      await ensureScreenshotsDir(workDir, config);
+      const pwEnv = resolvePlaywrightEnv(config, tooling);
+      for (const [key, val] of Object.entries(pwEnv)) {
+        process.env[key] = val;
+      }
+      log.info(`Playwright MCP enabled — screenshots dir: ${pwEnv.PLAYWRIGHT_SCREENSHOTS_DIR}`);
+    }
+
     // Episodic memory: query for past learnings (before assess/spec waves)
     let episodicContext: string | undefined;
     if (config.episodes?.enabled) {
       const query = `${issue.title}\n\n${issue.body}`;
-      const tooling = await detectTooling(workDir);
       const episodes = await queryEpisodeContext(config.episodes, query, {
         repo: repoName,
         language: tooling.language !== 'unknown' ? tooling.language : undefined,
@@ -544,6 +558,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         waveResults: state.waveResults,
         prContext,
         ...(testRunner != null && { testRunner }),
+        playwright: playwrightOption,
       });
 
       // Save review handoff

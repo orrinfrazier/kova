@@ -296,3 +296,45 @@ describe('resolveThinkingLevel', () => {
     expect(resolveThinkingLevel(config, 'impl')).toBe('high');
   });
 });
+
+describe('getWaveTools with playwright config', () => {
+  it('review wave includes bash when playwright is enabled', () => {
+    const tools = getWaveTools('review', '/tmp', { playwright: { enabled: true } });
+    const names = tools.map((t) => t.name);
+    expect(names).toContain('bash');
+    expect(names).toContain('read');
+    expect(names).toContain('grep');
+  });
+
+  it('review wave stays read-only when no playwright arg', () => {
+    const tools = getWaveTools('review', '/tmp');
+    const names = tools.map((t) => t.name);
+    expect(names).not.toContain('bash');
+    expect(names).toEqual(['read', 'grep']);
+  });
+
+  it('review wave stays read-only when playwright is disabled', () => {
+    const tools = getWaveTools('review', '/tmp', { playwright: { enabled: false } });
+    const names = tools.map((t) => t.name);
+    expect(names).not.toContain('bash');
+  });
+
+  it('non-review waves ignore playwright config (assess)', () => {
+    const tools = getWaveTools('assess', '/tmp', { playwright: { enabled: true } });
+    const names = tools.map((t) => t.name);
+    expect(names).not.toContain('bash');
+    expect(names).toEqual(['read', 'find', 'grep']);
+  });
+
+  it('non-review waves ignore playwright config (impl)', () => {
+    const tools = getWaveTools('impl', '/tmp', { playwright: { enabled: true } });
+    const names = tools.map((t) => t.name);
+    expect(names).toEqual(WAVE_TOOLS.impl);
+  });
+
+  it('non-review waves ignore playwright config (spec)', () => {
+    const tools = getWaveTools('spec', '/tmp', { playwright: { enabled: true } });
+    const names = tools.map((t) => t.name);
+    expect(names).toEqual(WAVE_TOOLS.spec);
+  });
+});

@@ -12,6 +12,7 @@ export interface DetectedTooling {
   formatter?: string | undefined;
   packageManager?: string | undefined;
   typeChecker?: string | undefined;
+  repoType?: 'frontend' | 'backend' | 'unknown' | undefined;
 }
 
 async function fileExists(filePath: string): Promise<boolean> {
@@ -101,7 +102,33 @@ async function detectNodeTooling(workDir: string): Promise<DetectedTooling> {
     packageManager = 'npm';
   }
 
-  return { language, testRunner, linter, formatter, packageManager };
+  // Repo type detection: frontend vs backend
+  const hasNextConfig =
+    (await fileExists(join(workDir, 'next.config.js'))) ||
+    (await fileExists(join(workDir, 'next.config.mjs'))) ||
+    (await fileExists(join(workDir, 'next.config.ts')));
+  const hasViteConfig =
+    (await fileExists(join(workDir, 'vite.config.ts'))) || (await fileExists(join(workDir, 'vite.config.js')));
+
+  let hasFrontendDep = false;
+  const pkgForDeps = await readFileSafe(join(workDir, 'package.json'));
+  if (pkgForDeps) {
+    try {
+      const pkg = JSON.parse(pkgForDeps) as {
+        dependencies?: Record<string, string>;
+        devDependencies?: Record<string, string>;
+      };
+      const allDeps = { ...pkg.dependencies, ...pkg.devDependencies };
+      const frontendPackages = ['react', 'vue', '@angular/core', 'svelte'];
+      hasFrontendDep = frontendPackages.some((dep) => dep in allDeps);
+    } catch {
+      // Invalid JSON — skip
+    }
+  }
+
+  const repoType: 'frontend' | 'backend' = hasNextConfig || hasViteConfig || hasFrontendDep ? 'frontend' : 'backend';
+
+  return { language, testRunner, linter, formatter, packageManager, repoType };
 }
 
 function rustTooling(): DetectedTooling {
@@ -110,6 +137,7 @@ function rustTooling(): DetectedTooling {
     testRunner: 'cargo-test',
     linter: 'clippy',
     formatter: 'rustfmt',
+    repoType: 'unknown',
   };
 }
 
@@ -124,6 +152,7 @@ async function goTooling(workDir: string): Promise<DetectedTooling> {
     testRunner: 'go-test',
     linter: hasGolangciLint ? 'golangci-lint' : 'go-vet',
     formatter: 'gofmt',
+    repoType: 'unknown',
   };
 }
 
@@ -147,7 +176,7 @@ async function pythonTooling(workDir: string): Promise<DetectedTooling> {
 
   if (hasRuffToml && !linter) linter = 'ruff';
 
-  return { language: 'python', testRunner, linter, formatter, typeChecker };
+  return { language: 'python', testRunner, linter, formatter, typeChecker, repoType: 'unknown' };
 }
 
 export async function detectTooling(workDir: string): Promise<DetectedTooling> {
@@ -176,6 +205,7 @@ export function formatToolingContext(tooling: DetectedTooling): string {
   if (tooling.formatter) lines.push(`Formatter: ${tooling.formatter}`);
   if (tooling.typeChecker) lines.push(`Type checker: ${tooling.typeChecker}`);
   if (tooling.packageManager) lines.push(`Package manager: ${tooling.packageManager}`);
+  if (tooling.repoType) lines.push(`Repo type: ${tooling.repoType}`);
 
   return lines.join('\n');
 }
