@@ -30,6 +30,10 @@ export type TestRunner = (command: string, workDir: string) => Promise<TestRunRe
 
 export type TILoopDiagnosis = 'SPEC_WRONG' | 'APPROACH_WRONG' | 'MISSING_CONTEXT' | 'STUCK';
 
+export type ThrashingSignal = 'SAME_FILES' | 'DIFFERENT_FILES' | 'NORMAL' | 'INSUFFICIENT_DATA';
+
+export type DiffRunner = (workDir: string) => Promise<string[]>;
+
 export interface TILoopConfig {
   issue: Issue;
   workDir: string;
@@ -39,6 +43,7 @@ export interface TILoopConfig {
   testCommand?: string;
   prContext?: string;
   testRunner?: TestRunner;
+  diffRunner?: DiffRunner;
 }
 
 export interface TILoopResult {
@@ -48,6 +53,8 @@ export interface TILoopResult {
   totalCost: number;
   attempts: number;
   diagnosis?: TILoopDiagnosis;
+  modifiedFilesPerAttempt: string[][];
+  thrashingSignal?: ThrashingSignal;
 }
 
 export type FileWriter = (filePath: string, content: string) => Promise<void>;
@@ -111,6 +118,53 @@ export const defaultTestRunner: TestRunner = async (command, workDir) => {
     return { passed: false, output, exitCode };
   }
 };
+
+// --- Default diff runner (git diff --name-only) ---
+
+export const defaultDiffRunner: DiffRunner = async (workDir) => {
+  try {
+    const { stdout } = await exec('git diff --name-only', {
+      cwd: workDir,
+      timeout: 10_000,
+    });
+    return stdout
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0);
+  } catch {
+    return [];
+  }
+};
+
+// --- Thrashing detection ---
+
+/** Compare modified file lists across attempts to detect thrashing patterns. */
+export function detectThrashing(modifiedFilesPerAttempt: string[][]): ThrashingSignal {
+  if (modifiedFilesPerAttempt.length < 2) return 'INSUFFICIENT_DATA';
+
+  // Filter out empty attempts — no signal from zero modifications
+  const nonEmpty = modifiedFilesPerAttempt.filter((files) => files.length > 0);
+  if (nonEmpty.length < 2) return 'INSUFFICIENT_DATA';
+
+  // Compare consecutive pairs — average overlap ratio (intersection / avg set size)
+  let totalRatio = 0;
+  let pairs = 0;
+
+  for (let i = 1; i < nonEmpty.length; i++) {
+    const prev = new Set(nonEmpty[i - 1]);
+    const curr = nonEmpty[i] as string[];
+    const intersection = curr.filter((f) => prev.has(f)).length;
+    const avgSize = (prev.size + curr.length) / 2;
+    totalRatio += intersection / avgSize;
+    pairs++;
+  }
+
+  const avgOverlap = totalRatio / pairs;
+
+  if (avgOverlap >= 0.8) return 'SAME_FILES';
+  if (avgOverlap < 0.2) return 'DIFFERENT_FILES';
+  return 'NORMAL';
+}
 
 // --- Output normalization ---
 
@@ -181,14 +235,17 @@ export function extractFailingTestNames(output: string): string[] {
 
 // --- Diagnosis classification ---
 
-export function classifyDiagnosis(failureOutputs: string[]): TILoopDiagnosis {
+export function classifyDiagnosis(failureOutputs: string[], thrashingSignal?: ThrashingSignal): TILoopDiagnosis {
   if (failureOutputs.length < 2) return 'STUCK';
 
-  // Check for MISSING_CONTEXT patterns across all outputs
+  // Check for MISSING_CONTEXT patterns across all outputs — highest priority
   const allHaveMissingContext = failureOutputs.every((output) =>
     MISSING_CONTEXT_PATTERNS.some((pattern) => pattern.test(output)),
   );
   if (allHaveMissingContext) return 'MISSING_CONTEXT';
+
+  // Apply thrashing signal overrides before test-output-based classification
+  if (thrashingSignal === 'DIFFERENT_FILES') return 'STUCK';
 
   // Extract failing test names from each attempt
   const namesByAttempt = failureOutputs.map(extractFailingTestNames);
@@ -201,7 +258,12 @@ export function classifyDiagnosis(failureOutputs: string[]): TILoopDiagnosis {
       if (names.length !== firstNames.size) return false;
       return names.every((n) => firstNames.has(n));
     });
-    return allSameTests ? 'SPEC_WRONG' : 'APPROACH_WRONG';
+
+    if (allSameTests) {
+      // SAME_FILES thrashing: same tests fail + same files modified = wrong strategy, not wrong spec
+      return thrashingSignal === 'SAME_FILES' ? 'APPROACH_WRONG' : 'SPEC_WRONG';
+    }
+    return 'APPROACH_WRONG';
   }
 
   // Fallback: normalized line overlap (for unrecognized test runners)
@@ -216,7 +278,10 @@ export function classifyDiagnosis(failureOutputs: string[]): TILoopDiagnosis {
     return matching / Math.max(lines.length, 1) > 0.8;
   });
 
-  return allSimilar ? 'SPEC_WRONG' : 'APPROACH_WRONG';
+  if (allSimilar) {
+    return thrashingSignal === 'SAME_FILES' ? 'APPROACH_WRONG' : 'SPEC_WRONG';
+  }
+  return 'APPROACH_WRONG';
 }
 
 // --- Wave result conversion ---
@@ -247,7 +312,16 @@ function toWaveResult(
 // --- TI Loop Controller ---
 
 export async function runTILoop(config: TILoopConfig): Promise<TILoopResult> {
-  const { issue, workDir, repoConfig, waveResults, maxRetries = 3, prContext, testRunner = defaultTestRunner } = config;
+  const {
+    issue,
+    workDir,
+    repoConfig,
+    waveResults,
+    maxRetries = 3,
+    prContext,
+    testRunner = defaultTestRunner,
+    diffRunner = defaultDiffRunner,
+  } = config;
 
   if (maxRetries < 1) {
     throw new Error('maxRetries must be at least 1');
@@ -278,6 +352,7 @@ export async function runTILoop(config: TILoopConfig): Promise<TILoopResult> {
 
   // Step 2: Impl retry loop — orchestrator runs tests via bash
   const failureOutputs: string[] = [];
+  const modifiedFilesPerAttempt: string[][] = [];
   let implWaveResult: WaveResult | undefined;
   let testsPassing = false;
 
@@ -319,6 +394,10 @@ export async function runTILoop(config: TILoopConfig): Promise<TILoopResult> {
     implWaveResult = toWaveResult('impl', implExecResult);
     totalCost += implExecResult.cost;
 
+    // Capture modified files after impl, before test run
+    const modifiedFiles = await diffRunner(workDir);
+    modifiedFilesPerAttempt.push(modifiedFiles);
+
     // Run tests via bash — orchestrator, NOT the agent
     log.info(`[ti-loop] Running tests via bash: ${testCmd}`);
     const testRun = await testRunner(testCmd, workDir);
@@ -335,9 +414,13 @@ export async function runTILoop(config: TILoopConfig): Promise<TILoopResult> {
 
   // Step 3: Diagnosis if all attempts exhausted
   let diagnosis: TILoopDiagnosis | undefined;
+  let thrashingSignal: ThrashingSignal | undefined;
   if (!testsPassing) {
-    diagnosis = classifyDiagnosis(failureOutputs);
-    log.error(`[ti-loop] All ${maxRetries} attempts exhausted — diagnosis: ${diagnosis}`);
+    thrashingSignal = detectThrashing(modifiedFilesPerAttempt);
+    diagnosis = classifyDiagnosis(failureOutputs, thrashingSignal);
+    log.error(
+      `[ti-loop] All ${maxRetries} attempts exhausted — diagnosis: ${diagnosis}, thrashing: ${thrashingSignal}`,
+    );
   }
 
   const attempts = failureOutputs.length + (testsPassing ? 1 : 0);
@@ -348,7 +431,9 @@ export async function runTILoop(config: TILoopConfig): Promise<TILoopResult> {
     testsPassing,
     totalCost,
     attempts,
+    modifiedFilesPerAttempt,
     ...(diagnosis != null && { diagnosis }),
+    ...(thrashingSignal != null && { thrashingSignal }),
   };
 }
 
