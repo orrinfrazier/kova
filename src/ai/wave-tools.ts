@@ -68,7 +68,11 @@ export function resolveThinkingLevel(config: RepoConfig, wave: WaveName): Thinki
   return override ?? DEFAULT_THINKING_LEVELS[wave];
 }
 
-export function getWaveTools(wave: AIWaveName, cwd: string): AnyTool[] {
+export function getWaveTools(wave: AIWaveName, cwd: string, mcpTools?: AnyTool[]): AnyTool[] {
   const allowedNames = WAVE_TOOLS[wave];
-  return allowedNames.map((name) => toolCreators[name](cwd));
+  const builtIn = allowedNames.map((name) => toolCreators[name](cwd));
+  if (mcpTools && mcpTools.length > 0) {
+    return [...builtIn, ...mcpTools];
+  }
+  return builtIn;
 }

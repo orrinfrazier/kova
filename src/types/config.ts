@@ -44,6 +44,31 @@ export const ProvidersSchema = z
 
 export type Providers = z.infer<typeof ProvidersSchema>;
 
+export const MCPServerConfigSchema = z.object({
+  command: z.string(),
+  args: z.array(z.string()).optional(),
+  env: z.record(z.string(), z.string()).optional(),
+});
+
+export type MCPServerConfig = z.infer<typeof MCPServerConfigSchema>;
+
+export const MCPConfigSchema = z.object({
+  servers: z.record(z.string(), MCPServerConfigSchema).default({}),
+  waves: z
+    .object({
+      assess: z.array(z.string()).optional(),
+      spec: z.array(z.string()).optional(),
+      test: z.array(z.string()).optional(),
+      impl: z.array(z.string()).optional(),
+      quality: z.array(z.string()).optional(),
+      review: z.array(z.string()).optional(),
+      brainstorm: z.array(z.string()).optional(),
+    })
+    .optional(),
+});
+
+export type MCPConfig = z.infer<typeof MCPConfigSchema>;
+
 export const WaveModelOverrideSchema = z.object({
   provider: z.string(),
   model: z.string(),
@@ -139,6 +164,7 @@ export const RepoConfigSchema = z.object({
     })),
   isolation: IsolationModeSchema.default('worktree'),
   providers: ProvidersSchema,
+  mcp: MCPConfigSchema.optional(),
 });
 
 export type RepoConfig = z.infer<typeof RepoConfigSchema>;
