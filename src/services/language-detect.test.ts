@@ -70,10 +70,7 @@ describe('detectTooling', () => {
     });
 
     it('detects vitest from package.json scripts', async () => {
-      await writeFile(
-        join(workDir, 'package.json'),
-        JSON.stringify({ name: 'test', scripts: { test: 'vitest run' } }),
-      );
+      await writeFile(join(workDir, 'package.json'), JSON.stringify({ name: 'test', scripts: { test: 'vitest run' } }));
       await writeFile(join(workDir, 'tsconfig.json'), '{}');
 
       const result = await detectTooling(workDir);

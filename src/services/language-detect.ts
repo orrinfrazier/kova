@@ -68,15 +68,13 @@ async function detectNodeTooling(workDir: string): Promise<DetectedTooling> {
   }
 
   // Linter detection
-  const hasBiome =
-    (await fileExists(join(workDir, 'biome.json'))) || (await fileExists(join(workDir, 'biome.jsonc')));
+  const hasBiome = (await fileExists(join(workDir, 'biome.json'))) || (await fileExists(join(workDir, 'biome.jsonc')));
   const hasEslintRc =
     (await fileExists(join(workDir, '.eslintrc.json'))) ||
     (await fileExists(join(workDir, '.eslintrc.js'))) ||
     (await fileExists(join(workDir, '.eslintrc.yml')));
   const hasEslintFlat =
-    (await fileExists(join(workDir, 'eslint.config.js'))) ||
-    (await fileExists(join(workDir, 'eslint.config.mjs')));
+    (await fileExists(join(workDir, 'eslint.config.js'))) || (await fileExists(join(workDir, 'eslint.config.mjs')));
 
   if (hasBiome) {
     linter = 'biome';
