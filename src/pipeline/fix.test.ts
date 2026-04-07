@@ -96,13 +96,34 @@ vi.mock('../services/worktree.js', async (importOriginal) => {
   };
 });
 
+const mockProgressStart = vi.fn().mockResolvedValue(undefined);
+const mockProgressWaveCompleted = vi.fn().mockResolvedValue(undefined);
+const mockProgressComplete = vi.fn().mockResolvedValue(undefined);
+const mockProgressFailed = vi.fn().mockResolvedValue(undefined);
+
+vi.mock('../services/progress.js', () => ({
+  ProgressTracker: vi.fn().mockImplementation(() => ({
+    start: mockProgressStart,
+    waveCompleted: mockProgressWaveCompleted,
+    complete: mockProgressComplete,
+    failed: mockProgressFailed,
+  })),
+}));
+
 const { fix } = await import('./fix.js');
+const { ProgressTracker: MockedProgressTracker } = await import('../services/progress.js');
 const { saveCheckpoint } = await import('../services/checkpoint.js');
 
 // --- Factories ---
 
 function makeIssue(n: number): Issue {
-  return { number: n, title: `Test issue ${n}`, body: 'body', labels: [], url: `https://example.com/${n}` };
+  return {
+    number: n,
+    title: `Test issue ${n}`,
+    body: 'body',
+    labels: [],
+    url: `https://github.com/test/repo/issues/${n}`,
+  };
 }
 
 function makeConfig(overrides?: Partial<RepoConfig>): RepoConfig {
@@ -472,5 +493,88 @@ describe('fix — TI loop escalation', () => {
 
     expect(result.state.failedPieces).toHaveLength(1);
     expect(result.state.failedPieces?.[0]?.diagnosis.category).toBe('STUCK');
+  });
+});
+
+// --- Progress comment integration tests ---
+
+describe('fix — progress comments', () => {
+  let workDir: string;
+
+  beforeEach(async () => {
+    workDir = await mkdtemp(join(tmpdir(), 'kova-fix-'));
+    vi.clearAllMocks();
+    setupDefaultMocks();
+  });
+
+  afterEach(async () => {
+    await rm(workDir, { recursive: true, force: true });
+  });
+
+  it('creates ProgressTracker and calls start() when progress_comments enabled', async () => {
+    await fix({
+      issue: makeIssue(42),
+      repoPath: workDir,
+      repoName: 'test-repo',
+      config: makeConfig({ github: { progress_comments: true } }),
+    });
+
+    expect(MockedProgressTracker).toHaveBeenCalledOnce();
+    expect(MockedProgressTracker).toHaveBeenCalledWith(
+      expect.objectContaining({ ownerRepo: 'test/repo', issue: expect.objectContaining({ number: 42 }) }),
+    );
+    expect(mockProgressStart).toHaveBeenCalledOnce();
+  });
+
+  it('calls waveCompleted() after each wave', async () => {
+    await fix({
+      issue: makeIssue(42),
+      repoPath: workDir,
+      repoName: 'test-repo',
+      config: makeConfig({ github: { progress_comments: true } }),
+    });
+
+    // Waves: assess, spec, impl (after TI), quality, review, then complete()
+    const waveCalls = mockProgressWaveCompleted.mock.calls.map((c: unknown[]) => c[0] as string);
+    expect(waveCalls).toContain('assess');
+    expect(waveCalls).toContain('spec');
+    expect(waveCalls).toContain('impl');
+    expect(waveCalls).toContain('quality');
+    expect(waveCalls).toContain('review');
+  });
+
+  it('calls complete() with PR URL on success', async () => {
+    await fix({
+      issue: makeIssue(42),
+      repoPath: workDir,
+      repoName: 'test-repo',
+      config: makeConfig({ github: { progress_comments: true } }),
+    });
+
+    expect(mockProgressComplete).toHaveBeenCalledOnce();
+    expect(mockProgressComplete).toHaveBeenCalledWith('https://github.com/test/repo/pull/1');
+  });
+
+  it('does NOT create ProgressTracker when progress_comments is false', async () => {
+    await fix({
+      issue: makeIssue(42),
+      repoPath: workDir,
+      repoName: 'test-repo',
+      config: makeConfig({ github: { progress_comments: false } }),
+    });
+
+    expect(MockedProgressTracker).not.toHaveBeenCalled();
+    expect(mockProgressStart).not.toHaveBeenCalled();
+  });
+
+  it('does NOT create ProgressTracker when github config is absent', async () => {
+    await fix({
+      issue: makeIssue(42),
+      repoPath: workDir,
+      repoName: 'test-repo',
+      config: makeConfig(),
+    });
+
+    expect(MockedProgressTracker).not.toHaveBeenCalled();
   });
 });
