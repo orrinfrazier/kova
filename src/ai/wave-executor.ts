@@ -46,6 +46,8 @@ export interface SpawnWaveAgentConfig {
   timeoutMs?: number;
   maxCostUsd?: number;
   thinkingLevel?: ThinkingLevel;
+  /** Context usage threshold (0-1) — abort if input tokens exceed this fraction of contextWindow. Default: 0.8 */
+  contextThreshold?: number;
 }
 
 export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig): Promise<WaveHandoff<T>> {
@@ -62,11 +64,12 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
     timeoutMs: explicitTimeout,
     maxCostUsd,
     thinkingLevel: explicitThinking,
+    contextThreshold: rawThreshold = 0.8,
   } = config;
 
   const timeoutMs = explicitTimeout ?? DEFAULT_WAVE_TIMEOUTS[wave];
   const thinkingLevel = explicitThinking ?? DEFAULT_THINKING_LEVELS[wave];
-
+  const contextThreshold = Math.max(0.1, Math.min(1, rawThreshold));
   const model = resolveModelFromString(modelString);
   const startTime = Date.now();
 
@@ -96,6 +99,7 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
   let aborted = false;
   let costCapExceeded = false;
   let accumulatedCost = 0;
+  let contextExhausted = false;
   let lastErrorMessage: string | undefined;
 
   const unsubscribe = agent.subscribe((event) => {
@@ -108,7 +112,7 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
         role?: string;
         stopReason?: string;
         errorMessage?: string;
-        usage?: { cost?: { total?: number } };
+        usage?: { input?: number; totalTokens?: number; cost?: { total?: number } };
       };
       if (msg?.role === 'assistant' && (msg.stopReason === 'error' || msg.stopReason === 'aborted')) {
         lastErrorMessage = msg.errorMessage ?? `Agent ${msg.stopReason} during ${wave}`;
@@ -122,6 +126,24 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
           aborted = true;
           log.warn(`[${wave}] Cost cap exceeded ($${accumulatedCost.toFixed(4)} >= $${maxCostUsd}), aborting`);
           agent.abort();
+        }
+      }
+
+      // Context window monitoring: check input tokens against threshold
+      const inputTokens = msg?.usage?.input ?? 0;
+      if (inputTokens > 0 && model.contextWindow > 0) {
+        const usageRatio = inputTokens / model.contextWindow;
+        if (usageRatio >= contextThreshold && !aborted) {
+          contextExhausted = true;
+          aborted = true;
+          log.warn(
+            `[${wave}] Context usage ${(usageRatio * 100).toFixed(0)}% exceeds ${(contextThreshold * 100).toFixed(0)}% threshold (${inputTokens}/${model.contextWindow} tokens), aborting`,
+          );
+          agent.abort();
+        } else if (usageRatio >= contextThreshold * 0.875) {
+          log.warn(
+            `[${wave}] Context usage approaching threshold: ${(usageRatio * 100).toFixed(0)}% (${inputTokens}/${model.contextWindow} tokens)`,
+          );
         }
       }
     }
@@ -201,12 +223,21 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
       }
     }
 
+    // Context exhaustion detected by monitoring — throw before other checks
+    if (contextExhausted) {
+      throw new KovaError(
+        `Context window exhausted during ${wave}: usage exceeded ${(contextThreshold * 100).toFixed(0)}% of ${model.contextWindow} tokens`,
+        'context',
+        true,
+      );
+    }
+
     // Detect pi-mono errors reported via state or event subscription
     const piMonoError = agent.state.errorMessage ?? lastErrorMessage;
     if (piMonoError) {
       const classified = classifyError(piMonoError);
       throw new KovaError(
-        `${classified.type === 'billing' ? 'Billing/rate limit' : classified.type === 'config' ? 'Config' : 'Agent'} error during ${wave}: ${piMonoError}`,
+        `${classified.type === 'billing' ? 'Billing/rate limit' : classified.type === 'config' ? 'Config' : classified.type === 'context' ? 'Context' : 'Agent'} error during ${wave}: ${piMonoError}`,
         classified.type,
         classified.retryable,
       );
@@ -248,8 +279,9 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
     const err = error instanceof Error ? error : new Error(String(error));
     const classified = classifyError(err);
 
-    if (classified.type === 'billing' || classified.type === 'config') {
-      const label = classified.type === 'billing' ? 'Billing/rate limit' : 'Config';
+    if (classified.type === 'billing' || classified.type === 'config' || classified.type === 'context') {
+      const label =
+        classified.type === 'billing' ? 'Billing/rate limit' : classified.type === 'context' ? 'Context' : 'Config';
       throw new KovaError(`${label} error during ${wave}: ${err.message}`, classified.type, classified.retryable);
     }
 
