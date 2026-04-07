@@ -1,3 +1,4 @@
+import { collectChangedFilesFromPRs, reindexFiles } from '../services/reindex.js';
 import type { KovaConfig, RepoConfig } from '../types/index.js';
 import { log } from '../utils/logger.js';
 import { fixLoop, type LoopResult } from './loop.js';
@@ -41,6 +42,11 @@ export async function runAuto(options: AutoOptions): Promise<AutoResult> {
   const exitCode = loopResult.failed > 0 ? 1 : 0;
 
   log.info(`[auto] Complete: ${loopResult.succeeded}/${loopResult.total} succeeded`);
+
+  // Reindex changed files in vector DB (incremental)
+  if (config.vectordb?.enabled && loopResult.succeeded > 0) {
+    await reindexAfterLoop(config, repoPath, loopResult);
+  }
 
   return { exitCode, loopResult };
 }
@@ -95,4 +101,38 @@ export async function runAutoMultiRepo(options: MultiRepoAutoOptions): Promise<M
   log.info(`\n[auto] Multi-repo complete: ${repoResults.length} repos processed, exit ${exitCode}`);
 
   return { exitCode, repoResults };
+}
+
+/* ------------------------------------------------------------------ */
+/*  Post-loop reindex                                                  */
+/* ------------------------------------------------------------------ */
+
+async function reindexAfterLoop(config: RepoConfig, repoPath: string, loopResult: LoopResult): Promise<void> {
+  const vectordb = config.vectordb;
+  if (!vectordb) return;
+
+  const prUrls = loopResult.results
+    .filter((r) => r.result.success && r.result.prUrl)
+    .map((r) => r.result.prUrl as string);
+
+  if (prUrls.length === 0) return;
+
+  log.info(`[auto] Collecting changed files from ${prUrls.length} PRs for reindex...`);
+  const files = await collectChangedFilesFromPRs(repoPath, prUrls);
+
+  if (files.length === 0) {
+    log.info('[auto] No changed files detected — skipping reindex');
+    return;
+  }
+
+  log.info(`[auto] Reindexing ${files.length} changed files...`);
+  const result = await reindexFiles(vectordb, repoPath, files);
+
+  if (result.success) {
+    log.info(
+      `[auto] Reindex complete: ${result.filesSubmitted} files, ${result.apiCalls} API calls (${result.duration}ms)`,
+    );
+  } else {
+    log.warn(`[auto] Reindex failed: ${result.error}`);
+  }
 }
