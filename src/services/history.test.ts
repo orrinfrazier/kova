@@ -60,6 +60,27 @@ describe('HistoryEntrySchema', () => {
     const result = HistoryEntrySchema.safeParse(entry);
     expect(result.success).toBe(true);
   });
+
+  it('validates entry with abTestVariants', () => {
+    const entry = makeEntry({
+      abTestVariants: { assess: 'v1', spec: 'v2' },
+    });
+    const result = HistoryEntrySchema.safeParse(entry);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.abTestVariants).toEqual({ assess: 'v1', spec: 'v2' });
+    }
+  });
+
+  it('validates entry without abTestVariants (backward compat)', () => {
+    const entry = makeEntry();
+    // No abTestVariants field
+    const result = HistoryEntrySchema.safeParse(entry);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.abTestVariants).toBeUndefined();
+    }
+  });
 });
 
 describe('appendHistoryEntry', () => {

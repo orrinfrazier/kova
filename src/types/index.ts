@@ -1,4 +1,5 @@
 export type {
+  ABTestConfig,
   CiMergePolicy,
   CustomTool,
   EpisodicMemoryConfig,
@@ -29,6 +30,7 @@ export type {
   WaveResult,
 } from './config.js';
 export {
+  ABTestConfigSchema,
   CiMergePolicySchema,
   CustomToolSchema,
   EpisodicMemoryConfigSchema,

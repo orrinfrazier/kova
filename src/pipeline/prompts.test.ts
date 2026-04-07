@@ -307,3 +307,68 @@ describe('exportPrompts', () => {
     expect(content.length).toBeGreaterThan(100);
   });
 });
+
+/* ------------------------------------------------------------------ */
+/*  Piece 5: A/B test variant loading                                  */
+/* ------------------------------------------------------------------ */
+
+describe('loadPrompt with A/B test variant', () => {
+  let customDir: string;
+
+  beforeEach(async () => {
+    customDir = join(tmpdir(), `kova-abtest-prompts-${Date.now()}`);
+    await mkdir(customDir, { recursive: true });
+  });
+
+  afterEach(async () => {
+    await rm(customDir, { recursive: true, force: true });
+  });
+
+  it('loads variant file when abTestVariant is set', async () => {
+    const variantContent = '# Assess Variant V2\nThis is variant v2.';
+    await writeFile(join(customDir, 'assess.v2.md'), variantContent);
+
+    const prompt = await loadPrompt('assess', undefined, customDir, undefined, { abTestVariant: 'v2' });
+    expect(prompt).toBe(variantContent);
+  });
+
+  it('falls back to default when variant file does not exist', async () => {
+    const prompt = await loadPrompt('assess', undefined, customDir, undefined, { abTestVariant: 'nonexistent' });
+    // Should load the built-in prompt (> 500 chars)
+    expect(prompt.length).toBeGreaterThan(500);
+  });
+
+  it('falls back to custom default when variant file does not exist but custom default does', async () => {
+    const customDefault = '# Custom Default Assess\nCustom default content.';
+    await writeFile(join(customDir, 'assess.md'), customDefault);
+
+    const prompt = await loadPrompt('assess', undefined, customDir, undefined, { abTestVariant: 'nonexistent' });
+    expect(prompt).toBe(customDefault);
+  });
+
+  it('replaces {{DEFAULT_PROMPT}} in variant file', async () => {
+    const builtinPrompt = await loadPrompt('assess');
+    const variantContent = 'Before\n{{DEFAULT_PROMPT}}\nAfter';
+    await writeFile(join(customDir, 'assess.v1.md'), variantContent);
+
+    const prompt = await loadPrompt('assess', undefined, customDir, undefined, { abTestVariant: 'v1' });
+    expect(prompt).toBe(`Before\n${builtinPrompt}\nAfter`);
+  });
+
+  it('does not use variant when promptsDir is not set', async () => {
+    // Without promptsDir, variant is ignored and built-in prompt is loaded
+    const prompt = await loadPrompt('assess', undefined, undefined, undefined, { abTestVariant: 'v1' });
+    expect(prompt.length).toBeGreaterThan(500);
+  });
+
+  it('appends custom tools to impl variant prompt', async () => {
+    const tools: CustomTool[] = [{ name: 'my-tool', description: 'A tool', command: 'echo hi' }];
+    const variantContent = '# Impl Variant V1\nDo variant impl.';
+    await writeFile(join(customDir, 'impl.v1.md'), variantContent);
+
+    const prompt = await loadPrompt('impl', tools, customDir, undefined, { abTestVariant: 'v1' });
+    expect(prompt).toContain('# Impl Variant V1');
+    expect(prompt).toContain('## Custom Tools');
+    expect(prompt).toContain('my-tool');
+  });
+});

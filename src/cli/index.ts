@@ -709,4 +709,21 @@ prompts
     console.log(formatPromptCorrelation(stats));
   });
 
+prompts
+  .command('stats')
+  .description('Show A/B test variant success rates')
+  .option('--repo <name-or-path>', 'Repository name or path', '.')
+  .action(async (opts: { repo?: string }) => {
+    const kovaConfig = await tryLoadConfig(program.opts().config);
+    const { repoPath } = resolveRepo(opts.repo ?? '.', kovaConfig);
+
+    const { readHistory } = await import('../services/history.js');
+    const { correlateByABTestVariant } = await import('../services/prompt-correlation.js');
+    const { formatABTestStats } = await import('../services/prompt-versions-display.js');
+
+    const entries = await readHistory(repoPath);
+    const stats = correlateByABTestVariant(entries);
+    console.log(formatABTestStats(stats));
+  });
+
 program.parse();

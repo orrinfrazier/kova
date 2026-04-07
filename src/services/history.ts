@@ -20,6 +20,7 @@ export const HistoryEntrySchema = z.object({
   duration: z.number(),
   outcome: z.enum(['success', 'partial', 'failure']),
   promptHashes: z.record(z.string(), z.string()).optional(),
+  abTestVariants: z.record(z.string(), z.string()).optional(),
 });
 
 export type HistoryEntry = z.infer<typeof HistoryEntrySchema>;

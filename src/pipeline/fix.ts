@@ -18,6 +18,7 @@ import {
   startAllMCPServers,
   stopAllMCPServers,
 } from '../ai/index.js';
+import { selectVariants, type VariantSelection } from '../services/ab-test.js';
 import { clearCheckpoint, loadCheckpoint, saveCheckpoint } from '../services/checkpoint.js';
 import { collectPRFeedback } from '../services/feedback-collector.js';
 import { commentOnIssue, createPR, listOpenPRs } from '../services/github.js';
@@ -159,6 +160,7 @@ async function spawnWave<T>(
   playwright?: { enabled: boolean },
   promptsDir?: string,
   projectContext?: ProjectContext,
+  abTestVariant?: string,
 ): Promise<{ handoff: WaveHandoff<T>; promptHash: string }> {
   const model = resolveWaveModel(config.model[wave]);
   const mcpTools =
@@ -166,7 +168,9 @@ async function spawnWave<T>(
       ? getMCPToolsForWave(wave, mcpHandles, config.mcp?.waves as Partial<Record<FixAIWaveName, string[]>> | undefined)
       : undefined;
   const tools = getWaveTools(wave, workDir, { customTools: config.tools, mcpTools, playwright });
-  const systemPrompt = await loadPrompt(wave, config.tools, projectContext, promptsDir);
+  const systemPrompt = await loadPrompt(wave, config.tools, projectContext, promptsDir, {
+    abTestVariant,
+  });
   const promptHash = hashPrompt(systemPrompt);
 
   // Prompt versioning: detect changes and record version
@@ -366,6 +370,13 @@ export async function fix(options: FixOptions): Promise<FixResult> {
   // Track prompt hashes across waves for history correlation
   const promptHashes: Record<string, string> = {};
 
+  // A/B test: select variants for configured waves
+  let abTestVariants: VariantSelection | undefined;
+  if (config.ab_test) {
+    abTestVariants = selectVariants(config.ab_test);
+    flog.info(`A/B test variants selected: ${JSON.stringify(abTestVariants)}`);
+  }
+
   try {
     // Load project context for prompt injection (CLAUDE.md, style config, CI config)
     const projectContext = await loadProjectContext(workDir);
@@ -427,6 +438,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         undefined,
         resolvedPromptsDir,
         projectContext,
+        abTestVariants?.assess,
       );
       await saveHandoff(workDir, handoff);
       promptHashes.assess = promptHash;
@@ -492,6 +504,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         undefined,
         resolvedPromptsDir,
         projectContext,
+        abTestVariants?.spec,
       );
       await saveHandoff(workDir, handoff);
       promptHashes.spec = promptHash;
@@ -577,6 +590,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           undefined,
           resolvedPromptsDir,
           projectContext,
+          abTestVariants?.spec,
         );
         await saveHandoff(workDir, specHandoff);
         promptHashes.spec = specPromptHash;
@@ -633,6 +647,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         undefined,
         resolvedPromptsDir,
         projectContext,
+        abTestVariants?.quality,
       );
       await saveHandoff(workDir, handoff);
       promptHashes.quality = promptHash;
@@ -860,6 +875,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
             : 'success'
           : 'failure',
       ...(Object.keys(promptHashes).length > 0 && { promptHashes }),
+      ...(abTestVariants != null && Object.keys(abTestVariants).length > 0 && { abTestVariants }),
     }).catch((err) => {
       log.warn(`Failed to record history: ${err instanceof Error ? err.message : String(err)}`);
     });
