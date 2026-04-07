@@ -50,7 +50,7 @@ export const WaveModelOverrideSchema = z.object({
 });
 export type WaveModelOverride = z.infer<typeof WaveModelOverrideSchema>;
 
-export const WaveModelConfigSchema = z.union([ModelTierSchema, WaveModelOverrideSchema]);
+export const WaveModelConfigSchema = z.union([ModelTierSchema, WaveModelOverrideSchema, z.string()]);
 export type WaveModelConfig = z.infer<typeof WaveModelConfigSchema>;
 
 export const VectorDBConfigSchema = z
@@ -115,6 +115,7 @@ export const RepoConfigSchema = z.object({
       quality: WaveModelConfigSchema.default('small'),
       review: WaveModelConfigSchema.default('large'),
       brainstorm: WaveModelConfigSchema.default('large'),
+      fallback: z.string().optional(),
       thinking: z
         .object({
           assess: ThinkingLevelSchema.optional(),

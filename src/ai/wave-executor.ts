@@ -10,7 +10,7 @@ import type { z } from 'zod';
 import type { WaveHandoff, WaveModelConfig, WaveName } from '../types/index.js';
 import { log } from '../utils/logger.js';
 import { classifyError, isSpendingCapBehavior, KovaError } from './errors.js';
-import { isLocalModel, resolveModelFromString, resolveWaveModel } from './models.js';
+import { resolveModelFromString, resolveWaveModel } from './models.js';
 import { isOllamaProvider, resolveOllamaApiKey } from './ollama.js';
 import { isRouterProvider, resolveRouterApiKey } from './router.js';
 import { type AIWaveName, DEFAULT_THINKING_LEVELS, getWaveTools } from './wave-tools.js';
@@ -328,7 +328,7 @@ export async function spawnWaveAgentWithFallback<T = unknown>(
   config: SpawnWithFallbackConfig,
 ): Promise<FallbackWaveHandoff<T>> {
   const { fallbackModel, ...baseConfig } = config;
-  const shouldFallback = fallbackModel != null && isLocalModel(config.model);
+  const shouldFallback = fallbackModel != null && fallbackModel !== config.model;
 
   try {
     const handoff = await spawnWaveAgent<T>(baseConfig);
