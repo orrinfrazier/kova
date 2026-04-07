@@ -58,6 +58,24 @@ vi.mock('@mariozechner/pi-coding-agent', () => ({
   createFindTool: vi.fn().mockReturnValue({ name: 'find' }),
 }));
 
+vi.mock('./router.js', () => ({
+  isRouterProvider: (p: string) => p === 'router',
+  isRouterEnabled: () => false,
+  createRouterModel: (modelId?: string) => ({
+    id: modelId ?? 'claude-sonnet-4-6',
+    name: modelId ?? 'claude-sonnet-4-6',
+    api: 'anthropic-messages',
+    provider: 'router',
+    baseUrl: 'http://localhost:4141',
+    reasoning: true,
+    input: ['text'],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 200_000,
+    maxTokens: 8192,
+  }),
+  resolveRouterApiKey: () => 'mock-router-key',
+}));
+
 const { Agent } = await import('@mariozechner/pi-agent-core');
 
 function setAgentResponse(text: string, cost = 0.005): void {
@@ -945,6 +963,86 @@ describe('executeWave backward compat (delegates internally)', () => {
       initialState: { tools: unknown[] };
     };
     expect(Array.isArray(agentConfig.initialState.tools)).toBe(true);
+  });
+});
+
+describe('router API key dispatch', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env.ANTHROPIC_API_KEY = 'test-anthropic-key';
+    mockPrompt.mockResolvedValue(undefined);
+    mockSubscribe.mockImplementation(() => vi.fn());
+    mockAgentState = {
+      messages: [
+        {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'done' }],
+          usage: { cost: { total: 0.005 } },
+        },
+      ],
+      errorMessage: undefined,
+    };
+  });
+
+  afterEach(() => {
+    delete process.env.ANTHROPIC_API_KEY;
+  });
+
+  it('getApiKey("router") returns the router API key when model uses a router provider', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+
+    await spawnWaveAgent({
+      wave: 'assess',
+      model: 'router:claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Message.',
+      cwd: '/tmp/test',
+    });
+
+    const agentConfig = vi.mocked(Agent).mock.calls[0]?.[0] as {
+      getApiKey: (provider: string) => string | undefined;
+    };
+    expect(agentConfig.getApiKey('router')).toBe('mock-router-key');
+  });
+
+  it('getApiKey("ollama") still returns "ollama" (existing behavior preserved)', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+
+    await spawnWaveAgent({
+      wave: 'assess',
+      model: 'router:claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Message.',
+      cwd: '/tmp/test',
+    });
+
+    const agentConfig = vi.mocked(Agent).mock.calls[0]?.[0] as {
+      getApiKey: (provider: string) => string | undefined;
+    };
+    expect(agentConfig.getApiKey('ollama')).toBe('ollama');
+  });
+
+  it('getApiKey("anthropic") still returns ANTHROPIC_API_KEY (existing behavior preserved)', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+
+    await spawnWaveAgent({
+      wave: 'assess',
+      model: 'router:claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Message.',
+      cwd: '/tmp/test',
+    });
+
+    const agentConfig = vi.mocked(Agent).mock.calls[0]?.[0] as {
+      getApiKey: (provider: string) => string | undefined;
+    };
+    expect(agentConfig.getApiKey('anthropic')).toBe('test-anthropic-key');
   });
 });
 

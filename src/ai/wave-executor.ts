@@ -12,6 +12,7 @@ import { log } from '../utils/logger.js';
 import { classifyError, isSpendingCapBehavior, KovaError } from './errors.js';
 import { isLocalModel, resolveModelFromString, resolveWaveModel } from './models.js';
 import { isOllamaProvider, resolveOllamaApiKey } from './ollama.js';
+import { isRouterProvider, resolveRouterApiKey } from './router.js';
 import { type AIWaveName, DEFAULT_THINKING_LEVELS, getWaveTools } from './wave-tools.js';
 
 export interface OutputFormat {
@@ -470,6 +471,7 @@ export async function executeWaveWithRetry(options: WaveOptions, maxRetries = 2)
 
 /** Resolve the API key for a given provider. Provider-specific env vars take priority. */
 export function resolveApiKey(provider: string): string | undefined {
+  if (isRouterProvider(provider)) return resolveRouterApiKey();
   if (isOllamaProvider(provider)) return resolveOllamaApiKey();
   switch (provider) {
     case 'google':

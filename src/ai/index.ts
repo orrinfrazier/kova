@@ -24,6 +24,14 @@ export {
   resolveOllamaApiKey,
 } from './ollama.js';
 export {
+  createRouterModel,
+  getRouterBaseUrl,
+  getRouterDefaultModel,
+  isRouterEnabled,
+  isRouterProvider,
+  resolveRouterApiKey,
+} from './router.js';
+export {
   executeWave,
   executeWaveWithRetry,
   type FallbackWaveHandoff,
