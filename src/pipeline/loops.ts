@@ -28,7 +28,7 @@ export interface TestRunResult {
 
 export type TestRunner = (command: string, workDir: string) => Promise<TestRunResult>;
 
-export type TILoopDiagnosis = 'SPEC_WRONG' | 'APPROACH_WRONG' | 'STUCK';
+export type TILoopDiagnosis = 'SPEC_WRONG' | 'APPROACH_WRONG' | 'MISSING_CONTEXT' | 'STUCK';
 
 export interface TILoopConfig {
   issue: Issue;
@@ -112,17 +112,106 @@ export const defaultTestRunner: TestRunner = async (command, workDir) => {
   }
 };
 
+// --- Output normalization ---
+
+const MISSING_CONTEXT_PATTERNS = [
+  /cannot find module/i,
+  /no such file or directory/i,
+  /not provided/i,
+  /cannot resolve/i,
+  /module not found/i,
+  /could not find/i,
+];
+
+/** Strip timestamps, durations, line numbers, and summary counts so outputs are comparable across runs. */
+export function normalizeTestOutput(output: string): string {
+  return output
+    .replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[\d.]*Z?\s*/g, '') // ISO timestamps
+    .replace(/\b\d+(\.\d+)?m?s\b/g, '') // durations: 123ms, 1.234s, 0.5s
+    .replace(/:\d+:\d+/g, '') // file:line:col references
+    .replace(/\b\d+ (failed|passed)\b/g, '') // summary counts: "2 failed, 8 passed"
+    .replace(/Time:\s+\S+/g, '') // Time: 1.234s
+    .replace(/Duration:\s+\S+/g, ''); // Duration: 123ms
+}
+
+/** Extract failing test names from test runner output (vitest, jest, cargo test, pytest, go test). */
+export function extractFailingTestNames(output: string): string[] {
+  const names = new Set<string>();
+
+  for (const line of output.split('\n')) {
+    const trimmed = line.trim();
+
+    // Vitest: " FAIL  src/auth.test.ts > AuthService > validates expired tokens"
+    const vitestMatch = trimmed.match(/^FAIL\s+\S+\s+>\s+(.+)/);
+    if (vitestMatch?.[1]) {
+      names.add(vitestMatch[1].trim());
+      continue;
+    }
+
+    // Jest: "  ● AuthService › validates expired tokens"
+    const jestMatch = trimmed.match(/^●\s+(.+)/);
+    if (jestMatch?.[1]) {
+      names.add(jestMatch[1].trim());
+      continue;
+    }
+
+    // Cargo test: "test auth::tests::validates_expired_tokens ... FAILED"
+    const cargoMatch = trimmed.match(/^test\s+(\S+)\s+\.\.\.\s+FAILED/);
+    if (cargoMatch?.[1]) {
+      names.add(cargoMatch[1]);
+      continue;
+    }
+
+    // Pytest: "FAILED tests/test_auth.py::TestAuth::test_validates_expired_tokens"
+    const pytestMatch = trimmed.match(/^FAILED\s+\S+::(\S+)$/);
+    if (pytestMatch?.[1]) {
+      names.add(pytestMatch[1]);
+      continue;
+    }
+
+    // Go test: "--- FAIL: TestValidatesExpiredTokens (0.00s)"
+    const goMatch = trimmed.match(/^---\s+FAIL:\s+(\S+)/);
+    if (goMatch?.[1]) {
+      names.add(goMatch[1]);
+    }
+  }
+
+  return [...names];
+}
+
 // --- Diagnosis classification ---
 
-function classifyDiagnosis(failureOutputs: string[]): TILoopDiagnosis {
+export function classifyDiagnosis(failureOutputs: string[]): TILoopDiagnosis {
   if (failureOutputs.length < 2) return 'STUCK';
 
-  // Length >= 2 guaranteed by early return above
-  const first = failureOutputs[0] as string;
-  const firstLines = new Set(first.split('\n'));
+  // Check for MISSING_CONTEXT patterns across all outputs
+  const allHaveMissingContext = failureOutputs.every((output) =>
+    MISSING_CONTEXT_PATTERNS.some((pattern) => pattern.test(output)),
+  );
+  if (allHaveMissingContext) return 'MISSING_CONTEXT';
+
+  // Extract failing test names from each attempt
+  const namesByAttempt = failureOutputs.map(extractFailingTestNames);
+  const allHaveNames = namesByAttempt.every((names) => names.length > 0);
+
+  if (allHaveNames) {
+    // Length >= 2 guaranteed by early return above — [0] is safe
+    const firstNames = new Set(namesByAttempt[0] as string[]);
+    const allSameTests = namesByAttempt.slice(1).every((names) => {
+      if (names.length !== firstNames.size) return false;
+      return names.every((n) => firstNames.has(n));
+    });
+    return allSameTests ? 'SPEC_WRONG' : 'APPROACH_WRONG';
+  }
+
+  // Fallback: normalized line overlap (for unrecognized test runners)
+  // Length >= 2 guaranteed by early return above — [0] is safe
+  const first = normalizeTestOutput(failureOutputs[0] as string);
+  const firstLines = new Set(first.split('\n').filter((l) => l.trim().length > 0));
 
   const allSimilar = failureOutputs.slice(1).every((output) => {
-    const lines = output.split('\n');
+    const normalized = normalizeTestOutput(output);
+    const lines = normalized.split('\n').filter((l) => l.trim().length > 0);
     const matching = lines.filter((l) => firstLines.has(l)).length;
     return matching / Math.max(lines.length, 1) > 0.8;
   });
@@ -347,6 +436,12 @@ export async function runReviewLoop(config: ReviewLoopConfig): Promise<ReviewLoo
     const needsNewTests = lastReview.findings.filter((f) => f.category === 'needs_new_tests');
     const mechanicalFixes = lastReview.findings.filter((f) => f.category === 'mechanical_fix');
 
+    // Track whether quality re-run is needed:
+    // - NEEDS_NEW_TESTS present → always re-run (new code written)
+    // - Only MECHANICAL_FIX + tests pass → skip quality
+    // - MECHANICAL_FIX + tests fail → re-run quality
+    let needQualityRerun = needsNewTests.length > 0;
+
     // Step 3: Path 1 — NEEDS_NEW_TESTS (ratcheting eval)
     if (needsNewTests.length > 0) {
       const testFilesWritten = await writeReviewTests(needsNewTests, workDir, fileWriter);
@@ -398,23 +493,28 @@ export async function runReviewLoop(config: ReviewLoopConfig): Promise<ReviewLoo
       const verifyRun = await testRunner(testCmd, workDir);
       if (!verifyRun.passed) {
         log.warn('[review-loop] Tests broke during MECHANICAL_FIX impl');
+        needQualityRerun = true;
       }
     }
 
-    // Step 5: Re-run quality gates
-    const qualitySystemPrompt = await loadPrompt('quality');
-    const qualityExecResult = await executeWaveWithRetry({
-      wave: 'quality',
-      systemPrompt: qualitySystemPrompt,
-      userMessage: buildWaveContext('quality', issue, waveResults, {
-        coverageThreshold: repoConfig.rules.coverage,
-      }),
-      cwd: workDir,
-      modelTier: repoConfig.model.quality,
-    });
-    qualityWaveResult = toWaveResult('quality', qualityExecResult);
-    totalCost += qualityExecResult.cost;
-    waveResults.quality = qualityWaveResult;
+    // Step 5: Re-run quality gates (only if new code was written or mechanical fixes broke tests)
+    if (needQualityRerun) {
+      const qualitySystemPrompt = await loadPrompt('quality');
+      const qualityExecResult = await executeWaveWithRetry({
+        wave: 'quality',
+        systemPrompt: qualitySystemPrompt,
+        userMessage: buildWaveContext('quality', issue, waveResults, {
+          coverageThreshold: repoConfig.rules.coverage,
+        }),
+        cwd: workDir,
+        modelTier: repoConfig.model.quality,
+      });
+      qualityWaveResult = toWaveResult('quality', qualityExecResult);
+      totalCost += qualityExecResult.cost;
+      waveResults.quality = qualityWaveResult;
+    } else {
+      log.info('[review-loop] Skipping quality re-run — only mechanical fixes with passing tests');
+    }
   }
 
   // Max iterations reached — collect remaining findings as known issues
