@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { BrainstormHistory, DiminishingReturnsReport } from '../services/brainstorm-history.js';
 import type { RepoConfig, WaveHandoff } from '../types/index.js';
 
 // --- Mock spawnWaveAgent ---
@@ -13,6 +14,17 @@ vi.mock('../ai/index.js', () => ({
 
 vi.mock('./prompts.js', () => ({
   loadPrompt: vi.fn().mockResolvedValue('You are brainstorming issues.'),
+}));
+
+// --- Mock brainstorm history ---
+
+const mockLoadHistory = vi.fn();
+const mockAppendCycle = vi.fn();
+const mockDetectDiminishingReturns = vi.fn();
+vi.mock('../services/brainstorm-history.js', () => ({
+  loadHistory: (...args: unknown[]) => mockLoadHistory(...args),
+  appendCycle: (...args: unknown[]) => mockAppendCycle(...args),
+  detectDiminishingReturns: (...args: unknown[]) => mockDetectDiminishingReturns(...args),
 }));
 
 // Dynamic import after mocks are set up
@@ -64,9 +76,27 @@ function makeBrainstormHandoff(issues: unknown[]): WaveHandoff {
   };
 }
 
+const EMPTY_HISTORY: BrainstormHistory = { cycles: [] };
+
+const NO_OVERLAP_REPORT: DiminishingReturnsReport = {
+  overlapPercent: 0,
+  novelCount: 2,
+  isStale: false,
+  shouldStop: false,
+  novelIssues: ['Add input validation to API endpoints', 'Refactor duplicated error handling'],
+  duplicateIssues: [],
+};
+
 describe('brainstorm', () => {
   beforeEach(() => {
     mockSpawnWaveAgent.mockReset();
+    mockLoadHistory.mockReset();
+    mockAppendCycle.mockReset();
+    mockDetectDiminishingReturns.mockReset();
+    // Default: empty history, no overlap
+    mockLoadHistory.mockResolvedValue(EMPTY_HISTORY);
+    mockAppendCycle.mockResolvedValue(undefined);
+    mockDetectDiminishingReturns.mockReturnValue(NO_OVERLAP_REPORT);
   });
 
   it('spawns a single agent wave with opus (large) model', async () => {
@@ -185,5 +215,121 @@ describe('brainstorm', () => {
 
     expect(result.success).toBe(false);
     expect(result.filtered).toHaveLength(0);
+  });
+
+  describe('focus areas', () => {
+    it('injects CLI focus areas into the agent user message', async () => {
+      mockSpawnWaveAgent.mockResolvedValueOnce(makeBrainstormHandoff(SAMPLE_ISSUES));
+
+      await brainstorm({
+        repoPath: '/tmp/repo',
+        config: DEFAULT_CONFIG,
+        focus: ['security', 'performance'],
+      });
+
+      const callConfig = mockSpawnWaveAgent.mock.calls[0]?.[0] as Record<string, unknown>;
+      const userMessage = callConfig.userMessage as string;
+      expect(userMessage).toContain('security');
+      expect(userMessage).toContain('performance');
+    });
+
+    it('falls back to config.rules.focus when no CLI focus provided', async () => {
+      mockSpawnWaveAgent.mockResolvedValueOnce(makeBrainstormHandoff(SAMPLE_ISSUES));
+
+      const configWithFocus: RepoConfig = {
+        ...DEFAULT_CONFIG,
+        rules: { ...DEFAULT_CONFIG.rules, focus: ['bugs', 'tech-debt'] },
+      };
+
+      await brainstorm({ repoPath: '/tmp/repo', config: configWithFocus });
+
+      const callConfig = mockSpawnWaveAgent.mock.calls[0]?.[0] as Record<string, unknown>;
+      const userMessage = callConfig.userMessage as string;
+      expect(userMessage).toContain('bugs');
+      expect(userMessage).toContain('tech-debt');
+    });
+
+    it('CLI focus overrides config.rules.focus', async () => {
+      mockSpawnWaveAgent.mockResolvedValueOnce(makeBrainstormHandoff(SAMPLE_ISSUES));
+
+      const configWithFocus: RepoConfig = {
+        ...DEFAULT_CONFIG,
+        rules: { ...DEFAULT_CONFIG.rules, focus: ['bugs'] },
+      };
+
+      await brainstorm({
+        repoPath: '/tmp/repo',
+        config: configWithFocus,
+        focus: ['security'],
+      });
+
+      const callConfig = mockSpawnWaveAgent.mock.calls[0]?.[0] as Record<string, unknown>;
+      const userMessage = callConfig.userMessage as string;
+      expect(userMessage).toContain('security');
+      expect(userMessage).not.toContain('ONLY generate issues within these focus areas: bugs');
+    });
+
+    it('does not inject focus when neither CLI nor config provides it', async () => {
+      mockSpawnWaveAgent.mockResolvedValueOnce(makeBrainstormHandoff(SAMPLE_ISSUES));
+
+      await brainstorm({ repoPath: '/tmp/repo', config: DEFAULT_CONFIG });
+
+      const callConfig = mockSpawnWaveAgent.mock.calls[0]?.[0] as Record<string, unknown>;
+      const userMessage = callConfig.userMessage as string;
+      expect(userMessage).not.toContain('focus areas');
+    });
+  });
+
+  // --- Diminishing returns integration ---
+
+  it('loads history and runs diminishing returns check on success', async () => {
+    mockSpawnWaveAgent.mockResolvedValueOnce(makeBrainstormHandoff(SAMPLE_ISSUES));
+
+    const result = await brainstorm({ repoPath: '/tmp/repo', config: DEFAULT_CONFIG });
+
+    expect(mockLoadHistory).toHaveBeenCalledWith('/tmp/repo');
+    expect(mockDetectDiminishingReturns).toHaveBeenCalledOnce();
+    expect(result.diminishingReturns).toBeDefined();
+  });
+
+  it('appends new cycle to history after successful brainstorm', async () => {
+    mockSpawnWaveAgent.mockResolvedValueOnce(makeBrainstormHandoff(SAMPLE_ISSUES));
+
+    await brainstorm({ repoPath: '/tmp/repo', config: DEFAULT_CONFIG });
+
+    expect(mockAppendCycle).toHaveBeenCalledWith(
+      '/tmp/repo',
+      expect.objectContaining({
+        issues: expect.arrayContaining([expect.objectContaining({ title: 'Add input validation to API endpoints' })]),
+      }),
+    );
+  });
+
+  it('returns diminishing returns report in result', async () => {
+    const staleReport: DiminishingReturnsReport = {
+      overlapPercent: 75,
+      novelCount: 1,
+      isStale: true,
+      shouldStop: true,
+      novelIssues: ['New thing'],
+      duplicateIssues: ['Old thing A', 'Old thing B', 'Old thing C'],
+    };
+    mockDetectDiminishingReturns.mockReturnValue(staleReport);
+    mockSpawnWaveAgent.mockResolvedValueOnce(makeBrainstormHandoff(SAMPLE_ISSUES));
+
+    const result = await brainstorm({ repoPath: '/tmp/repo', config: DEFAULT_CONFIG });
+
+    expect(result.diminishingReturns).toEqual(staleReport);
+    expect(result.diminishingReturns?.isStale).toBe(true);
+    expect(result.diminishingReturns?.shouldStop).toBe(true);
+  });
+
+  it('does not check history when brainstorm fails', async () => {
+    mockSpawnWaveAgent.mockRejectedValueOnce(new Error('Agent failed'));
+
+    await brainstorm({ repoPath: '/tmp/repo', config: DEFAULT_CONFIG });
+
+    expect(mockLoadHistory).not.toHaveBeenCalled();
+    expect(mockAppendCycle).not.toHaveBeenCalled();
   });
 });

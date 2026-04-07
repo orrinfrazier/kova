@@ -3,6 +3,12 @@
 
 import { z } from 'zod';
 import { getWaveTools, type OutputFormat, resolveModel, resolveThinkingLevel, spawnWaveAgent } from '../ai/index.js';
+import {
+  appendCycle,
+  type DiminishingReturnsReport,
+  detectDiminishingReturns,
+  loadHistory,
+} from '../services/brainstorm-history.js';
 import type { BrainstormIssue, BrainstormResult, RepoConfig } from '../types/index.js';
 import { BrainstormResultSchema } from '../types/index.js';
 import { log } from '../utils/logger.js';
@@ -22,6 +28,7 @@ export interface BrainstormOptions {
   repoPath: string;
   config: RepoConfig;
   threshold?: number;
+  focus?: string[] | undefined;
 }
 
 export interface BrainstormReturn {
@@ -32,15 +39,23 @@ export interface BrainstormReturn {
   cost: number;
   model: string;
   error?: string;
+  diminishingReturns?: DiminishingReturnsReport;
 }
 
 export async function brainstorm(options: BrainstormOptions): Promise<BrainstormReturn> {
-  const { repoPath, config, threshold = DEFAULT_CONFIDENCE_THRESHOLD } = options;
+  const { repoPath, config, threshold = DEFAULT_CONFIDENCE_THRESHOLD, focus } = options;
 
   const model = resolveModel('large');
   const tools = getWaveTools('brainstorm', repoPath);
   const systemPrompt = await loadPrompt('brainstorm');
   const thinkingLevel = resolveThinkingLevel(config, 'brainstorm');
+
+  const focusAreas = focus ?? config.rules.focus;
+
+  let userMessage = `Analyze the codebase at ${repoPath} and identify improvements. Read key files, understand the architecture, then produce a structured list of issues.`;
+  if (focusAreas && focusAreas.length > 0) {
+    userMessage += `\n\nIMPORTANT: ONLY generate issues within these focus areas: ${focusAreas.join(', ')}. Do not generate issues outside these categories.`;
+  }
 
   try {
     const handoff = await spawnWaveAgent<BrainstormResult>({
@@ -49,7 +64,7 @@ export async function brainstorm(options: BrainstormOptions): Promise<Brainstorm
       tools,
       systemPrompt,
       handoffContext: '',
-      userMessage: `Analyze the codebase at ${repoPath} and identify improvements. Read key files, understand the architecture, then produce a structured list of issues.`,
+      userMessage,
       cwd: repoPath,
       thinkingLevel,
       outputFormat: toOutputFormat(BrainstormResultSchema),
@@ -70,6 +85,18 @@ export async function brainstorm(options: BrainstormOptions): Promise<Brainstorm
     const artifact = handoff.artifact;
     const passing = artifact.issues.filter((issue) => issue.confidence >= threshold);
     const filtered = artifact.issues.filter((issue) => issue.confidence < threshold);
+
+    // Diminishing returns detection
+    const history = await loadHistory(repoPath);
+    const report = detectDiminishingReturns(artifact.issues, history);
+
+    // Persist this cycle for future comparison
+    await appendCycle(repoPath, {
+      timestamp: new Date().toISOString(),
+      issues: artifact.issues.map((i) => ({ title: i.title, category: i.category })),
+      summary: artifact.summary,
+    });
+
     return {
       success: true,
       issues: passing,
@@ -77,6 +104,7 @@ export async function brainstorm(options: BrainstormOptions): Promise<Brainstorm
       summary: artifact.summary,
       cost: handoff.cost,
       model: handoff.model,
+      diminishingReturns: report,
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -124,4 +152,17 @@ export function printBrainstormPreview(result: BrainstormReturn): void {
   }
 
   console.log(`Cost: $${result.cost.toFixed(4)} | Model: ${result.model}`);
+
+  // Diminishing returns warnings
+  if (result.diminishingReturns) {
+    const dr = result.diminishingReturns;
+    if (dr.isStale) {
+      console.log(
+        `\nWarning: ${dr.overlapPercent}% overlap with previous brainstorm cycles (${dr.duplicateIssues.length} duplicate(s))`,
+      );
+    }
+    if (dr.shouldStop) {
+      console.log(`Suggestion: Only ${dr.novelCount} novel issue(s) generated. Consider stopping brainstorm cycles.`);
+    }
+  }
 }

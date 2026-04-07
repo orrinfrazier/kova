@@ -156,7 +156,8 @@ program
   .description('Analyze codebase and generate structured issue suite')
   .option('--repo <path>', 'Repository path', '.')
   .option('--threshold <n>', 'Minimum confidence score (0.0-1.0)', '0.7')
-  .action(async (opts: { repo?: string; threshold?: string }) => {
+  .option('--focus <areas>', 'Comma-separated focus areas (e.g., "security,performance")')
+  .action(async (opts: { repo?: string; threshold?: string; focus?: string }) => {
     const repoPath = resolve(opts.repo ?? '.');
     const config = resolveRepoConfig(repoPath);
     const threshold = Number.parseFloat(opts.threshold ?? '0.7');
@@ -164,9 +165,10 @@ program
       console.error('--threshold must be a number between 0.0 and 1.0');
       process.exit(1);
     }
+    const focus = opts.focus ? opts.focus.split(',').map((s) => s.trim()) : undefined;
 
     log.info('Brainstorming issues...');
-    const result = await brainstorm({ repoPath, config, threshold });
+    const result = await brainstorm({ repoPath, config, threshold, focus });
     printBrainstormPreview(result);
 
     if (!result.success) {
