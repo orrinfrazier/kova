@@ -52,6 +52,7 @@ export interface TILoopConfig {
   maxRetries?: number;
   testCommand?: string;
   prContext?: string;
+  codebaseContext?: string;
   testRunner?: TestRunner;
   diffRunner?: DiffRunner;
 }
@@ -122,6 +123,7 @@ export interface ParallelPieceTILoopConfig {
   testRunner?: TestRunner | undefined;
   diffRunner?: DiffRunner | undefined;
   prContext?: string | undefined;
+  codebaseContext?: string | undefined;
 }
 
 export interface ParallelPieceTILoopResult {
@@ -377,6 +379,7 @@ export async function runTILoop(config: TILoopConfig): Promise<TILoopResult> {
     waveResults,
     maxRetries = 3,
     prContext,
+    codebaseContext,
     testRunner = defaultTestRunner,
     diffRunner = defaultDiffRunner,
   } = config;
@@ -432,6 +435,7 @@ export async function runTILoop(config: TILoopConfig): Promise<TILoopResult> {
     // Build impl context — fresh each time with spec + test failures only
     let implContext = buildWaveContext('impl', issue, updatedWaveResults, {
       ...(prContext != null && { prContext }),
+      ...(codebaseContext != null && { codebaseContext }),
       ...(escalationHint != null && { escalationHint }),
     });
     if (failureOutputs.length > 0) {
@@ -612,6 +616,7 @@ export async function runParallelPieceTILoop(config: ParallelPieceTILoopConfig):
     maxConcurrent = 3,
     testRunner = defaultTestRunner,
     prContext,
+    codebaseContext,
   } = config;
 
   // Extract spec pieces
@@ -632,6 +637,7 @@ export async function runParallelPieceTILoop(config: ParallelPieceTILoopConfig):
       waveResults,
       testRunner,
       ...(prContext != null && { prContext }),
+      ...(codebaseContext != null && { codebaseContext }),
       ...(config.diffRunner != null && { diffRunner: config.diffRunner }),
       ...(config.testCommand != null && { testCommand: config.testCommand }),
     });

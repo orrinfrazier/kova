@@ -11,6 +11,7 @@ export type {
   RepoConfig,
   ReviewKnownIssue,
   ThinkingLevel,
+  VectorDBConfig,
   WaveModelConfig,
   WaveModelOverride,
   WaveName,
@@ -25,6 +26,7 @@ export {
   ProvidersSchema,
   RepoConfigSchema,
   ThinkingLevelSchema,
+  VectorDBConfigSchema,
   WaveModelConfigSchema,
   WaveModelOverrideSchema,
 } from './config.js';

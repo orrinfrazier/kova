@@ -31,6 +31,8 @@ export interface ContextOptions {
   tokenBudget?: number;
   /** Escalation hint injected after diagnosis (APPROACH_WRONG / MISSING_CONTEXT). */
   escalationHint?: string;
+  /** Pre-formatted codebase context from vector DB (only for spec/impl waves). */
+  codebaseContext?: string;
 }
 
 export interface PieceContextOptions {
@@ -141,6 +143,10 @@ function buildSpecContext(issue: Issue, handoffs: Handoffs, options: ContextOpti
     sections.push(formatAssessSection(assess));
   }
 
+  if (options.codebaseContext) {
+    sections.push(options.codebaseContext);
+  }
+
   if (options.prContext) {
     sections.push(options.prContext);
   }
@@ -182,6 +188,10 @@ function buildImplContext(handoffs: Handoffs, options: ContextOptions): string {
   if (test?.test_files_created && test.test_files_created.length > 0) {
     const fileList = test.test_files_created.map((f) => `- ${f}`).join('\n');
     sections.push(`## Test Files (${test.test_count ?? test.test_files_created.length} tests)\n\n${fileList}`);
+  }
+
+  if (options.codebaseContext) {
+    sections.push(options.codebaseContext);
   }
 
   if (options.prContext) {

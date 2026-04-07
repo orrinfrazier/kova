@@ -578,6 +578,91 @@ repos:
 });
 
 /* ------------------------------------------------------------------ */
+/*  vectordb config                                                    */
+/* ------------------------------------------------------------------ */
+
+describe('vectordb config', () => {
+  it('loads config with vectordb enabled', async () => {
+    const yaml = `
+repos:
+  vdb-repo:
+    path: /tmp/vdb
+    vectordb:
+      enabled: true
+      endpoint: http://localhost:8100/query
+      top_k: 5
+`;
+    await writeFile(join(tempDir, 'repos.yaml'), yaml);
+
+    const config = await loadConfig(join(tempDir, 'repos.yaml'));
+    const repo = config.repos['vdb-repo'];
+    expect(repo).toBeDefined();
+    if (!repo) return;
+
+    expect(repo.vectordb?.enabled).toBe(true);
+    expect(repo.vectordb?.endpoint).toBe('http://localhost:8100/query');
+    expect(repo.vectordb?.top_k).toBe(5);
+  });
+
+  it('applies defaults for top_k when not specified', async () => {
+    const yaml = `
+repos:
+  vdb-defaults:
+    path: /tmp/vdb
+    vectordb:
+      enabled: true
+      endpoint: http://localhost:8100/query
+`;
+    await writeFile(join(tempDir, 'repos.yaml'), yaml);
+
+    const config = await loadConfig(join(tempDir, 'repos.yaml'));
+    const repo = config.repos['vdb-defaults'];
+    expect(repo?.vectordb?.top_k).toBe(10);
+  });
+
+  it('vectordb section is optional', async () => {
+    const yaml = `
+repos:
+  no-vdb:
+    path: /tmp/none
+`;
+    await writeFile(join(tempDir, 'repos.yaml'), yaml);
+
+    const config = await loadConfig(join(tempDir, 'repos.yaml'));
+    const repo = config.repos['no-vdb'];
+    expect(repo?.vectordb).toBeUndefined();
+  });
+
+  it('rejects vectordb with missing endpoint when enabled', async () => {
+    const yaml = `
+repos:
+  bad-vdb:
+    path: /tmp/bad
+    vectordb:
+      enabled: true
+`;
+    await writeFile(join(tempDir, 'repos.yaml'), yaml);
+
+    await expect(loadConfig(join(tempDir, 'repos.yaml'))).rejects.toThrow(ZodError);
+  });
+
+  it('allows vectordb disabled without endpoint', async () => {
+    const yaml = `
+repos:
+  disabled-vdb:
+    path: /tmp/disabled
+    vectordb:
+      enabled: false
+`;
+    await writeFile(join(tempDir, 'repos.yaml'), yaml);
+
+    const config = await loadConfig(join(tempDir, 'repos.yaml'));
+    const repo = config.repos['disabled-vdb'];
+    expect(repo?.vectordb?.enabled).toBe(false);
+  });
+});
+
+/* ------------------------------------------------------------------ */
 /*  detectRepoName                                                     */
 /* ------------------------------------------------------------------ */
 
