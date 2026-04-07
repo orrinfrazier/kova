@@ -81,17 +81,20 @@ export async function commitAndPush(
   branch: string,
   issue: { number: number; title: string },
 ): Promise<CommitAndPushResult> {
-  // Detect changed files (modified + untracked, with full paths for subdirs)
-  const status = await $`git -C ${workDir} status --porcelain --untracked-files=all`;
-  const lines = status.stdout.trim().split('\n').filter(Boolean);
+  // Detect changed files: modified tracked + untracked
+  const [modified, untracked] = await Promise.all([
+    $`git -C ${workDir} diff --name-only`,
+    $`git -C ${workDir} ls-files --others --exclude-standard`,
+  ]);
+  const files = [
+    ...modified.stdout.trim().split('\n').filter(Boolean),
+    ...untracked.stdout.trim().split('\n').filter(Boolean),
+  ];
 
-  if (lines.length === 0) {
+  if (files.length === 0) {
     log.info('[ship] No changed files — skipping commit');
     return { committed: false, filesStaged: [] };
   }
-
-  // Parse file paths from porcelain output (format: "XY path" or "XY path -> path")
-  const files = lines.map((line) => line.slice(3).split(' -> ').pop()!.trim());
 
   // Stage specific files (not -A)
   await $`git -C ${workDir} add ${files}`;
