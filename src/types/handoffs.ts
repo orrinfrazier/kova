@@ -6,7 +6,7 @@ import { z } from 'zod';
 import { fs, path } from 'zx';
 import { log } from '../utils/logger.js';
 
-const WaveNameSchema = z.enum(['assess', 'spec', 'test', 'impl', 'quality', 'review', 'ship']);
+const WaveNameSchema = z.enum(['assess', 'spec', 'test', 'impl', 'quality', 'review', 'ship', 'brainstorm']);
 
 export const WaveHandoffSchema = z.object({
   wave: WaveNameSchema,

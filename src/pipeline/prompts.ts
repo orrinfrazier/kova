@@ -83,6 +83,18 @@ Output structured JSON with verdict (pass/needs_fixes) and findings.`,
 3. Push the branch
 
 Do NOT merge. Do NOT create the PR (the orchestrator handles that).`,
+
+  brainstorm: `You are analyzing a codebase to identify improvements.
+
+Read key files (README, config, entry points, core modules, tests).
+Identify bugs, security issues, performance problems, tech debt, and enhancements.
+
+For each issue provide:
+- Clear title (imperative mood)
+- Description with file paths and context
+- Labels, priority (critical/high/medium/low), and category
+
+Output structured JSON matching the provided schema.`,
 };
 
 export async function loadPrompt(wave: string): Promise<string> {

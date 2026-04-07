@@ -42,6 +42,7 @@ export const DEFAULT_WAVE_TIMEOUTS: Record<WaveName, number | undefined> = {
   assess: 5 * 60 * 1000,
   spec: 5 * 60 * 1000,
   review: 5 * 60 * 1000,
+  brainstorm: 10 * 60 * 1000,
   test: 15 * 60 * 1000,
   impl: 15 * 60 * 1000,
   quality: 10 * 60 * 1000,
