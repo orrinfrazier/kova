@@ -50,7 +50,7 @@ describe('formatPRContext', () => {
 // Test extractPRFromResult
 describe('extractPRFromResult', () => {
   function makeIssue(n: number): Issue {
-    return { number: n, title: 'Issue ' + n, body: 'body', labels: [], url: 'https://example.com/' + n };
+    return { number: n, title: `Issue ${n}`, body: 'body', labels: [], url: `https://example.com/${n}` };
   }
 
   it('extracts PR from successful fix result', () => {
@@ -139,8 +139,8 @@ describe('fix — PR context injection', () => {
     return {
       ...original,
       createWorktree: vi.fn().mockImplementation((_repoPath: string, issueNumber: number) => ({
-        path: '/tmp/test-worktree-' + issueNumber,
-        branch: 'kova/fix-' + issueNumber,
+        path: `/tmp/test-worktree-${issueNumber}`,
+        branch: `kova/fix-${issueNumber}`,
       })),
       removeWorktree: vi.fn().mockResolvedValue(undefined),
       commitAndPush: vi.fn().mockResolvedValue({

@@ -136,7 +136,6 @@ vi.mock('@mariozechner/pi-coding-agent', () => ({
   createAgentSession: (...args: unknown[]) => mockCreateAgentSession(...args),
   AuthStorage: { create: () => ({ setRuntimeApiKey: vi.fn() }) },
   DefaultResourceLoader: class {
-    constructor(_opts: unknown) {}
     async reload() {}
   },
   ModelRegistry: { inMemory: () => ({}) },
