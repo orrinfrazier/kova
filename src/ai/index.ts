@@ -11,6 +11,7 @@ export {
   resolveModel,
   resolveModelFromString,
   resolveWaveModel,
+  validateModelConfig,
 } from './models.js';
 export {
   createOllamaModel,

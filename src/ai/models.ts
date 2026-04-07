@@ -1,5 +1,5 @@
 import { getModel, getProviders, type Model, registerBuiltInApiProviders } from '@mariozechner/pi-ai';
-import type { ModelTier, OllamaProvider, WaveModelConfig } from '../types/index.js';
+import type { ModelTier, OllamaProvider, RepoConfig, WaveModelConfig } from '../types/index.js';
 import { KovaError } from './errors.js';
 import { createOllamaModel, isOllamaProvider } from './ollama.js';
 import { createRouterModel, isRouterEnabled, isRouterProvider } from './router.js';
@@ -160,10 +160,15 @@ function resolveModelString(tier: ModelTier): string {
   return base;
 }
 
-/** Resolve a WaveModelConfig (tier string or {provider, model} override) to a Model. */
+const MODEL_TIERS: ReadonlySet<string> = new Set(['small', 'medium', 'large']);
+
+/** Resolve a WaveModelConfig (tier string, bare model string, or {provider, model} override) to a Model. */
 export function resolveWaveModel(config: WaveModelConfig): Model<string> {
   if (typeof config === 'string') {
-    return resolveModel(config);
+    if (MODEL_TIERS.has(config)) {
+      return resolveModel(config as ModelTier);
+    }
+    return resolveModelFromString(config);
   }
   return resolveModelFromString(`${config.provider}:${config.model}`);
 }
@@ -188,4 +193,50 @@ export function isLocalModel(modelString: string): boolean {
 /** Return the default API model string for a tier, ignoring env overrides. */
 export function getApiFallbackModelString(tier: ModelTier): string {
   return DEFAULT_MODELS[tier];
+}
+
+// --- Provider → API key env var mapping ---
+
+const PROVIDER_API_KEY_ENV: Readonly<Record<string, string>> = {
+  anthropic: 'ANTHROPIC_API_KEY',
+  openai: 'OPENAI_API_KEY',
+  google: 'GOOGLE_API_KEY',
+  'amazon-bedrock': 'AWS_ACCESS_KEY_ID',
+  'vertex-ai': 'GOOGLE_APPLICATION_CREDENTIALS',
+};
+
+/** Check whether the required API key is available for a provider. */
+function hasApiKey(provider: string): boolean {
+  const envVar = PROVIDER_API_KEY_ENV[provider];
+  if (!envVar) return true; // Unknown provider — assume key is handled elsewhere
+  return !!process.env[envVar];
+}
+
+// --- Startup model validation ---
+
+const WAVE_NAMES = ['assess', 'spec', 'test', 'impl', 'quality', 'review', 'brainstorm'] as const;
+
+/** Validate that all configured models are resolvable and have API keys present.
+ *  Call at startup before the pipeline begins to fail fast on config errors. */
+export function validateModelConfig(config: RepoConfig): void {
+  for (const wave of WAVE_NAMES) {
+    const waveConfig = config.model[wave];
+    try {
+      const model = resolveWaveModel(waveConfig);
+      if (!isLocalProvider(model.provider) && !hasApiKey(model.provider)) {
+        throw new KovaError(
+          `No API key for provider "${model.provider}" (set ${PROVIDER_API_KEY_ENV[model.provider] ?? 'the appropriate env var'}). Wave: ${wave}, model: ${model.id}`,
+          'config',
+          false,
+        );
+      }
+    } catch (e) {
+      if (e instanceof KovaError) throw e;
+      throw new KovaError(
+        `Model validation failed for wave "${wave}": ${e instanceof Error ? e.message : String(e)}`,
+        'config',
+        false,
+      );
+    }
+  }
 }

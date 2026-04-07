@@ -593,6 +593,93 @@ repos:
 });
 
 /* ------------------------------------------------------------------ */
+/*  bare model string config (issue #40)                               */
+/* ------------------------------------------------------------------ */
+
+describe('bare model string config', () => {
+  it('accepts bare model string for a wave', async () => {
+    const yaml = `
+repos:
+  model-repo:
+    path: /tmp/model
+    model:
+      assess: claude-opus-4-6
+      spec: claude-sonnet-4-6
+      impl: gemini-2.5-flash
+      quality: claude-haiku-4-5-20251001
+`;
+    await writeFile(join(tempDir, 'repos.yaml'), yaml);
+
+    const config = await loadConfig(join(tempDir, 'repos.yaml'));
+    const repo = config.repos['model-repo'];
+    expect(repo).toBeDefined();
+    if (!repo) return;
+
+    expect(repo.model.assess).toBe('claude-opus-4-6');
+    expect(repo.model.spec).toBe('claude-sonnet-4-6');
+    expect(repo.model.impl).toBe('gemini-2.5-flash');
+    expect(repo.model.quality).toBe('claude-haiku-4-5-20251001');
+    // Tier defaults preserved for unspecified waves
+    expect(repo.model.test).toBe('medium');
+    expect(repo.model.review).toBe('large');
+  });
+
+  it('accepts mixed tiers, bare model strings, and provider overrides', async () => {
+    const yaml = `
+repos:
+  mixed-repo:
+    path: /tmp/mixed
+    model:
+      assess: large
+      spec: claude-sonnet-4-6
+      test:
+        provider: ollama
+        model: qwen2.5-coder:32b
+      impl: gemini-2.5-flash
+      quality: small
+      review: claude-opus-4-6
+`;
+    await writeFile(join(tempDir, 'repos.yaml'), yaml);
+
+    const config = await loadConfig(join(tempDir, 'repos.yaml'));
+    const repo = config.repos['mixed-repo'];
+    expect(repo).toBeDefined();
+    if (!repo) return;
+
+    expect(repo.model.assess).toBe('large');
+    expect(repo.model.spec).toBe('claude-sonnet-4-6');
+    expect(repo.model.test).toEqual({ provider: 'ollama', model: 'qwen2.5-coder:32b' });
+    expect(repo.model.impl).toBe('gemini-2.5-flash');
+    expect(repo.model.quality).toBe('small');
+    expect(repo.model.review).toBe('claude-opus-4-6');
+  });
+
+  it('accepts fallback model in model config', async () => {
+    const yaml = `
+repos:
+  fallback-repo:
+    path: /tmp/fallback
+    model:
+      assess: claude-opus-4-6
+      fallback: claude-sonnet-4-6
+`;
+    await writeFile(join(tempDir, 'repos.yaml'), yaml);
+
+    const config = await loadConfig(join(tempDir, 'repos.yaml'));
+    const repo = config.repos['fallback-repo'];
+    expect(repo).toBeDefined();
+    if (!repo) return;
+
+    expect(repo.model.fallback).toBe('claude-sonnet-4-6');
+  });
+
+  it('fallback is optional and defaults to undefined', () => {
+    const config = resolveRepoConfig('/tmp/repo');
+    expect(config.model.fallback).toBeUndefined();
+  });
+});
+
+/* ------------------------------------------------------------------ */
 /*  vectordb config                                                    */
 /* ------------------------------------------------------------------ */
 

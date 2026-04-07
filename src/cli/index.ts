@@ -12,6 +12,7 @@
 
 import { resolve } from 'node:path';
 import { Command } from 'commander';
+import { validateModelConfig } from '../ai/index.js';
 import { runAuto, runAutoMultiRepo } from '../pipeline/auto.js';
 import { brainstorm, printBrainstormPreview } from '../pipeline/brainstorm.js';
 import { fix } from '../pipeline/fix.js';
@@ -151,6 +152,9 @@ program
       }
 
       log.info(`Fixing issue #${issueNumber} in ${repoName}`);
+
+      // Validate configured models and API keys before starting
+      validateModelConfig(config);
 
       if (!opts.force) {
         const existing = await hasExistingWork(repoPath, issueNumber);
