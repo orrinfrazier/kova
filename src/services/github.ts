@@ -212,6 +212,41 @@ export function fetchPRDependencies(body: string): number[] {
   return [...new Set(numbers)];
 }
 
+export interface PRReviewComment {
+  author: string;
+  body: string;
+  path: string | undefined;
+  line: number | undefined;
+  createdAt: string;
+}
+
+const BOT_AUTHORS = new Set(['kova', 'github-actions']);
+
+export async function fetchPRReviewComments(repoPath: string, prNumber: number): Promise<PRReviewComment[]> {
+  try {
+    const result = await $({ cwd: repoPath })`gh pr view ${prNumber} --json comments --jq .comments`;
+    const raw = JSON.parse(result.stdout) as Array<{
+      author: { login: string };
+      body: string;
+      path: string | null;
+      line: number | null;
+      createdAt: string;
+    }>;
+
+    return raw
+      .filter((c) => !BOT_AUTHORS.has(c.author.login))
+      .map((c) => ({
+        author: c.author.login,
+        body: c.body,
+        path: c.path ?? undefined,
+        line: c.line ?? undefined,
+        createdAt: c.createdAt,
+      }));
+  } catch {
+    return [];
+  }
+}
+
 export async function hasExistingWork(repoPath: string, issueNumber: number): Promise<ExistingWork | undefined> {
   const branch = `kova/fix-${issueNumber}`;
   const [branchExists, prUrl] = await Promise.all([

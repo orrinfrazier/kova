@@ -19,6 +19,7 @@ import {
   stopAllMCPServers,
 } from '../ai/index.js';
 import { clearCheckpoint, loadCheckpoint, saveCheckpoint } from '../services/checkpoint.js';
+import { collectPRFeedback } from '../services/feedback-collector.js';
 import { commentOnIssue, createPR, listOpenPRs } from '../services/github.js';
 import { validateIsolation } from '../services/isolation.js';
 import { detectTooling } from '../services/language-detect.js';
@@ -46,8 +47,10 @@ import {
   buildEpisodeRecord,
   formatCodeChunks,
   formatEpisodes,
+  formatReviewFeedback,
   queryCodeContext,
   queryEpisodeContext,
+  queryReviewFeedbackContext,
   recordEpisode,
 } from '../services/vectordb.js';
 import {
@@ -563,12 +566,26 @@ export async function fix(options: FixOptions): Promise<FixResult> {
 
     // WAVE R: Review Loop
     if (!shouldSkip('review')) {
+      // Query past review feedback for injection into review wave
+      let reviewFeedbackContext: string | undefined;
+      if (config.episodes?.enabled) {
+        const feedbackItems = await queryReviewFeedbackContext(
+          config.episodes,
+          `${issue.title}\n\n${issue.body}`,
+          repoName,
+        );
+        if (feedbackItems.length > 0) {
+          reviewFeedbackContext = formatReviewFeedback(feedbackItems);
+        }
+      }
+
       const reviewLoopResult = await runReviewLoop({
         issue,
         workDir,
         repoConfig: config,
         waveResults: state.waveResults,
         prContext,
+        ...(reviewFeedbackContext != null && { reviewFeedbackContext }),
         ...(testRunner != null && { testRunner }),
         playwright: playwrightOption,
       });
@@ -723,6 +740,19 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       await recordEpisode(config.episodes, episode).catch((err) => {
         log.warn(`Failed to record episode: ${err instanceof Error ? err.message : String(err)}`);
       });
+    }
+
+    // PR feedback collection: collect review comments after ship
+    const shipArtifact = state.waveResults.ship?.artifact as { prUrl?: string } | undefined;
+    const shipPrUrl = shipArtifact?.prUrl;
+    if (config.episodes?.enabled && shipPrUrl) {
+      const prNumberMatch = shipPrUrl.match(/\/pull\/(\d+)/);
+      const prNumber = prNumberMatch?.[1] ? Number.parseInt(prNumberMatch[1], 10) : undefined;
+      if (prNumber) {
+        collectPRFeedback({ episodesConfig: config.episodes, repoName, prNumber, repoPath: workDir }).catch((err) => {
+          log.warn(`Failed to collect PR feedback: ${err instanceof Error ? err.message : String(err)}`);
+        });
+      }
     }
 
     // MCP server cleanup

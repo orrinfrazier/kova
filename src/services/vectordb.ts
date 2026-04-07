@@ -6,6 +6,7 @@ import { readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { EpisodicMemoryConfig, FixState, VectorDBConfig } from '../types/config.js';
+import type { FeedbackType } from '../types/vectordb.js';
 import type { AssessResult, QualityResult, ReviewFinding, ReviewResult, SpecResult } from '../types/waves.js';
 import { log } from '../utils/logger.js';
 import type { Chunk } from './chunker.js';
@@ -592,6 +593,228 @@ export async function queryPatterns(
   return result.rows;
 }
 
+/* ================================================================== */
+/*  Review feedback — classification, recording, pgvector ops          */
+/* ================================================================== */
+
+export interface ReviewFeedbackRecord {
+  repo: string;
+  pr_number: number;
+  feedback_type: string;
+  comment_text: string;
+  file_path?: string | undefined;
+  author?: string | undefined;
+}
+
+export type ReviewFeedbackInput = ReviewFeedbackRecord;
+
+export interface ReviewFeedbackItem {
+  feedback_type: string;
+  pr_number: number;
+  comment_text: string;
+  file_path?: string | undefined;
+}
+
+/* ------------------------------------------------------------------ */
+/*  classifyFeedback                                                    */
+/* ------------------------------------------------------------------ */
+
+const FEEDBACK_KEYWORDS: Array<[RegExp, FeedbackType]> = [
+  [/\btest\b/i, 'missing_test'],
+  [/\bsecurity\b/i, 'security_concern'],
+  [/\binjection\b/i, 'security_concern'],
+  [/\bauth\b/i, 'security_concern'],
+  [/\bnaming\b/i, 'naming'],
+  [/\brename\b/i, 'naming'],
+  [/\barchitecture\b/i, 'architecture'],
+  [/\bstructure\b/i, 'architecture'],
+  [/\bpattern\b/i, 'architecture'],
+  [/\bperformance\b/i, 'performance'],
+  [/\bslow\b/i, 'performance'],
+  [/\bmemory\b/i, 'performance'],
+  [/\bdoc\b/i, 'documentation'],
+  [/\bcomment\b/i, 'documentation'],
+  [/\breadme\b/i, 'documentation'],
+  [/\blogic\b/i, 'logic_error'],
+  [/\bbug\b/i, 'logic_error'],
+  [/\bincorrect\b/i, 'logic_error'],
+  [/\bwrong\b/i, 'logic_error'],
+  [/\bstyle\b/i, 'style_issue'],
+  [/\bformat\b/i, 'style_issue'],
+];
+
+export function classifyFeedback(text: string): FeedbackType {
+  for (const [regex, type] of FEEDBACK_KEYWORDS) {
+    if (regex.test(text)) {
+      return type;
+    }
+  }
+  return 'style_issue';
+}
+
+/* ------------------------------------------------------------------ */
+/*  recordReviewFeedback — REST endpoint (graceful degradation)         */
+/* ------------------------------------------------------------------ */
+
+export async function recordReviewFeedback(
+  config: EpisodicMemoryConfig,
+  records: ReviewFeedbackRecord[],
+): Promise<boolean> {
+  if (!config.enabled) {
+    return false;
+  }
+
+  if (!config.endpoint) {
+    log.warn('[review-feedback] Enabled but no endpoint configured — skipping recording');
+    return false;
+  }
+
+  try {
+    const response = await fetch(config.endpoint, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(records),
+    });
+
+    if (!response.ok) {
+      log.warn(`[review-feedback] Recording endpoint returned ${response.status} — feedback not saved`);
+      return false;
+    }
+
+    log.info(`[review-feedback] Recorded ${records.length} feedback items`);
+    return true;
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    log.warn(`[review-feedback] Failed to record feedback: ${msg}`);
+    return false;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/*  insertReviewFeedback — pgvector INSERT                              */
+/* ------------------------------------------------------------------ */
+
+const INSERT_REVIEW_FEEDBACK_SQL = `
+INSERT INTO review_feedback (repo, pr_number, feedback_type, comment_text, file_path, author, embedding)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+`;
+
+export async function insertReviewFeedback(client: VectorDBClient, feedback: ReviewFeedbackInput): Promise<void> {
+  const text = `${feedback.feedback_type} ${feedback.comment_text} ${feedback.file_path ?? ''}`;
+  const embedding = await client.embed(text);
+  await client.pool.query(INSERT_REVIEW_FEEDBACK_SQL, [
+    feedback.repo,
+    feedback.pr_number,
+    feedback.feedback_type,
+    feedback.comment_text,
+    feedback.file_path ?? null,
+    feedback.author ?? null,
+    JSON.stringify(embedding),
+  ]);
+}
+
+/* ------------------------------------------------------------------ */
+/*  queryReviewFeedback — pgvector SELECT                               */
+/* ------------------------------------------------------------------ */
+
+const QUERY_REVIEW_FEEDBACK_SQL = `
+SELECT id, repo, pr_number, feedback_type, comment_text, file_path, author, created_at
+FROM review_feedback
+WHERE repo = $1
+ORDER BY embedding <-> $2
+LIMIT $3
+`;
+
+export async function queryReviewFeedback(
+  client: VectorDBClient,
+  repo: string,
+  query: string,
+  limit = 10,
+): Promise<unknown[]> {
+  const embedding = await client.embed(query);
+  const result = await client.pool.query(QUERY_REVIEW_FEEDBACK_SQL, [repo, JSON.stringify(embedding), limit]);
+  return result.rows;
+}
+
+/* ------------------------------------------------------------------ */
+/*  formatReviewFeedback — markdown output                              */
+/* ------------------------------------------------------------------ */
+
+export function formatReviewFeedback(feedback: ReviewFeedbackItem[]): string {
+  if (feedback.length === 0) {
+    return '';
+  }
+
+  const sections = feedback.map((f) => {
+    const parts = [`- [${f.feedback_type}] PR #${f.pr_number}: "${f.comment_text}"`];
+    if (f.file_path) {
+      parts.push(`  file: ${f.file_path}`);
+    }
+    return parts.join('\n');
+  });
+
+  return `## Past reviewer feedback\n\n${sections.join('\n')}`;
+}
+
+/* ------------------------------------------------------------------ */
+/*  queryReviewFeedbackContext — REST endpoint (pipeline context)        */
+/* ------------------------------------------------------------------ */
+
+interface ReviewFeedbackContextResponse {
+  feedback?: ReviewFeedbackItem[];
+}
+
+/**
+ * Query the episodic memory REST endpoint for past review feedback similar to the given query.
+ * Returns an empty array if disabled, on error, or if the response is malformed.
+ */
+export async function queryReviewFeedbackContext(
+  config: EpisodicMemoryConfig,
+  query: string,
+  repo?: string,
+): Promise<ReviewFeedbackItem[]> {
+  if (!config.enabled) {
+    return [];
+  }
+
+  if (!config.endpoint) {
+    log.warn('[review-feedback] Enabled but no endpoint configured — skipping');
+    return [];
+  }
+
+  try {
+    const body: Record<string, unknown> = { query, type: 'review_feedback', top_k: config.max_episodes };
+    if (repo) {
+      body.repo = repo;
+    }
+
+    const response = await fetch(config.endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+    if (!response.ok) {
+      log.warn(`[review-feedback] Endpoint returned ${response.status} — skipping feedback context`);
+      return [];
+    }
+
+    const data = (await response.json()) as ReviewFeedbackContextResponse;
+
+    if (!data.feedback || !Array.isArray(data.feedback)) {
+      log.warn('[review-feedback] Malformed response (missing feedback array) — skipping');
+      return [];
+    }
+
+    log.info(`[review-feedback] Retrieved ${data.feedback.length} past feedback items`);
+    return data.feedback;
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    log.warn(`[review-feedback] Failed to query endpoint: ${msg} — skipping feedback context`);
+    return [];
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /*  runMigration                                                        */
 /* ------------------------------------------------------------------ */
@@ -606,6 +829,9 @@ export async function runMigration(client: VectorDBClient): Promise<void> {
 
   const sql002 = await readFile(join(migrationsDir, '002_episodes_language.sql'), 'utf-8');
   await client.pool.query(sql002);
+
+  const sql003 = await readFile(join(migrationsDir, '003_review_feedback.sql'), 'utf-8');
+  await client.pool.query(sql003);
 }
 
 /* ------------------------------------------------------------------ */
