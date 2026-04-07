@@ -10,7 +10,7 @@ import type { z } from 'zod';
 import type { WaveHandoff, WaveModelConfig, WaveName } from '../types/index.js';
 import { log } from '../utils/logger.js';
 import { classifyError, isSpendingCapBehavior, KovaError } from './errors.js';
-import { resolveModelFromString, resolveWaveModel } from './models.js';
+import { isLocalModel, resolveModelFromString, resolveWaveModel } from './models.js';
 import { isOllamaProvider, resolveOllamaApiKey } from './ollama.js';
 import { type AIWaveName, DEFAULT_THINKING_LEVELS, getWaveTools } from './wave-tools.js';
 
@@ -299,6 +299,80 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
     if (timeoutId != null) clearTimeout(timeoutId);
     unsubscribe();
   }
+}
+
+// --- Local-to-API fallback ---
+
+export interface SpawnWithFallbackConfig extends SpawnWaveAgentConfig {
+  /** API model string to fall back to when the primary (local) model fails. */
+  fallbackModel?: string | undefined;
+}
+
+export interface FallbackWaveHandoff<T = unknown> extends WaveHandoff<T> {
+  /** Whether the API fallback model was used instead of the primary local model. */
+  fallback_used: boolean;
+  /** Cost incurred by the local model attempt (typically 0 for local models). */
+  local_attempt_cost?: number | undefined;
+}
+
+/**
+ * Spawn a wave agent with automatic fallback from local to API model.
+ *
+ * If the primary model is local (ollama, lmstudio, etc.) and fails —
+ * structured output validation fails, empty result, timeout, or error —
+ * automatically retries once with the API fallback model.
+ *
+ * Max 1 fallback attempt (no loop).
+ */
+export async function spawnWaveAgentWithFallback<T = unknown>(
+  config: SpawnWithFallbackConfig,
+): Promise<FallbackWaveHandoff<T>> {
+  const { fallbackModel, ...baseConfig } = config;
+  const shouldFallback = fallbackModel != null && isLocalModel(config.model);
+
+  try {
+    const handoff = await spawnWaveAgent<T>(baseConfig);
+
+    // Check if the result indicates a failure worth falling back from
+    if (shouldFallback && needsFallback(handoff, config.outputFormat)) {
+      log.warn(
+        `[${config.wave}] Local model failed, falling back to API (model=${fallbackModel}): low confidence or empty result`,
+      );
+      const localCost = handoff.cost;
+      const fallbackHandoff = await spawnWaveAgent<T>({ ...baseConfig, model: fallbackModel });
+      return {
+        ...fallbackHandoff,
+        cost: localCost + fallbackHandoff.cost,
+        fallback_used: true,
+        local_attempt_cost: localCost,
+      };
+    }
+
+    return { ...handoff, fallback_used: false };
+  } catch (error) {
+    // If the primary model threw and we can fall back, try the API model
+    if (shouldFallback) {
+      log.warn(
+        `[${config.wave}] Local model failed, falling back to API (model=${fallbackModel}): ${error instanceof Error ? error.message : String(error)}`,
+      );
+      const fallbackHandoff = await spawnWaveAgent<T>({ ...baseConfig, model: fallbackModel });
+      return {
+        ...fallbackHandoff,
+        fallback_used: true,
+        local_attempt_cost: 0,
+      };
+    }
+    throw error;
+  }
+}
+
+/** Determine whether a successful-but-poor-quality result warrants a fallback retry. */
+function needsFallback<T>(handoff: WaveHandoff<T>, outputFormat?: OutputFormat): boolean {
+  // Zod validation failed → low confidence
+  if (handoff.confidence === 'low') return true;
+  // Expected structured output but got nothing (medium confidence = no structured output parsed)
+  if (outputFormat && handoff.confidence === 'medium') return true;
+  return false;
 }
 
 // --- Backward-compat wrapper ---

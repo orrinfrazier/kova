@@ -115,6 +115,9 @@ vi.mock('../ai/index.js', async (importOriginal) => {
     resolveWaveModel: vi.fn().mockReturnValue({ id: 'test-model', provider: 'anthropic' }),
     isLocalProvider: actual.isLocalProvider,
     spawnWaveAgent: (...args: unknown[]) => mockSpawnWaveAgent(...args),
+    spawnWaveAgentWithFallback: (...args: unknown[]) => mockSpawnWaveAgent(...args),
+    isLocalModel: vi.fn().mockReturnValue(false),
+    getApiFallbackModelString: vi.fn().mockReturnValue('claude-sonnet-4-6'),
     getWaveTools: vi.fn().mockReturnValue([]),
     resolveThinkingLevel: actual.resolveThinkingLevel,
   };

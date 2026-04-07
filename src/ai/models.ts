@@ -9,6 +9,16 @@ const DEFAULT_MODELS: Readonly<Record<ModelTier, string>> = {
   large: 'claude-opus-4-6',
 };
 
+/** Providers that run locally and don't incur API costs. */
+const LOCAL_PROVIDERS: ReadonlySet<string> = new Set([
+  'ollama',
+  'lmstudio',
+  'vllm',
+  'llamacpp',
+  'llamafile',
+  'llama-cpp',
+]);
+
 let providersRegistered = false;
 
 function ensureProviders(): void {
@@ -142,9 +152,24 @@ export function resolveWaveModel(config: WaveModelConfig): Model<string> {
   return resolveModelFromString(`${config.provider}:${config.model}`);
 }
 
-const LOCAL_PROVIDERS = new Set(['ollama', 'llamafile', 'llama-cpp', 'vllm', 'lmstudio']);
-
 /** Returns true if the provider runs locally (no API cost). */
 export function isLocalProvider(provider: string): boolean {
   return LOCAL_PROVIDERS.has(provider);
+}
+
+/** Check whether a model string refers to a local provider (ollama, lmstudio, etc.). */
+export function isLocalModel(modelString: string): boolean {
+  // Check the raw prefix first — local providers may not be registered with pi-mono
+  const colonIndex = modelString.indexOf(':');
+  if (colonIndex > 0) {
+    const prefix = modelString.slice(0, colonIndex);
+    if (isLocalProvider(prefix)) return true;
+  }
+  const { provider } = parseModelSpec(modelString);
+  return isLocalProvider(provider);
+}
+
+/** Return the default API model string for a tier, ignoring env overrides. */
+export function getApiFallbackModelString(tier: ModelTier): string {
+  return DEFAULT_MODELS[tier];
 }
