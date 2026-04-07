@@ -161,6 +161,9 @@ export const GitHubConfigSchema = z
 
 export type GitHubConfig = z.infer<typeof GitHubConfigSchema>;
 
+export const CiMergePolicySchema = z.enum(['require', 'warn']);
+export type CiMergePolicy = z.infer<typeof CiMergePolicySchema>;
+
 export const RepoConfigSchema = z.object({
   path: z.string(),
   vectordb: VectorDBConfigSchema.optional(),
@@ -178,8 +181,9 @@ export const RepoConfigSchema = z.object({
       budget_usd: z.number().optional(),
       wave_cost_cap_usd: z.number().optional(),
       focus: z.array(z.string()).optional(),
+      ci_merge: z.enum(['require', 'warn']).default('require'),
     })
-    .default(() => ({ coverage: 80, auto_merge: false, max_issues_per_run: 10 })),
+    .default(() => ({ coverage: 80, auto_merge: false, max_issues_per_run: 10, ci_merge: 'require' as const })),
   auto: z
     .object({
       source: z.enum(['open_issues', 'labeled']).default('open_issues'),

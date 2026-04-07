@@ -58,7 +58,7 @@ describe('loadMCPServersFromSettings', () => {
       command: 'npx',
       args: ['-y', '@anthropic-ai/repo-intel-mcp'],
     });
-    expect(servers['shadcn']).toEqual({
+    expect(servers.shadcn).toEqual({
       command: 'npx',
       args: ['-y', '@anthropic-ai/shadcn-mcp'],
       env: { SHADCN_KEY: 'test123' },
@@ -149,7 +149,7 @@ describe('resolveMCPServers', () => {
     const servers = await resolveMCPServers(repoMcp, settingsPath);
     expect(Object.keys(servers)).toHaveLength(2);
     expect(servers['repo-intel']).toBeDefined();
-    expect(servers['shadcn']).toBeDefined();
+    expect(servers.shadcn).toBeDefined();
   });
 
   it('returns empty when neither settings nor repo config has servers', async () => {

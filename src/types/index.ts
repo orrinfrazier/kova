@@ -1,4 +1,5 @@
 export type {
+  CiMergePolicy,
   CustomTool,
   EpisodicMemoryConfig,
   FailedPiece,
@@ -27,6 +28,7 @@ export type {
   WaveResult,
 } from './config.js';
 export {
+  CiMergePolicySchema,
   CustomToolSchema,
   EpisodicMemoryConfigSchema,
   GitHubConfigSchema,
