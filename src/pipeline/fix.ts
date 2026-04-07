@@ -17,7 +17,14 @@ import { clearCheckpoint, loadCheckpoint, saveCheckpoint } from '../services/che
 import { commentOnIssue, createPR, listOpenPRs } from '../services/github.js';
 import { formatPRContext, type OpenPR } from '../services/pr-context.js';
 import { shutdownRequested } from '../services/shutdown.js';
-import { formatCodeChunks, queryCodeContext } from '../services/vectordb.js';
+import {
+  buildEpisodeRecord,
+  formatCodeChunks,
+  formatEpisodes,
+  queryCodeContext,
+  queryEpisodeContext,
+  recordEpisode,
+} from '../services/vectordb.js';
 import {
   commitAndPush,
   createWorktree,
@@ -201,13 +208,30 @@ export async function fix(options: FixOptions): Promise<FixResult> {
   };
 
   try {
+    // Episodic memory: query for past learnings (before assess/spec waves)
+    let episodicContext: string | undefined;
+    if (config.episodes?.enabled) {
+      const query = `${issue.title}\n\n${issue.body}`;
+      const episodes = await queryEpisodeContext(config.episodes, query);
+      if (episodes.length > 0) {
+        episodicContext = formatEpisodes(episodes);
+      }
+    }
+
     // WAVE A: Assess
     if (!shouldSkip('assess')) {
       const handoff = await spawnWave<AssessResult>(
         'assess',
         workDir,
         config,
-        formatIssueContext(issue),
+        buildWaveContext(
+          'assess',
+          issue,
+          {},
+          {
+            ...(episodicContext != null && { episodicContext }),
+          },
+        ),
         toOutputFormat(AssessResultSchema),
       );
       await saveHandoff(workDir, handoff);
@@ -250,6 +274,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         config,
         buildWaveContext('spec', issue, state.waveResults, {
           prContext,
+          ...(episodicContext != null && { episodicContext }),
           ...(codebaseContext != null && { codebaseContext }),
         }),
         toOutputFormat(SpecResultSchema),
@@ -316,6 +341,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           config,
           buildWaveContext('spec', issue, state.waveResults, {
             prContext,
+            ...(episodicContext != null && { episodicContext }),
             ...(codebaseContext != null && { codebaseContext }),
           }),
           toOutputFormat(SpecResultSchema),
@@ -486,6 +512,14 @@ export async function fix(options: FixOptions): Promise<FixResult> {
     await writeCostReport(workDir, costReport).catch((err) => {
       log.warn(`Failed to write cost report: ${err instanceof Error ? err.message : String(err)}`);
     });
+    // Episodic memory: record fix outcome (success or failure)
+    if (config.episodes?.enabled) {
+      const episode = buildEpisodeRecord(state);
+      await recordEpisode(config.episodes, episode).catch((err) => {
+        log.warn(`Failed to record episode: ${err instanceof Error ? err.message : String(err)}`);
+      });
+    }
+
     if (worktree && state.status === 'completed') {
       await removeWorktree(repoPath, worktree.path);
     }
@@ -515,16 +549,6 @@ function createInitialState(issue: Issue, repo: string, repoPath: string, worktr
     waveResults: {},
     status: 'running',
   };
-}
-
-function formatIssueContext(issue: Issue): string {
-  return [
-    `# Issue #${issue.number}: ${issue.title}`,
-    ``,
-    issue.body,
-    ``,
-    `Labels: ${issue.labels.join(', ') || 'none'}`,
-  ].join('\n');
 }
 
 function formatSkipComment(assess: AssessResult, _issue: Issue): string {

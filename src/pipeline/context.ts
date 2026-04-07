@@ -33,6 +33,8 @@ export interface ContextOptions {
   escalationHint?: string;
   /** Pre-formatted codebase context from vector DB (only for spec/impl waves). */
   codebaseContext?: string;
+  /** Pre-formatted episodic memory context (only for assess/spec waves). */
+  episodicContext?: string;
 }
 
 export interface PieceContextOptions {
@@ -59,6 +61,7 @@ export function buildWaveContext(
   const { tokenBudget = DEFAULT_TOKEN_BUDGET } = options;
 
   const builders: Record<string, () => string> = {
+    assess: () => buildAssessContext(issue, options),
     spec: () => buildSpecContext(issue, handoffs, options),
     test: () => buildTestContext(handoffs),
     impl: () => buildImplContext(handoffs, options),
@@ -133,6 +136,19 @@ function isReviewResult(v: unknown): v is ReviewResult {
 
 // --- Per-wave context builders ---
 
+function buildAssessContext(issue: Issue, options: ContextOptions): string {
+  const sections: string[] = [];
+
+  sections.push(`# Issue #${issue.number}: ${issue.title}\n\n${issue.body}`);
+  sections.push(`Labels: ${issue.labels.join(', ') || 'none'}`);
+
+  if (options.episodicContext) {
+    sections.push(options.episodicContext);
+  }
+
+  return sections.join('\n\n');
+}
+
 function buildSpecContext(issue: Issue, handoffs: Handoffs, options: ContextOptions): string {
   const sections: string[] = [];
 
@@ -141,6 +157,10 @@ function buildSpecContext(issue: Issue, handoffs: Handoffs, options: ContextOpti
   const assess = handoffs.assess?.artifact;
   if (isAssessResult(assess)) {
     sections.push(formatAssessSection(assess));
+  }
+
+  if (options.episodicContext) {
+    sections.push(options.episodicContext);
   }
 
   if (options.codebaseContext) {

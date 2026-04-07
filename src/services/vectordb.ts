@@ -5,7 +5,8 @@
 import { readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { VectorDBConfig } from '../types/config.js';
+import type { EpisodicMemoryConfig, FixState, VectorDBConfig } from '../types/config.js';
+import type { AssessResult, QualityResult, ReviewFinding, ReviewResult, SpecResult } from '../types/waves.js';
 import { log } from '../utils/logger.js';
 import type { Chunk } from './chunker.js';
 
@@ -84,6 +85,238 @@ export function formatCodeChunks(chunks: CodeChunk[]): string {
   });
 
   return `## Relevant code from the codebase\n\n${sections.join('\n\n')}`;
+}
+
+/* ================================================================== */
+/*  Episodic memory — REST endpoint (pipeline context injection)       */
+/* ================================================================== */
+
+export interface EpisodeContext {
+  issue_number: number;
+  issue_title: string;
+  approach: string;
+  outcome: 'success' | 'partial' | 'failure';
+  learnings: string;
+  score: number;
+}
+
+interface EpisodeContextResponse {
+  episodes?: EpisodeContext[];
+}
+
+/**
+ * Query the episodic memory REST endpoint for past issue learnings similar to the given query.
+ * Returns an empty array if disabled, on error, or if the response is malformed.
+ */
+export async function queryEpisodeContext(config: EpisodicMemoryConfig, query: string): Promise<EpisodeContext[]> {
+  if (!config.enabled) {
+    return [];
+  }
+
+  if (!config.endpoint) {
+    log.warn('[episodes] Enabled but no endpoint configured — skipping');
+    return [];
+  }
+
+  try {
+    const response = await fetch(config.endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query, top_k: config.max_episodes }),
+    });
+
+    if (!response.ok) {
+      log.warn(`[episodes] Endpoint returned ${response.status} — skipping episodic context`);
+      return [];
+    }
+
+    const data = (await response.json()) as EpisodeContextResponse;
+
+    if (!data.episodes || !Array.isArray(data.episodes)) {
+      log.warn('[episodes] Malformed response (missing episodes array) — skipping');
+      return [];
+    }
+
+    const capped = data.episodes.slice(0, config.max_episodes);
+    log.info(`[episodes] Retrieved ${capped.length} past episodes`);
+    return capped;
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    log.warn(`[episodes] Failed to query endpoint: ${msg} — skipping episodic context`);
+    return [];
+  }
+}
+
+/**
+ * Format episodes into a markdown section for injection into assess/spec prompts.
+ * Episodes are sorted by score descending (most relevant first).
+ */
+export function formatEpisodes(episodes: EpisodeContext[]): string {
+  if (episodes.length === 0) {
+    return '';
+  }
+
+  const sorted = [...episodes].sort((a, b) => b.score - a.score);
+
+  const sections = sorted.map((ep) =>
+    [
+      `### #${ep.issue_number}: ${ep.issue_title}`,
+      `- **Approach:** ${ep.approach}`,
+      `- **Outcome:** ${ep.outcome}`,
+      `- **Learning:** ${ep.learnings}`,
+    ].join('\n'),
+  );
+
+  return `## Learnings from similar past issues\n\n${sections.join('\n\n')}`;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Episode recording — REST endpoint (post-fix persistence)           */
+/* ------------------------------------------------------------------ */
+
+export interface EpisodeRecord {
+  issue_number: number;
+  issue_title: string;
+  labels: string[];
+  repo: string;
+  approach: string;
+  files_changed: string[];
+  quality_gates: {
+    lint: string;
+    typecheck: string;
+    tests: string;
+    coverage?: number | undefined;
+    audit: string;
+    all_passing: boolean;
+  } | null;
+  review_findings: Array<{
+    category: string;
+    file: string;
+    severity: string;
+    description: string;
+  }>;
+  outcome: 'pr_created' | 'failed' | 'skipped';
+  failed_at_wave: string | null;
+  total_cost: number;
+  total_duration: number;
+  total_turns: number;
+  timestamp: string;
+}
+
+/**
+ * Build an episode record from completed fix state.
+ * Extracts structured data from wave artifacts for persistence.
+ */
+export function buildEpisodeRecord(state: FixState): EpisodeRecord {
+  const assessArtifact = state.waveResults.assess?.artifact as AssessResult | undefined;
+  const specArtifact = state.waveResults.spec?.artifact as SpecResult | undefined;
+  const implArtifact = state.waveResults.impl?.artifact as
+    | { files_modified?: string[]; files_created?: string[] }
+    | undefined;
+  const qualityArtifact = state.waveResults.quality?.artifact as QualityResult | undefined;
+  const reviewArtifact = state.waveResults.review?.artifact as ReviewResult | undefined;
+  const shipArtifact = state.waveResults.ship?.artifact as { prUrl?: string } | undefined;
+
+  const filesChanged = [...(implArtifact?.files_modified ?? []), ...(implArtifact?.files_created ?? [])];
+
+  let outcome: EpisodeRecord['outcome'];
+  if (shipArtifact?.prUrl) {
+    outcome = 'pr_created';
+  } else if (state.status === 'failed') {
+    outcome = 'failed';
+  } else if (assessArtifact && !assessArtifact.should_proceed) {
+    outcome = 'skipped';
+  } else {
+    outcome = state.status === 'completed' ? 'pr_created' : 'failed';
+  }
+
+  const failedAtWave = state.status === 'failed' ? lastCompletedOrCurrent(state) : null;
+
+  let totalCost = 0;
+  let totalDuration = 0;
+  let totalTurns = 0;
+  for (const result of Object.values(state.waveResults)) {
+    if (result) {
+      totalCost += result.cost;
+      totalDuration += result.duration;
+      totalTurns += result.turns;
+    }
+  }
+
+  return {
+    issue_number: state.issue.number,
+    issue_title: state.issue.title,
+    labels: state.issue.labels,
+    repo: state.repo,
+    approach: specArtifact?.summary ?? '',
+    files_changed: filesChanged,
+    quality_gates: qualityArtifact
+      ? {
+          lint: qualityArtifact.lint,
+          typecheck: qualityArtifact.typecheck,
+          tests: qualityArtifact.tests,
+          coverage: qualityArtifact.coverage,
+          audit: qualityArtifact.audit,
+          all_passing: qualityArtifact.all_passing,
+        }
+      : null,
+    review_findings: (reviewArtifact?.findings ?? []).map((f: ReviewFinding) => ({
+      category: f.category,
+      file: f.file,
+      severity: f.severity,
+      description: f.description,
+    })),
+    outcome,
+    failed_at_wave: failedAtWave,
+    total_cost: totalCost,
+    total_duration: totalDuration,
+    total_turns: totalTurns,
+    timestamp: new Date().toISOString(),
+  };
+}
+
+function lastCompletedOrCurrent(state: FixState): string | null {
+  if (state.completedWaves.length === 0) return 'assess';
+  const WAVE_ORDER = ['assess', 'spec', 'test', 'impl', 'quality', 'review', 'ship'];
+  const lastCompleted = state.completedWaves.at(-1);
+  if (!lastCompleted) return 'assess';
+  const idx = WAVE_ORDER.indexOf(lastCompleted);
+  return idx < WAVE_ORDER.length - 1 ? (WAVE_ORDER[idx + 1] ?? lastCompleted) : lastCompleted;
+}
+
+/**
+ * Record a fix episode to the episodic memory endpoint.
+ * Graceful degradation: logs a warning on failure, never throws.
+ */
+export async function recordEpisode(config: EpisodicMemoryConfig, record: EpisodeRecord): Promise<boolean> {
+  if (!config.enabled) {
+    return false;
+  }
+
+  if (!config.endpoint) {
+    log.warn('[episodes] Enabled but no endpoint configured \u2014 skipping recording');
+    return false;
+  }
+
+  try {
+    const response = await fetch(config.endpoint, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(record),
+    });
+
+    if (!response.ok) {
+      log.warn(`[episodes] Recording endpoint returned ${response.status} \u2014 episode not saved`);
+      return false;
+    }
+
+    log.info(`[episodes] Recorded episode for #${record.issue_number} (${record.outcome})`);
+    return true;
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    log.warn(`[episodes] Failed to record episode: ${msg}`);
+    return false;
+  }
 }
 
 /* ================================================================== */
