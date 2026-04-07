@@ -6,6 +6,7 @@
 import { Agent, type AgentTool } from '@mariozechner/pi-agent-core';
 import { streamSimple } from '@mariozechner/pi-ai';
 import { convertToLlm } from '@mariozechner/pi-coding-agent';
+import type { z } from 'zod';
 import type { ModelTier, WaveHandoff, WaveName } from '../types/index.js';
 import { log } from '../utils/logger.js';
 import { classifyError, isSpendingCapBehavior, KovaError } from './errors.js';
@@ -15,6 +16,7 @@ import { getWaveTools } from './wave-tools.js';
 export interface OutputFormat {
   type: 'json_schema';
   schema: Record<string, unknown>;
+  zodSchema?: z.ZodType;
 }
 
 // biome-ignore lint/suspicious/noExplicitAny: pi-mono AgentTool uses any for tool parameter schemas
@@ -130,10 +132,17 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
 
     // Parse structured output if expected
     let structuredOutput: unknown | undefined;
+    let zodValidationFailed = false;
     if (outputFormat && resultText) {
       structuredOutput = parseStructuredOutput(resultText);
       if (!structuredOutput) {
         log.warn(`[${wave}] Failed to parse structured output from response`);
+      } else if (outputFormat.zodSchema) {
+        const parseResult = outputFormat.zodSchema.safeParse(structuredOutput);
+        if (!parseResult.success) {
+          zodValidationFailed = true;
+          log.warn(`[${wave}] Zod validation failed for structured output: ${parseResult.error.message}`);
+        }
       }
     }
 
@@ -158,8 +167,15 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
       `[${wave}] Completed — turns=${turnCount}, cost=$${cost.toFixed(4)}, duration=${(duration / 1000).toFixed(1)}s`,
     );
 
-    // Determine confidence from structured output parsing
-    const confidence: 'high' | 'medium' | 'low' = structuredOutput != null ? 'high' : 'medium';
+    // Determine confidence from structured output parsing + Zod validation
+    let confidence: 'high' | 'medium' | 'low';
+    if (structuredOutput != null && zodValidationFailed) {
+      confidence = 'low';
+    } else if (structuredOutput != null) {
+      confidence = 'high';
+    } else {
+      confidence = 'medium';
+    }
 
     return {
       wave,

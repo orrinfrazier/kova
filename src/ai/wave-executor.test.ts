@@ -1,5 +1,6 @@
 import type { AgentTool } from '@mariozechner/pi-agent-core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 import type { WaveHandoff } from '../types/index.js';
 
 // biome-ignore lint/suspicious/noExplicitAny: pi-mono AgentTool uses any for tool parameter schemas
@@ -229,6 +230,108 @@ describe('spawnWaveAgent', () => {
 
     expect(result.confidence).toBe('high');
     expect(result.artifact).toEqual({ grade: 'A', should_proceed: true });
+  });
+
+  it('returns confidence "high" when zodSchema is provided and validation passes', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+
+    const TestSchema = z.object({ grade: z.string(), should_proceed: z.boolean() });
+    setAgentResponse('{"grade": "A", "should_proceed": true}', 0.01);
+
+    const result = await spawnWaveAgent({
+      wave: 'assess',
+      model: 'claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Message.',
+      cwd: '/tmp/test',
+      outputFormat: {
+        type: 'json_schema',
+        schema: { type: 'object' },
+        zodSchema: TestSchema,
+      },
+    });
+
+    expect(result.confidence).toBe('high');
+    expect(result.artifact).toEqual({ grade: 'A', should_proceed: true });
+  });
+
+  it('returns confidence "low" when JSON is valid but zodSchema validation fails', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+
+    const StrictSchema = z.object({
+      grade: z.enum(['A', 'B', 'C', 'D', 'F']),
+      surface_area: z.object({ files: z.array(z.string()) }),
+    });
+    // Valid JSON but doesn't match StrictSchema
+    setAgentResponse('{"random": "garbage"}', 0.01);
+
+    const result = await spawnWaveAgent({
+      wave: 'assess',
+      model: 'claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Message.',
+      cwd: '/tmp/test',
+      outputFormat: {
+        type: 'json_schema',
+        schema: { type: 'object' },
+        zodSchema: StrictSchema,
+      },
+    });
+
+    expect(result.confidence).toBe('low');
+    // artifact should still be the raw parsed JSON (not undefined)
+    expect(result.artifact).toEqual({ random: 'garbage' });
+  });
+
+  it('logs warning when zodSchema validation fails', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+    const { log } = await import('../utils/logger.js');
+    const warnSpy = vi.spyOn(log, 'warn');
+
+    const StrictSchema = z.object({ required_field: z.string() });
+    setAgentResponse('{"wrong_field": "value"}', 0.01);
+
+    await spawnWaveAgent({
+      wave: 'assess',
+      model: 'claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Message.',
+      cwd: '/tmp/test',
+      outputFormat: {
+        type: 'json_schema',
+        schema: { type: 'object' },
+        zodSchema: StrictSchema,
+      },
+    });
+
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Zod validation failed'));
+    warnSpy.mockRestore();
+  });
+
+  it('returns confidence "high" when outputFormat has no zodSchema (backward compat)', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+
+    setAgentResponse('{"grade": "A", "should_proceed": true}', 0.01);
+
+    const result = await spawnWaveAgent({
+      wave: 'assess',
+      model: 'claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Message.',
+      cwd: '/tmp/test',
+      outputFormat: { type: 'json_schema', schema: { type: 'object' } },
+    });
+
+    // No zodSchema → backward compat: any parsed JSON = high confidence
+    expect(result.confidence).toBe('high');
   });
 
   it('returns confidence "medium" when no structured output requested', async () => {
