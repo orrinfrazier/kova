@@ -15,6 +15,7 @@ import { clearCheckpoint, loadCheckpoint, saveCheckpoint } from '../services/che
 import { commentOnIssue, createPR, listOpenPRs } from '../services/github.js';
 import { formatPRContext, type OpenPR } from '../services/pr-context.js';
 import { shutdownRequested } from '../services/shutdown.js';
+import { formatCodeChunks, queryCodeContext } from '../services/vectordb.js';
 import {
   commitAndPush,
   createWorktree,
@@ -214,13 +215,26 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       if (interrupted) return interrupted;
     }
 
+    // Vector DB: query for relevant codebase context (before spec/impl waves)
+    let codebaseContext: string | undefined;
+    if (config.vectordb?.enabled) {
+      const query = `${issue.title}\n\n${issue.body}`;
+      const chunks = await queryCodeContext(config.vectordb, query);
+      if (chunks.length > 0) {
+        codebaseContext = formatCodeChunks(chunks);
+      }
+    }
+
     // WAVE S: Spec
     if (!shouldSkip('spec')) {
       const handoff = await spawnWave(
         'spec',
         workDir,
         config,
-        buildWaveContext('spec', issue, state.waveResults, { prContext }),
+        buildWaveContext('spec', issue, state.waveResults, {
+          prContext,
+          ...(codebaseContext != null && { codebaseContext }),
+        }),
         toOutputFormat(SpecResultSchema),
       );
       await saveHandoff(workDir, handoff);
@@ -256,6 +270,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         repoConfig: config,
         waveResults: state.waveResults,
         prContext,
+        codebaseContext,
         ...(testRunner != null && { testRunner }),
       });
 
@@ -282,7 +297,10 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           'spec',
           workDir,
           config,
-          buildWaveContext('spec', issue, state.waveResults, { prContext }),
+          buildWaveContext('spec', issue, state.waveResults, {
+            prContext,
+            ...(codebaseContext != null && { codebaseContext }),
+          }),
           toOutputFormat(SpecResultSchema),
         );
         await saveHandoff(workDir, specHandoff);
@@ -294,6 +312,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           repoConfig: config,
           waveResults: state.waveResults,
           prContext,
+          codebaseContext,
           ...(testRunner != null && { testRunner }),
         });
         state.waveResults.test = retryTI.testWaveResult;

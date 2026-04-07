@@ -287,6 +287,58 @@ describe('buildWaveContext', () => {
       expect(ctx).not.toContain('Pending PRs');
     });
   });
+
+  describe('codebase context (vector DB)', () => {
+    it('injects codebase context into spec wave when provided', () => {
+      const handoffs: Partial<Record<string, WaveResult>> = {
+        assess: makeWaveResult('assess', assessArtifact),
+      };
+      const codebaseContext =
+        '## Relevant code from the codebase\n\n### src/auth/token.ts\n```\nfunction validate() {}\n```';
+      const ctx = buildWaveContext('spec', makeIssue(), handoffs, { codebaseContext });
+
+      expect(ctx).toContain('Relevant code from the codebase');
+      expect(ctx).toContain('src/auth/token.ts');
+    });
+
+    it('injects codebase context into impl wave', () => {
+      const handoffs: Partial<Record<string, WaveResult>> = {
+        spec: makeWaveResult('spec', specArtifact),
+      };
+      const codebaseContext = '## Relevant code from the codebase\n\n### src/utils.ts\n```\nconst x = 1;\n```';
+      const ctx = buildWaveContext('impl', makeIssue(), handoffs, { codebaseContext });
+
+      expect(ctx).toContain('Relevant code from the codebase');
+    });
+
+    it('does NOT inject codebase context into quality wave', () => {
+      const handoffs: Partial<Record<string, WaveResult>> = {};
+      const codebaseContext = '## Relevant code from the codebase\n\ncontent';
+      const ctx = buildWaveContext('quality', makeIssue(), handoffs, { codebaseContext });
+
+      expect(ctx).not.toContain('Relevant code from the codebase');
+    });
+
+    it('does NOT inject codebase context into review wave', () => {
+      const handoffs: Partial<Record<string, WaveResult>> = {
+        spec: makeWaveResult('spec', specArtifact),
+        quality: makeWaveResult('quality', qualityArtifact),
+      };
+      const codebaseContext = '## Relevant code from the codebase\n\ncontent';
+      const ctx = buildWaveContext('review', makeIssue(), handoffs, { codebaseContext });
+
+      expect(ctx).not.toContain('Relevant code from the codebase');
+    });
+
+    it('omits codebase section when not provided', () => {
+      const handoffs: Partial<Record<string, WaveResult>> = {
+        assess: makeWaveResult('assess', assessArtifact),
+      };
+      const ctx = buildWaveContext('spec', makeIssue(), handoffs);
+
+      expect(ctx).not.toContain('Relevant code from the codebase');
+    });
+  });
 });
 
 describe('estimateTokens', () => {
