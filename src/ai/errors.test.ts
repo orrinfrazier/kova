@@ -36,6 +36,13 @@ describe('isRetryable', () => {
     expect(isRetryable('rate limit')).toBe(true);
     expect(isRetryable({ message: 'not an error' })).toBe(false);
   });
+
+  it('returns true for context exhaustion errors', () => {
+    expect(isRetryable(new Error('context length exceeded'))).toBe(true);
+    expect(isRetryable(new Error('request exceeds context window'))).toBe(true);
+    expect(isRetryable(new Error('max context length exceeded'))).toBe(true);
+    expect(isRetryable(new Error('prompt is too long'))).toBe(true);
+  });
 });
 
 describe('isSpendingCapBehavior', () => {
@@ -137,5 +144,36 @@ describe('classifyError', () => {
     const result = classifyError('authentication error');
     expect(result.type).toBe('config');
     expect(result.retryable).toBe(false);
+  });
+
+  it('classifies context length exceeded as context type', () => {
+    const result = classifyError('context length exceeded: 210000 tokens > 200000 limit');
+    expect(result.type).toBe('context');
+    expect(result.retryable).toBe(true);
+  });
+
+  it('classifies context window errors as context type', () => {
+    const result = classifyError('request exceeds context window');
+    expect(result.type).toBe('context');
+    expect(result.retryable).toBe(true);
+  });
+
+  it('classifies max context length errors as context type', () => {
+    const result = classifyError('max context length exceeded for model claude-sonnet-4-6');
+    expect(result.type).toBe('context');
+    expect(result.retryable).toBe(true);
+  });
+
+  it('classifies prompt too long errors as context type', () => {
+    const result = classifyError('prompt is too long: 250000 tokens');
+    expect(result.type).toBe('context');
+    expect(result.retryable).toBe(true);
+  });
+
+  it('classifies context exhaustion KovaError pass-through', () => {
+    const kova = new KovaError('Context exhausted during impl', 'context', true);
+    const result = classifyError(kova);
+    expect(result.type).toBe('context');
+    expect(result.retryable).toBe(true);
   });
 });
