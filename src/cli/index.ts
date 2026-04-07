@@ -38,6 +38,7 @@ import {
   removeSignalHandlers,
   shutdownRequested,
 } from '../services/shutdown.js';
+import { createWebhookServer } from '../services/webhook-server.js';
 import type { KovaConfig, RepoConfig } from '../types/index.js';
 import { log } from '../utils/logger.js';
 
@@ -416,6 +417,89 @@ program
     log.info(
       `Done: ${result.filesIndexed} file(s) indexed, ${result.chunksUpserted} chunk(s) upserted in ${result.duration}ms (${result.incremental ? 'incremental' : 'full'})`,
     );
+  });
+
+program
+  .command('serve')
+  .description('Start webhook listener for GitHub events')
+  .option('--port <number>', 'Port to listen on', '3000')
+  .option('--repo <name-or-path>', 'Repository name (from config) or path', '.')
+  .action(async (opts: { port?: string; repo?: string }) => {
+    const kovaConfig = await tryLoadConfig(program.opts().config);
+    const { repoPath, repoName, config } = resolveRepo(opts.repo ?? '.', kovaConfig);
+
+    const secret = process.env.GITHUB_WEBHOOK_SECRET;
+    if (!secret) {
+      console.error('GITHUB_WEBHOOK_SECRET environment variable is required');
+      process.exit(1);
+    }
+
+    const port = Number.parseInt(opts.port ?? '3000', 10);
+
+    // Build the fix queue + server
+    const { createFixQueue } = await import('../services/fix-queue.js');
+    const queue = createFixQueue(async (request) => {
+      try {
+        const issue = await fetchIssue(repoPath, request.issueNumber);
+        const result = await fix({
+          issue,
+          repoPath,
+          repoName,
+          config,
+        });
+        if (result.success) {
+          log.info(`Webhook fix complete: PR ${result.prUrl}`);
+        } else {
+          log.error(`Webhook fix failed for #${request.issueNumber}: ${result.error}`);
+        }
+      } finally {
+        pendingIssues.delete(request.issueNumber);
+      }
+    });
+
+    // Deduplicate: track pending issue numbers
+    const pendingIssues = new Set<number>();
+    const enqueue = (issueNumber: number): boolean => {
+      if (pendingIssues.has(issueNumber)) return false;
+      pendingIssues.add(issueNumber);
+      queue.enqueue({
+        issueNumber,
+        repoPath,
+        repoName,
+      });
+      return true;
+    };
+
+    const server = createWebhookServer({
+      secret,
+      port,
+      enqueue,
+      queue,
+    });
+
+    installSignalHandlers();
+
+    await server.start();
+    log.info(`Webhook server started on port ${server.port} for ${repoName}`);
+
+    // Wait for shutdown signal
+    await new Promise<void>((resolve) => {
+      const check = setInterval(() => {
+        if (shutdownRequested()) {
+          clearInterval(check);
+          resolve();
+        }
+      }, 100);
+    });
+
+    log.info('Shutting down — draining queue...');
+    queue.shutdown();
+    await queue.drain();
+    await server.stop();
+    removeSignalHandlers();
+
+    log.info('Webhook server stopped.');
+    process.exit(exitCodeForSignal(getShutdownSignal()));
   });
 
 const sandbox = program.command('sandbox').description('Manage sandbox Docker images');
