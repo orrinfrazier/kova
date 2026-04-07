@@ -387,6 +387,7 @@ export interface WaveOptions {
   maxTurns?: number;
   thinkingLevel?: ThinkingLevel;
   customTools?: readonly import('../types/index.js').CustomTool[] | undefined;
+  playwright?: { enabled: boolean } | undefined;
 }
 
 export interface WaveExecutionResult {
@@ -401,11 +402,22 @@ export interface WaveExecutionResult {
 }
 
 export async function executeWave(options: WaveOptions): Promise<WaveExecutionResult> {
-  const { wave, systemPrompt, userMessage, cwd, modelTier, outputFormat, maxTurns, thinkingLevel, customTools } =
-    options;
+  const {
+    wave,
+    systemPrompt,
+    userMessage,
+    cwd,
+    modelTier,
+    outputFormat,
+    maxTurns,
+    thinkingLevel,
+    customTools,
+    playwright,
+  } = options;
 
   const model = resolveWaveModel(modelTier);
-  const tools = getWaveTools(wave, cwd, customTools ? { customTools } : undefined);
+  const toolOptions = customTools || playwright ? { customTools, playwright } : undefined;
+  const tools = getWaveTools(wave, cwd, toolOptions);
   const startTime = Date.now();
 
   try {
