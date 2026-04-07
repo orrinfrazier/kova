@@ -78,34 +78,16 @@ describe('MetricsConfigSchema — prometheus sub-config', () => {
     }
   });
 
-  it('validates prometheus with optional port number', () => {
+  it('rejects unknown fields in prometheus block (strict by Zod default — strips them)', () => {
     const result = MetricsConfigSchema.safeParse({
       enabled: true,
       prometheus: { enabled: true, port: 9090 },
     });
     expect(result.success).toBe(true);
     if (result.success) {
-      expect(result.data.prometheus?.port).toBe(9090);
+      // port was removed — Zod strips unknown keys
+      expect('port' in (result.data.prometheus ?? {})).toBe(false);
     }
-  });
-
-  it('validates prometheus without port (port is optional)', () => {
-    const result = MetricsConfigSchema.safeParse({
-      enabled: true,
-      prometheus: { enabled: true },
-    });
-    expect(result.success).toBe(true);
-    if (result.success) {
-      expect(result.data.prometheus?.port).toBeUndefined();
-    }
-  });
-
-  it('rejects prometheus port as non-number', () => {
-    const result = MetricsConfigSchema.safeParse({
-      enabled: true,
-      prometheus: { enabled: true, port: 'nine-thousand' },
-    });
-    expect(result.success).toBe(false);
   });
 });
 
@@ -221,14 +203,14 @@ describe('RepoConfigSchema — metrics field', () => {
       path: '/opt/repo',
       metrics: {
         enabled: true,
-        prometheus: { enabled: true, port: 9090 },
+        prometheus: { enabled: true },
         otlp: { enabled: true, endpoint: 'http://otel-collector:4317' },
       },
     });
     expect(result.success).toBe(true);
     if (result.success) {
       expect(result.data.metrics?.enabled).toBe(true);
-      expect(result.data.metrics?.prometheus?.port).toBe(9090);
+      expect(result.data.metrics?.prometheus?.enabled).toBe(true);
       expect(result.data.metrics?.otlp?.endpoint).toBe('http://otel-collector:4317');
     }
   });

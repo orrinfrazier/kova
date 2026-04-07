@@ -137,7 +137,6 @@ export const MetricsConfigSchema = z.object({
   prometheus: z
     .object({
       enabled: z.boolean().default(true),
-      port: z.number().optional(),
     })
     .optional(),
   otlp: z
