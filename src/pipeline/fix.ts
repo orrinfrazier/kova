@@ -22,7 +22,16 @@ import {
   removeWorktree,
   worktreeExists,
 } from '../services/worktree.js';
-import type { FailedPiece, FixState, Issue, RepoConfig, WaveHandoff, WaveName, WaveResult } from '../types/index.js';
+import type {
+  FailedPiece,
+  FixState,
+  Issue,
+  RepoConfig,
+  SpecResult,
+  WaveHandoff,
+  WaveName,
+  WaveResult,
+} from '../types/index.js';
 import {
   type AssessResult,
   AssessResultSchema,
@@ -35,6 +44,7 @@ import { buildWaveContext } from './context.js';
 import { buildCostReport, printRunSummary, writeCostReport } from './cost-report.js';
 import { runReviewLoop, runTILoop, type TestRunner } from './loops.js';
 import { loadPrompt } from './prompts.js';
+import { validatePieceFileOwnership } from './spec-validator.js';
 
 function toOutputFormat(schema: z.ZodType): OutputFormat {
   return {
@@ -212,6 +222,22 @@ export async function fix(options: FixOptions): Promise<FixResult> {
 
       const interrupted = await interruptIfShutdown();
       if (interrupted) return interrupted;
+    }
+
+    // Gate: validate spec pieces have no overlapping files before fan-out
+    const specArtifact = state.waveResults.spec?.artifact as SpecResult | undefined;
+    if (specArtifact?.pieces && specArtifact.pieces.length > 1) {
+      const validation = validatePieceFileOwnership(specArtifact.pieces, specArtifact.dependency_order);
+      if (!validation.valid) {
+        specArtifact.pieces = validation.pieces;
+        specArtifact.dependency_order = validation.dependencyOrder;
+        // Persist the corrected spec
+        if (state.waveResults.spec) {
+          state.waveResults.spec.artifact = specArtifact;
+          await saveHandoff(workDir, waveResultToHandoff(state.waveResults.spec));
+          await saveCheckpoint(workDir, state);
+        }
+      }
     }
 
     // WAVE T + I: TI Loop
