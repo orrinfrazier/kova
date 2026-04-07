@@ -104,6 +104,38 @@ export interface ExistingWork {
   prUrl?: string;
 }
 
+export async function fetchOpenIssueCount(repoPath: string): Promise<number> {
+  const result = await $({ cwd: repoPath })`gh issue list --state open --json number --limit 1000`;
+  const raw = JSON.parse(result.stdout) as Array<{ number: number }>;
+  return raw.length;
+}
+
+export interface KovaPR {
+  number: number;
+  title: string;
+  branch: string;
+  url: string;
+}
+
+export async function fetchKovaPRs(repoPath: string): Promise<KovaPR[]> {
+  const result = await $({ cwd: repoPath })`gh pr list --state open --json number,title,headRefName,url --limit 50`;
+  const prs = JSON.parse(result.stdout) as Array<{
+    number: number;
+    title: string;
+    headRefName: string;
+    url: string;
+  }>;
+
+  return prs
+    .filter((pr) => pr.headRefName.startsWith('kova/') || pr.headRefName.startsWith('fix/issue-'))
+    .map((pr) => ({
+      number: pr.number,
+      title: pr.title,
+      branch: pr.headRefName,
+      url: pr.url,
+    }));
+}
+
 export async function hasExistingWork(repoPath: string, issueNumber: number): Promise<ExistingWork | undefined> {
   const branch = `kova/fix-${issueNumber}`;
   const [branchExists, prUrl] = await Promise.all([
