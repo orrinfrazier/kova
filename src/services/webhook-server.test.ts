@@ -1,6 +1,7 @@
 import { createHmac } from 'node:crypto';
 import http from 'node:http';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as metrics from './metrics.js';
 import { createWebhookServer, type WebhookServer } from './webhook-server.js';
 
 /* ------------------------------------------------------------------ */
@@ -624,5 +625,101 @@ describe('POST /webhook — malformed JSON body', () => {
       body,
     });
     expect(res.status).toBe(400);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/*  GET /metrics — enabled                                             */
+/* ------------------------------------------------------------------ */
+
+describe('GET /metrics — enabled', () => {
+  let server: WebhookServer;
+  let port: number;
+
+  beforeEach(async () => {
+    metrics.reset();
+    server = createWebhookServer({
+      secret: TEST_SECRET,
+      port: 0,
+      enqueue: makeEnqueueMock(),
+      metricsEnabled: true,
+    });
+    await server.start();
+    port = server.port;
+  });
+
+  afterEach(async () => {
+    await server.stop();
+  });
+
+  it('returns 200 with Prometheus content type', async () => {
+    const res = await request(port, { method: 'GET', path: '/metrics' });
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toBe('text/plain; version=0.0.4; charset=utf-8');
+  });
+
+  it('returns body from metrics.serialize()', async () => {
+    // Record some metrics so serialize returns non-empty output
+    metrics.recordIssueFixed();
+    const res = await request(port, { method: 'GET', path: '/metrics' });
+    expect(res.status).toBe(200);
+    expect(res.body).toContain('kova_issues_fixed_total');
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/*  GET /metrics — disabled                                            */
+/* ------------------------------------------------------------------ */
+
+describe('GET /metrics — disabled', () => {
+  let server: WebhookServer;
+  let port: number;
+
+  beforeEach(async () => {
+    server = createWebhookServer({
+      secret: TEST_SECRET,
+      port: 0,
+      enqueue: makeEnqueueMock(),
+      metricsEnabled: false,
+    });
+    await server.start();
+    port = server.port;
+  });
+
+  afterEach(async () => {
+    await server.stop();
+  });
+
+  it('returns 404 when metrics are disabled', async () => {
+    const res = await request(port, { method: 'GET', path: '/metrics' });
+    expect(res.status).toBe(404);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/*  GET /metrics — default (no metricsEnabled option)                  */
+/* ------------------------------------------------------------------ */
+
+describe('GET /metrics — default (no metricsEnabled option)', () => {
+  let server: WebhookServer;
+  let port: number;
+
+  beforeEach(async () => {
+    server = createWebhookServer({
+      secret: TEST_SECRET,
+      port: 0,
+      enqueue: makeEnqueueMock(),
+    });
+    await server.start();
+    port = server.port;
+  });
+
+  afterEach(async () => {
+    await server.stop();
+  });
+
+  it('returns 404 when metricsEnabled is not set (defaults to disabled)', async () => {
+    const res = await request(port, { method: 'GET', path: '/metrics' });
+    expect(res.status).toBe(404);
   });
 });

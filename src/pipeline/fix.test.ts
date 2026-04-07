@@ -4,6 +4,31 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { FixState, Issue, RepoConfig, WaveHandoff, WaveName, WaveResult } from '../types/index.js';
 
+// --- Metrics mock ---
+const mockRecordWaveCompleted = vi.fn();
+const mockRecordWaveDuration = vi.fn();
+const mockRecordIssueFixed = vi.fn();
+const mockRecordIssueFailed = vi.fn();
+const mockRecordPRCreated = vi.fn();
+const mockSetActiveFixes = vi.fn();
+const mockRecordFixDuration = vi.fn();
+const mockRecordFixCost = vi.fn();
+const mockSetCurrentCostUsd = vi.fn();
+
+vi.mock('../services/metrics.js', () => ({
+  recordWaveCompleted: (...args: unknown[]) => mockRecordWaveCompleted(...args),
+  recordWaveDuration: (...args: unknown[]) => mockRecordWaveDuration(...args),
+  recordIssueFixed: (...args: unknown[]) => mockRecordIssueFixed(...args),
+  recordIssueFailed: (...args: unknown[]) => mockRecordIssueFailed(...args),
+  recordPRCreated: (...args: unknown[]) => mockRecordPRCreated(...args),
+  setActiveFixes: (...args: unknown[]) => mockSetActiveFixes(...args),
+  recordFixDuration: (...args: unknown[]) => mockRecordFixDuration(...args),
+  recordFixCost: (...args: unknown[]) => mockRecordFixCost(...args),
+  setCurrentCostUsd: (...args: unknown[]) => mockSetCurrentCostUsd(...args),
+  serialize: vi.fn().mockReturnValue(''),
+  reset: vi.fn(),
+}));
+
 // --- Default artifacts per wave ---
 
 const DEFAULT_ASSESS = {
@@ -576,5 +601,102 @@ describe('fix — progress comments', () => {
     });
 
     expect(MockedProgressTracker).not.toHaveBeenCalled();
+  });
+});
+
+// --- Metrics instrumentation tests ---
+
+describe('fix — metrics instrumentation', () => {
+  let workDir: string;
+
+  beforeEach(async () => {
+    workDir = await mkdtemp(join(tmpdir(), 'kova-fix-'));
+    vi.clearAllMocks();
+    setupDefaultMocks();
+  });
+
+  afterEach(async () => {
+    await rm(workDir, { recursive: true, force: true });
+  });
+
+  it('records wave completed and wave duration after each wave', async () => {
+    await fix({ issue: makeIssue(42), repoPath: workDir, repoName: 'test-repo', config: makeConfig() });
+
+    // Waves: assess, spec, (test+impl via TI loop), quality, review, ship
+    const completedWaves = mockRecordWaveCompleted.mock.calls.map((c: unknown[]) => c[0] as string);
+    expect(completedWaves).toContain('assess');
+    expect(completedWaves).toContain('spec');
+    expect(completedWaves).toContain('quality');
+    expect(completedWaves).toContain('review');
+    expect(completedWaves).toContain('ship');
+
+    // Duration should be recorded for the same waves
+    const durationWaves = mockRecordWaveDuration.mock.calls.map((c: unknown[]) => c[0] as string);
+    expect(durationWaves).toContain('assess');
+    expect(durationWaves).toContain('spec');
+    expect(durationWaves).toContain('quality');
+    expect(durationWaves).toContain('review');
+    expect(durationWaves).toContain('ship');
+
+    // Duration values should be non-negative numbers
+    for (const call of mockRecordWaveDuration.mock.calls) {
+      expect(typeof call[1]).toBe('number');
+      expect(call[1]).toBeGreaterThanOrEqual(0);
+    }
+  });
+
+  it('records issue fixed on success', async () => {
+    const result = await fix({ issue: makeIssue(42), repoPath: workDir, repoName: 'test-repo', config: makeConfig() });
+
+    expect(result.success).toBe(true);
+    expect(mockRecordIssueFixed).toHaveBeenCalledOnce();
+    expect(mockRecordIssueFailed).not.toHaveBeenCalled();
+  });
+
+  it('records issue failed on failure', async () => {
+    mockSpawnWaveAgent.mockRejectedValueOnce(new Error('AI exploded'));
+
+    const result = await fix({ issue: makeIssue(42), repoPath: workDir, repoName: 'test-repo', config: makeConfig() });
+
+    expect(result.success).toBe(false);
+    expect(mockRecordIssueFailed).toHaveBeenCalledOnce();
+    expect(mockRecordIssueFixed).not.toHaveBeenCalled();
+  });
+
+  it('records PR created when ship wave creates a PR', async () => {
+    const result = await fix({ issue: makeIssue(42), repoPath: workDir, repoName: 'test-repo', config: makeConfig() });
+
+    expect(result.success).toBe(true);
+    expect(result.prUrl).toBeDefined();
+    expect(mockRecordPRCreated).toHaveBeenCalledOnce();
+  });
+
+  it('increments active_fixes at start and decrements at end', async () => {
+    await fix({ issue: makeIssue(42), repoPath: workDir, repoName: 'test-repo', config: makeConfig() });
+
+    // First call: increment (1), last call: decrement (0)
+    const calls = mockSetActiveFixes.mock.calls.map((c: unknown[]) => c[0] as number);
+    expect(calls.length).toBeGreaterThanOrEqual(2);
+    expect(calls[0]).toBe(1);
+    expect(calls[calls.length - 1]).toBe(0);
+  });
+
+  it('records fix duration and fix cost after completion', async () => {
+    await fix({ issue: makeIssue(42), repoPath: workDir, repoName: 'test-repo', config: makeConfig() });
+
+    expect(mockRecordFixDuration).toHaveBeenCalledOnce();
+    expect(typeof mockRecordFixDuration.mock.calls[0]?.[0]).toBe('number');
+
+    expect(mockRecordFixCost).toHaveBeenCalledOnce();
+    expect(typeof mockRecordFixCost.mock.calls[0]?.[0]).toBe('number');
+  });
+
+  it('records fix duration and cost even on failure', async () => {
+    mockSpawnWaveAgent.mockRejectedValueOnce(new Error('AI exploded'));
+
+    await fix({ issue: makeIssue(42), repoPath: workDir, repoName: 'test-repo', config: makeConfig() });
+
+    expect(mockRecordFixDuration).toHaveBeenCalledOnce();
+    expect(mockRecordFixCost).toHaveBeenCalledOnce();
   });
 });
