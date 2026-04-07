@@ -21,6 +21,7 @@ import {
 import { clearCheckpoint, loadCheckpoint, saveCheckpoint } from '../services/checkpoint.js';
 import { collectPRFeedback } from '../services/feedback-collector.js';
 import { commentOnIssue, createPR, listOpenPRs } from '../services/github.js';
+import { appendHistoryEntry } from '../services/history.js';
 import { validateIsolation } from '../services/isolation.js';
 import { detectTooling } from '../services/language-detect.js';
 import { ensureScreenshotsDir, isPlaywrightEnabled, resolvePlaywrightEnv } from '../services/playwright.js';
@@ -730,6 +731,35 @@ export async function fix(options: FixOptions): Promise<FixResult> {
     await writeCostReport(workDir, costReport).catch((err) => {
       log.warn(`Failed to write cost report: ${err instanceof Error ? err.message : String(err)}`);
     });
+
+    // History: append run entry for analytics
+    const shipResult = state.waveResults.ship?.artifact as { prUrl?: string } | undefined;
+    const prUrlForHistory = shipResult?.prUrl;
+    await appendHistoryEntry(repoPath, {
+      timestamp: state.startedAt,
+      repo: repoName,
+      issues: [
+        {
+          number: issue.number,
+          title: issue.title,
+          success: state.status === 'completed',
+          ...(prUrlForHistory != null && { prUrl: prUrlForHistory }),
+          ...(state.error != null && { error: state.error }),
+        },
+      ],
+      prsCreated: prUrlForHistory ? 1 : 0,
+      cost: costReport.totalCost,
+      duration: costReport.totalDuration,
+      outcome:
+        state.status === 'completed'
+          ? state.failedPieces && state.failedPieces.length > 0
+            ? 'partial'
+            : 'success'
+          : 'failure',
+    }).catch((err) => {
+      log.warn(`Failed to record history: ${err instanceof Error ? err.message : String(err)}`);
+    });
+
     // Episodic memory: record fix outcome (success or failure)
     if (config.episodes?.enabled) {
       const episode = buildEpisodeRecord(state);
