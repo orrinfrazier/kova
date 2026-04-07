@@ -3,7 +3,14 @@
 // and runReviewLoop() for review. Handoffs persist after every wave.
 
 import { z } from 'zod';
-import { type AIWaveName, getWaveTools, type OutputFormat, resolveModel, spawnWaveAgent } from '../ai/index.js';
+import {
+  type AIWaveName,
+  getWaveTools,
+  type OutputFormat,
+  resolveModel,
+  resolveThinkingLevel,
+  spawnWaveAgent,
+} from '../ai/index.js';
 import { clearCheckpoint, loadCheckpoint, saveCheckpoint } from '../services/checkpoint.js';
 import { commentOnIssue, createPR, listOpenPRs } from '../services/github.js';
 import { formatPRContext, type OpenPR } from '../services/pr-context.js';
@@ -68,6 +75,7 @@ async function spawnWave<T>(
   const model = resolveModel(config.model[wave]);
   const tools = getWaveTools(wave, workDir);
   const systemPrompt = await loadPrompt(wave);
+  const thinkingLevel = resolveThinkingLevel(config, wave);
   return spawnWaveAgent<T>({
     wave,
     model: model.id,
@@ -76,6 +84,7 @@ async function spawnWave<T>(
     handoffContext: '',
     userMessage,
     cwd: workDir,
+    thinkingLevel,
     ...(outputFormat != null && { outputFormat }),
   });
 }

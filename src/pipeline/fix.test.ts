@@ -45,11 +45,15 @@ function makeWaveResult(wave: WaveName, artifact: unknown): WaveResult {
 // --- Mocks ---
 
 const mockSpawnWaveAgent = vi.fn();
-vi.mock('../ai/index.js', () => ({
-  resolveModel: vi.fn().mockReturnValue({ id: 'test-model' }),
-  spawnWaveAgent: (...args: unknown[]) => mockSpawnWaveAgent(...args),
-  getWaveTools: vi.fn().mockReturnValue([]),
-}));
+vi.mock('../ai/index.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../ai/index.js')>();
+  return {
+    resolveModel: vi.fn().mockReturnValue({ id: 'test-model' }),
+    spawnWaveAgent: (...args: unknown[]) => mockSpawnWaveAgent(...args),
+    getWaveTools: vi.fn().mockReturnValue([]),
+    resolveThinkingLevel: actual.resolveThinkingLevel,
+  };
+});
 
 const mockRunTILoop = vi.fn();
 const mockRunReviewLoop = vi.fn();

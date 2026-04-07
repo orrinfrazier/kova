@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { WaveName } from '../types/index.js';
-import { DEFAULT_THINKING_LEVELS, getWaveTools, WAVE_TOOLS } from './wave-tools.js';
+import type { RepoConfig, WaveName } from '../types/index.js';
+import { DEFAULT_THINKING_LEVELS, getWaveTools, resolveThinkingLevel, WAVE_TOOLS } from './wave-tools.js';
 
 describe('WAVE_TOOLS', () => {
   it('defines tool sets for all six AI waves (ship excluded — orchestrator-only)', () => {
@@ -107,5 +107,76 @@ describe('DEFAULT_THINKING_LEVELS', () => {
 
   it('ship wave uses off thinking', () => {
     expect(DEFAULT_THINKING_LEVELS.ship).toBe('off');
+  });
+});
+
+describe('resolveThinkingLevel', () => {
+  const baseConfig: RepoConfig = {
+    path: '/tmp/repo',
+    rules: { coverage: 80, auto_merge: false, max_issues_per_run: 10 },
+    model: {
+      assess: 'large',
+      spec: 'large',
+      test: 'medium',
+      impl: 'medium',
+      quality: 'small',
+      review: 'large',
+    },
+    isolation: 'worktree',
+  };
+
+  it('returns default thinking level when no thinking config is set', () => {
+    expect(resolveThinkingLevel(baseConfig, 'assess')).toBe('medium');
+    expect(resolveThinkingLevel(baseConfig, 'spec')).toBe('medium');
+    expect(resolveThinkingLevel(baseConfig, 'review')).toBe('medium');
+    expect(resolveThinkingLevel(baseConfig, 'test')).toBe('off');
+    expect(resolveThinkingLevel(baseConfig, 'impl')).toBe('off');
+    expect(resolveThinkingLevel(baseConfig, 'quality')).toBe('off');
+  });
+
+  it('returns override when thinking config specifies a wave', () => {
+    const config: RepoConfig = {
+      ...baseConfig,
+      model: {
+        ...baseConfig.model,
+        thinking: { spec: 'high', review: 'high' },
+      },
+    };
+    expect(resolveThinkingLevel(config, 'spec')).toBe('high');
+    expect(resolveThinkingLevel(config, 'review')).toBe('high');
+  });
+
+  it('returns default for waves not specified in thinking config', () => {
+    const config: RepoConfig = {
+      ...baseConfig,
+      model: {
+        ...baseConfig.model,
+        thinking: { review: 'high' },
+      },
+    };
+    expect(resolveThinkingLevel(config, 'assess')).toBe('medium');
+    expect(resolveThinkingLevel(config, 'test')).toBe('off');
+  });
+
+  it('allows setting thinking level to off for reasoning waves', () => {
+    const config: RepoConfig = {
+      ...baseConfig,
+      model: {
+        ...baseConfig.model,
+        thinking: { assess: 'off' },
+      },
+    };
+    expect(resolveThinkingLevel(config, 'assess')).toBe('off');
+  });
+
+  it('allows setting thinking level to high for coding waves', () => {
+    const config: RepoConfig = {
+      ...baseConfig,
+      model: {
+        ...baseConfig.model,
+        thinking: { impl: 'high' },
+      },
+    };
+    expect(resolveThinkingLevel(config, 'impl')).toBe('high');
   });
 });
