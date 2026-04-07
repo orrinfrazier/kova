@@ -24,6 +24,7 @@ import { commentOnIssue, createPR, listOpenPRs } from '../services/github.js';
 import { appendHistoryEntry } from '../services/history.js';
 import { validateIsolation } from '../services/isolation.js';
 import { detectTooling } from '../services/language-detect.js';
+import * as metrics from '../services/metrics.js';
 import { ensureScreenshotsDir, isPlaywrightEnabled, resolvePlaywrightEnv } from '../services/playwright.js';
 import { formatPRContext, type OpenPR } from '../services/pr-context.js';
 import { ProgressTracker } from '../services/progress.js';
@@ -221,10 +222,16 @@ function waveResultToHandoff(result: WaveResult): WaveHandoff {
   };
 }
 
+// --- Active fix counter (for gauge) ---
+let _activeFixes = 0;
+
 // --- Main ---
 
 export async function fix(options: FixOptions): Promise<FixResult> {
   const { issue, repoPath, repoName, config, fresh, noComment, pendingPRs, testRunner } = options;
+  const fixStartTime = Date.now();
+  _activeFixes++;
+  metrics.setActiveFixes(_activeFixes);
 
   // Structured logging: create context-bound logger and init file output
   const runId = `fix-${issue.number}-${Date.now()}`;
@@ -238,6 +245,11 @@ export async function fix(options: FixOptions): Promise<FixResult> {
     const state = createInitialState(issue, repoName, repoPath);
     state.status = 'failed';
     state.error = errorMsg;
+    metrics.recordIssueFailed();
+    metrics.recordFixDuration(Date.now() - fixStartTime);
+    metrics.recordFixCost(0);
+    _activeFixes--;
+    metrics.setActiveFixes(_activeFixes);
     closeFileLogger();
     return { success: false, error: errorMsg, state };
   }
@@ -266,6 +278,11 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       state.status = 'failed';
       const errorMsg = buildResult.error ?? 'Docker image build failed';
       state.error = errorMsg;
+      metrics.recordIssueFailed();
+      metrics.recordFixDuration(Date.now() - fixStartTime);
+      metrics.recordFixCost(0);
+      _activeFixes--;
+      metrics.setActiveFixes(_activeFixes);
       return { success: false, error: errorMsg, state };
     }
 
@@ -384,6 +401,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
 
     // WAVE A: Assess
     if (!shouldSkip('assess')) {
+      const waveStart = Date.now();
       const { handoff, promptHash } = await spawnWave<AssessResult>(
         'assess',
         workDir,
@@ -407,6 +425,8 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       state.completedWaves.push('assess');
       await saveCheckpoint(workDir, state);
       await progress?.waveCompleted('assess', state);
+      metrics.recordWaveCompleted('assess');
+      metrics.recordWaveDuration('assess', Date.now() - waveStart);
 
       // Gate: only check when structured output parsed successfully
       if (handoff.confidence === 'high') {
@@ -446,6 +466,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
 
     // WAVE S: Spec
     if (!shouldSkip('spec')) {
+      const waveStart = Date.now();
       const { handoff, promptHash } = await spawnWave(
         'spec',
         workDir,
@@ -466,6 +487,8 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       state.completedWaves.push('spec');
       await saveCheckpoint(workDir, state);
       await progress?.waveCompleted('spec', state);
+      metrics.recordWaveCompleted('spec');
+      metrics.recordWaveDuration('spec', Date.now() - waveStart);
 
       const interrupted = await interruptIfShutdown();
       if (interrupted) return interrupted;
@@ -489,6 +512,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
 
     // WAVE T + I: Parallel Piece TI Loop (fan-out per piece, backward compat for 1 piece)
     if (!(shouldSkip('test') && shouldSkip('impl'))) {
+      const tiWaveStart = Date.now();
       const tiResult = await runParallelPieceTILoop({
         issue,
         workDir,
@@ -515,6 +539,11 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       if (!state.completedWaves.includes('impl')) state.completedWaves.push('impl');
       await saveCheckpoint(workDir, state);
       await progress?.waveCompleted('impl', state);
+      const tiDuration = Date.now() - tiWaveStart;
+      metrics.recordWaveCompleted('test');
+      metrics.recordWaveDuration('test', tiDuration);
+      metrics.recordWaveCompleted('impl');
+      metrics.recordWaveDuration('impl', tiDuration);
 
       // Escalation: SPEC_WRONG → re-run spec + TI loop
       if (!tiResult.testsPassing && tiResult.diagnosis === 'SPEC_WRONG') {
@@ -572,6 +601,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
 
     // WAVE Q: Quality
     if (!shouldSkip('quality')) {
+      const waveStart = Date.now();
       const { handoff, promptHash } = await spawnWave(
         'quality',
         workDir,
@@ -590,6 +620,8 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       state.completedWaves.push('quality');
       await saveCheckpoint(workDir, state);
       await progress?.waveCompleted('quality', state);
+      metrics.recordWaveCompleted('quality');
+      metrics.recordWaveDuration('quality', Date.now() - waveStart);
 
       const interrupted = await interruptIfShutdown();
       if (interrupted) return interrupted;
@@ -597,6 +629,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
 
     // WAVE R: Review Loop
     if (!shouldSkip('review')) {
+      const waveStart = Date.now();
       // Query past review feedback for injection into review wave
       let reviewFeedbackContext: string | undefined;
       if (config.episodes?.enabled) {
@@ -640,6 +673,8 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       state.completedWaves.push('review');
       await saveCheckpoint(workDir, state);
       await progress?.waveCompleted('review', state);
+      metrics.recordWaveCompleted('review');
+      metrics.recordWaveDuration('review', Date.now() - waveStart);
 
       const interrupted = await interruptIfShutdown();
       if (interrupted) return interrupted;
@@ -657,6 +692,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
 
     // Ship — no AI wave, just git operations
     if (!shouldSkip('ship')) {
+      const shipStart = Date.now();
       const branch = worktree?.branch ?? `kova/fix-${issue.number}`;
       const commitResult = await commitAndPush(workDir, branch, issue);
       if (!commitResult.committed) {
@@ -672,6 +708,9 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         state.completedWaves.push('ship');
         state.status = 'completed';
         await saveCheckpoint(workDir, state);
+        metrics.recordWaveCompleted('ship');
+        metrics.recordWaveDuration('ship', Date.now() - shipStart);
+        metrics.recordIssueFixed();
         return { success: true, state };
       }
 
@@ -713,11 +752,16 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       state.status = 'completed';
       await saveCheckpoint(workDir, state);
       await progress?.complete(prUrl);
+      metrics.recordWaveCompleted('ship');
+      metrics.recordWaveDuration('ship', Date.now() - shipStart);
+      metrics.recordPRCreated();
+      metrics.recordIssueFixed();
       flog.info(`Fix complete: ${prUrl}`);
       return { success: true, prUrl, state };
     }
 
     state.status = 'completed';
+    metrics.recordIssueFixed();
     return { success: true, state };
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
@@ -726,8 +770,16 @@ export async function fix(options: FixOptions): Promise<FixResult> {
     state.error = msg;
     await saveCheckpoint(workDir, state);
     await progress?.failed(msg);
+    metrics.recordIssueFailed();
     return { success: false, error: msg, state };
   } finally {
+    // Metrics: record fix totals and decrement active gauge
+    const fixTotalMs = Date.now() - fixStartTime;
+    metrics.recordFixDuration(fixTotalMs);
+    const totalCost = Object.values(state.waveResults).reduce((sum, wr) => sum + (wr?.cost ?? 0), 0);
+    metrics.recordFixCost(totalCost);
+    _activeFixes--;
+    metrics.setActiveFixes(_activeFixes);
     // Sandbox cleanup: collect stats then kill container
     if (sandboxContainerId) {
       if (sandboxTimeoutHandle) clearTimeout(sandboxTimeoutHandle);
