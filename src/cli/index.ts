@@ -41,7 +41,7 @@ import {
 } from '../services/shutdown.js';
 import { createWebhookServer } from '../services/webhook-server.js';
 import type { KovaConfig, RepoConfig } from '../types/index.js';
-import { log } from '../utils/logger.js';
+import { log, setLevel } from '../utils/logger.js';
 
 const program = new Command();
 
@@ -51,10 +51,14 @@ program
   .version('0.2.75')
   .option('--config <path>', 'Path to repos.yaml config file')
   .option('--router [url]', 'Route all LLM requests through claude-code-router proxy')
+  .option('--verbose', 'Enable debug output')
   .hook('preAction', () => {
-    const routerOpt = program.opts().router;
-    if (routerOpt) {
-      process.env.ANTHROPIC_BASE_URL = typeof routerOpt === 'string' ? routerOpt : 'http://localhost:4141';
+    const opts = program.opts();
+    if (opts.verbose) {
+      setLevel('debug');
+    }
+    if (opts.router) {
+      process.env.ANTHROPIC_BASE_URL = typeof opts.router === 'string' ? opts.router : 'http://localhost:4141';
       log.info(`Router mode enabled: ${process.env.ANTHROPIC_BASE_URL}`);
     }
   });
