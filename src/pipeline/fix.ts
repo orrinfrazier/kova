@@ -78,7 +78,7 @@ import {
   SpecResultSchema,
   saveHandoff,
 } from '../types/index.js';
-import { log } from '../utils/logger.js';
+import { closeFileLogger, initFileLogger, type Logger, log } from '../utils/logger.js';
 import { buildWaveContext } from './context.js';
 import { buildCostReport, printRunSummary, writeCostReport } from './cost-report.js';
 import { runParallelPieceTILoop, runReviewLoop, type TestRunner } from './loops.js';
@@ -212,6 +212,11 @@ function waveResultToHandoff(result: WaveResult): WaveHandoff {
 export async function fix(options: FixOptions): Promise<FixResult> {
   const { issue, repoPath, repoName, config, fresh, noComment, pendingPRs, testRunner } = options;
 
+  // Structured logging: create context-bound logger and init file output
+  const runId = `fix-${issue.number}-${Date.now()}`;
+  const flog: Logger = log.child({ issue: issue.number, repo: repoName });
+  initFileLogger(repoPath, runId);
+
   // Pre-flight: validate isolation mode is available
   const isolationCheck = await validateIsolation(config.isolation);
   if (!isolationCheck.valid) {
@@ -219,13 +224,14 @@ export async function fix(options: FixOptions): Promise<FixResult> {
     const state = createInitialState(issue, repoName, repoPath);
     state.status = 'failed';
     state.error = errorMsg;
+    closeFileLogger();
     return { success: false, error: errorMsg, state };
   }
 
   if (fresh) {
     if (config.isolation === 'worktree' && (await worktreeExists(repoPath, issue.number))) {
       await removeWorktree(repoPath, getWorktreePath(repoPath, issue.number));
-      log.info(`[fresh] Removed existing worktree for #${issue.number}`);
+      flog.info(`[fresh] Removed existing worktree for #${issue.number}`);
     }
   }
 
@@ -263,7 +269,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
     const timeoutMs = parseTimeout(timeoutStr);
     sandboxTimeoutHandle = setTimeout(async () => {
       sandboxTimedOut = true;
-      log.warn(`[sandbox] Timeout (${timeoutStr}) exceeded — killing container ${sandboxContainerName}`);
+      flog.warn(`[sandbox] Timeout (${timeoutStr}) exceeded — killing container ${sandboxContainerName}`);
       if (sandboxContainerId) await killContainer(sandboxContainerId);
     }, timeoutMs);
   }
@@ -274,15 +280,15 @@ export async function fix(options: FixOptions): Promise<FixResult> {
     const mcpServers = await resolveMCPServers(config.mcp);
     if (Object.keys(mcpServers).length > 0) {
       mcpHandles = await startAllMCPServers(mcpServers);
-      log.info(`[mcp] ${mcpHandles.size} MCP server(s) running`);
+      flog.info(`[mcp] ${mcpHandles.size} MCP server(s) running`);
     }
   } catch (error) {
-    log.warn(`[mcp] Failed to start MCP servers: ${error instanceof Error ? error.message : String(error)}`);
+    flog.warn(`[mcp] Failed to start MCP servers: ${error instanceof Error ? error.message : String(error)}`);
   }
 
   if (fresh) {
     await clearCheckpoint(workDir);
-    log.info(`[fresh] Cleared checkpoint — starting from scratch`);
+    flog.info(`[fresh] Cleared checkpoint — starting from scratch`);
   }
 
   const existing = await loadCheckpoint(workDir);
@@ -297,7 +303,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         state.waveResults[handoff.wave] = handoffToResult(handoff);
       }
     }
-    log.info(`Resuming #${issue.number} — completed waves: [${state.completedWaves.join(', ')}]`);
+    flog.info(`Resuming — completed waves: [${state.completedWaves.join(', ')}]`);
   } else {
     state = createInitialState(issue, repoName, repoPath, worktree?.path);
   }
@@ -317,7 +323,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
 
   const interruptIfShutdown = async (): Promise<FixResult | undefined> => {
     if (!shutdownRequested()) return undefined;
-    log.info(`[shutdown] Interrupted after wave [${state.completedWaves.at(-1) ?? 'none'}] for #${issue.number}`);
+    flog.info(`[shutdown] Interrupted after wave [${state.completedWaves.at(-1) ?? 'none'}]`);
     state.status = 'interrupted';
     await saveCheckpoint(workDir, state);
     return { success: false, error: 'Interrupted by signal', state };
@@ -334,7 +340,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       for (const [key, val] of Object.entries(pwEnv)) {
         process.env[key] = val;
       }
-      log.info(`Playwright MCP enabled — screenshots dir: ${pwEnv.PLAYWRIGHT_SCREENSHOTS_DIR}`);
+      flog.info(`Playwright MCP enabled — screenshots dir: ${pwEnv.PLAYWRIGHT_SCREENSHOTS_DIR}`);
     }
 
     // Episodic memory: query for past learnings (before assess/spec waves)
@@ -387,7 +393,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       if (handoff.confidence === 'high') {
         const assess = handoff.artifact;
         if (!assess.should_proceed) {
-          log.warn(`[assess] Grade ${assess.grade} — not proceeding: ${assess.reasoning}`);
+          flog.child({ wave: 'assess' }).warn(`Grade ${assess.grade} — not proceeding: ${assess.reasoning}`);
           if (!noComment) {
             await commentOnIssue(repoPath, issue.number, formatSkipComment(assess, issue));
           }
@@ -491,7 +497,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
 
       // Escalation: SPEC_WRONG → re-run spec + TI loop
       if (!tiResult.testsPassing && tiResult.diagnosis === 'SPEC_WRONG') {
-        log.info('[escalation] SPEC_WRONG — re-running spec then TI loop');
+        flog.info('[escalation] SPEC_WRONG — re-running spec then TI loop');
         const specHandoff = await spawnWave(
           'spec',
           workDir,
@@ -629,7 +635,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       const branch = worktree?.branch ?? `kova/fix-${issue.number}`;
       const commitResult = await commitAndPush(workDir, branch, issue);
       if (!commitResult.committed) {
-        log.warn(`[ship] No changes to commit for #${issue.number} — skipping PR`);
+        flog.child({ wave: 'ship' }).warn('No changes to commit — skipping PR');
         state.waveResults.ship = {
           wave: 'ship',
           success: true,
@@ -682,7 +688,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       state.status = 'completed';
       await saveCheckpoint(workDir, state);
       await progress?.complete(prUrl);
-      log.info(`Fix complete: ${prUrl}`);
+      flog.info(`Fix complete: ${prUrl}`);
       return { success: true, prUrl, state };
     }
 
@@ -690,7 +696,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
     return { success: true, state };
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
-    log.error(`Fix failed for #${issue.number}: ${msg}`);
+    flog.error(`Fix failed: ${msg}`);
     state.status = 'failed';
     state.error = msg;
     await saveCheckpoint(workDir, state);
@@ -719,7 +725,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       };
 
       if (sandboxTimedOut) {
-        log.warn('[sandbox] Container was killed due to timeout');
+        flog.warn('[sandbox] Container was killed due to timeout');
       }
 
       await killContainer(sandboxContainerId).catch(() => {});
@@ -728,7 +734,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
     const costReport = buildCostReport(state);
     printRunSummary(costReport);
     await writeCostReport(workDir, costReport).catch((err) => {
-      log.warn(`Failed to write cost report: ${err instanceof Error ? err.message : String(err)}`);
+      flog.warn(`Failed to write cost report: ${err instanceof Error ? err.message : String(err)}`);
     });
     // Episodic memory: record fix outcome (success or failure)
     if (config.episodes?.enabled) {
@@ -738,7 +744,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         episode.language = recordTooling.language;
       }
       await recordEpisode(config.episodes, episode).catch((err) => {
-        log.warn(`Failed to record episode: ${err instanceof Error ? err.message : String(err)}`);
+        flog.warn(`Failed to record episode: ${err instanceof Error ? err.message : String(err)}`);
       });
     }
 
@@ -750,10 +756,12 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       const prNumber = prNumberMatch?.[1] ? Number.parseInt(prNumberMatch[1], 10) : undefined;
       if (prNumber) {
         collectPRFeedback({ episodesConfig: config.episodes, repoName, prNumber, repoPath: workDir }).catch((err) => {
-          log.warn(`Failed to collect PR feedback: ${err instanceof Error ? err.message : String(err)}`);
+          flog.warn(`Failed to collect PR feedback: ${err instanceof Error ? err.message : String(err)}`);
         });
       }
     }
+
+    closeFileLogger();
 
     // MCP server cleanup
     if (mcpHandles.size > 0) {
