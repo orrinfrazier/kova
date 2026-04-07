@@ -94,10 +94,24 @@ export const CustomToolSchema = z.object({
 
 export type CustomTool = z.infer<typeof CustomToolSchema>;
 
+export const RepoIntelConfigSchema = z
+  .object({
+    enabled: z.boolean(),
+    endpoint: z.string().optional(),
+    limit: z.number().int().positive().default(5),
+  })
+  .refine((cfg) => !cfg.enabled || cfg.endpoint != null, {
+    message: 'endpoint is required when repo_intel is enabled',
+    path: ['endpoint'],
+  });
+
+export type RepoIntelConfig = z.infer<typeof RepoIntelConfigSchema>;
+
 export const RepoConfigSchema = z.object({
   path: z.string(),
   vectordb: VectorDBConfigSchema.optional(),
   episodes: EpisodicMemoryConfigSchema.optional(),
+  repo_intel: RepoIntelConfigSchema.optional(),
   sandbox: SandboxConfigSchema.optional(),
   tools: z.array(CustomToolSchema).optional(),
   rules: z
