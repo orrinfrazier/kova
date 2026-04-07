@@ -658,8 +658,9 @@ describe('fix — E2E with mock pi-mono', () => {
   });
 
   describe('review loop', () => {
-    it('re-runs impl + quality + fresh review when review returns needs_fixes', async () => {
-      // Flow: assess→spec→TI(test+impl)→quality, then runReviewLoop: review(1)→impl→quality→review(2)
+    it('re-runs impl + fresh review when review returns mechanical fixes only', async () => {
+      // Flow: assess→spec→TI(test+impl)→quality, then runReviewLoop: review(1)→impl→review(2)
+      // Quality skipped because only mechanical fixes + tests pass
       setupResponseSequence([
         { structuredOutput: ASSESS_PASS, cost: 0.1 }, // assess
         { structuredOutput: SPEC_RESULT, cost: 0.08 }, // spec
@@ -668,7 +669,6 @@ describe('fix — E2E with mock pi-mono', () => {
         { result: 'Quality OK', cost: 0.02 }, // quality
         { structuredOutput: REVIEW_NEEDS_FIXES, cost: 0.09 }, // review iter 1 → needs_fixes
         { structuredOutput: IMPL_PASS, cost: 0.03 }, // impl (mechanical fix)
-        { result: 'Quality OK after fixes', cost: 0.02 }, // quality (re-run)
         { structuredOutput: REVIEW_PASS, cost: 0.05 }, // review iter 2 → pass
       ]);
 
@@ -681,8 +681,9 @@ describe('fix — E2E with mock pi-mono', () => {
       });
 
       expect(result.success).toBe(true);
-      // 9 agents: assess, spec, test, impl, quality, review(1), impl(fix), quality(2), review(2)
-      expect(mockAgentConstructor).toHaveBeenCalledTimes(9);
+      // 8 agents: assess, spec, test, impl, quality, review(1), impl(fix), review(2)
+      // (quality re-run skipped — only mechanical fixes with passing tests)
+      expect(mockAgentConstructor).toHaveBeenCalledTimes(8);
 
       // The 7th prompt (index 6) is the mechanical fix impl with review findings
       expect(allPrompts[6]).toContain('MECHANICAL_FIX');
