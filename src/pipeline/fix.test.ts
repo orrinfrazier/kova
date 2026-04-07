@@ -39,6 +39,11 @@ vi.mock('../services/worktree.js', async (importOriginal) => {
       branch: `kova/fix-${issueNumber}`,
     })),
     removeWorktree: vi.fn().mockResolvedValue(undefined),
+    commitAndPush: vi.fn().mockResolvedValue({
+      committed: true,
+      filesStaged: ['src/fix.ts'],
+      commitMessage: 'fix: Test issue (#42)',
+    }),
   };
 });
 
