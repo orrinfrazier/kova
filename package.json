@@ -1,0 +1,38 @@
+{
+  "name": "kova",
+  "version": "0.1.0",
+  "description": "Autonomous code agent — brainstorm issues, fix them, ship PRs",
+  "type": "module",
+  "bin": {
+    "kova": "dist/cli/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "check": "tsc --noEmit",
+    "dev": "tsc --watch",
+    "clean": "rm -rf dist",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.76",
+    "@octokit/rest": "^21.1.1",
+    "commander": "^13.1.0",
+    "js-yaml": "^4.1.0",
+    "zod": "^4.3.6",
+    "zx": "^8.0.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.0.0",
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^22.15.0",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.0"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}

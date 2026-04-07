@@ -1,0 +1,77 @@
+import { z } from 'zod';
+
+export const ModelTierSchema = z.enum(['small', 'medium', 'large']);
+export type ModelTier = z.infer<typeof ModelTierSchema>;
+
+export const IsolationModeSchema = z.enum(['worktree', 'docker', 'none']);
+export type IsolationMode = z.infer<typeof IsolationModeSchema>;
+
+export const RepoConfigSchema = z.object({
+  path: z.string(),
+  rules: z
+    .object({
+      coverage: z.number().default(80),
+      auto_merge: z.boolean().default(false),
+      max_issues_per_run: z.number().default(10),
+      focus: z.array(z.string()).optional(),
+    })
+    .default(() => ({ coverage: 80, auto_merge: false, max_issues_per_run: 10 })),
+  auto: z
+    .object({
+      source: z.enum(['open_issues', 'labeled']).default('open_issues'),
+      filter: z.string().optional(),
+      max_per_run: z.number().default(10),
+      schedule: z.string().optional(),
+    })
+    .optional(),
+  model: z
+    .object({
+      assess: ModelTierSchema.default('large'),
+      spec: ModelTierSchema.default('large'),
+      test: ModelTierSchema.default('medium'),
+      impl: ModelTierSchema.default('medium'),
+      quality: ModelTierSchema.default('small'),
+      review: ModelTierSchema.default('large'),
+    })
+    .default(() => ({ assess: 'large' as const, spec: 'large' as const, test: 'medium' as const, impl: 'medium' as const, quality: 'small' as const, review: 'large' as const })),
+  isolation: IsolationModeSchema.default('worktree'),
+});
+
+export type RepoConfig = z.infer<typeof RepoConfigSchema>;
+
+export const KovaConfigSchema = z.object({
+  repos: z.record(z.string(), RepoConfigSchema),
+});
+
+export type KovaConfig = z.infer<typeof KovaConfigSchema>;
+
+export interface Issue {
+  number: number;
+  title: string;
+  body: string;
+  labels: string[];
+  url: string;
+}
+
+export type WaveName = 'assess' | 'spec' | 'test' | 'impl' | 'quality' | 'review' | 'ship';
+
+export interface WaveResult {
+  wave: WaveName;
+  success: boolean;
+  artifact: unknown;
+  duration: number;
+  cost: number;
+  model?: string | undefined;
+}
+
+export interface FixState {
+  issue: Issue;
+  repo: string;
+  repoPath: string;
+  worktree?: string | undefined;
+  startedAt: string;
+  completedWaves: WaveName[];
+  waveResults: Partial<Record<WaveName, WaveResult>>;
+  status: 'running' | 'completed' | 'failed';
+  error?: string | undefined;
+}
