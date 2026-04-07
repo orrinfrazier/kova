@@ -56,12 +56,16 @@ If the user message specifies focus areas, you MUST only generate issues within 
 
 If no focus areas are specified, generate issues across all categories.
 
+## Cross-Repo Awareness
+
+If the user message includes a list of issues from related repos, you MUST avoid suggesting duplicates. An issue is a duplicate if it targets the same underlying problem, even if the wording differs. When in doubt, err on the side of skipping — it is better to miss one issue than to create a cross-repo duplicate.
+
 ## Rules
 
 - Read the actual code before identifying issues — do not guess
 - Be specific: reference file paths, function names, line numbers where possible
 - Each issue should be independently actionable (Grade A-B scope)
-- Do not suggest issues that are already tracked in existing GitHub issues
+- Do not suggest issues that are already tracked in existing GitHub issues or in related repos
 - Focus on substantive improvements, not style nitpicks
 - Aim for 5-15 issues per analysis (fewer if focus areas narrow the scope)
 - Order by priority (critical first, low last)
