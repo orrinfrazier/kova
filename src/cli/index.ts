@@ -5,9 +5,11 @@
 //   kova fix <issue-number>         Fix a single issue
 //   kova fix --all                  Fix all open issues (loop)
 //   kova fix --all --filter <label> Fix labeled issues
+//   kova auto                       Autonomous mode (overnight)
 
 import { resolve } from 'node:path';
 import { Command } from 'commander';
+import { runAuto } from '../pipeline/auto.js';
 import { fix } from '../pipeline/fix.js';
 import { fixLoop } from '../pipeline/loop.js';
 import { detectRepoName, resolveRepoConfig } from '../services/config.js';
@@ -93,5 +95,27 @@ program
       }
     },
   );
+
+program
+  .command('auto')
+  .description('Autonomous mode — fetch open issues, prioritize, fix sequentially')
+  .option('--filter <label>', 'Filter issues by label (overrides config)')
+  .option('--max <n>', 'Maximum issues to fix (overrides config)')
+  .option('--repo <path>', 'Repository path', '.')
+  .action(async (opts: { filter?: string; max?: string; repo?: string }) => {
+    const repoPath = resolve(opts.repo ?? '.');
+    const repoName = detectRepoName(repoPath);
+    const config = resolveRepoConfig(repoPath);
+
+    const result = await runAuto({
+      repoPath,
+      repoName,
+      config,
+      filter: opts.filter,
+      max: opts.max ? Number.parseInt(opts.max, 10) : undefined,
+    });
+
+    process.exit(result.exitCode);
+  });
 
 program.parse();
