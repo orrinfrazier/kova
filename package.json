@@ -1,6 +1,6 @@
 {
   "name": "kova",
-  "version": "0.1.0",
+  "version": "0.2.75",
   "description": "Autonomous code agent — brainstorm issues, fix them, ship PRs",
   "type": "module",
   "bin": {
