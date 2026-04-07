@@ -266,7 +266,7 @@ describe('findRepoByName', () => {
     repos: {
       onexos: {
         path: '/home/user/dev/onexos',
-        rules: { coverage: 80, auto_merge: false, max_issues_per_run: 10 },
+        rules: { coverage: 80, auto_merge: false, max_issues_per_run: 10, ci_merge: 'require' as const },
         model: {
           assess: 'large' as const,
           spec: 'large' as const,
@@ -280,7 +280,7 @@ describe('findRepoByName', () => {
       },
       kova: {
         path: '/home/user/dev/kova',
-        rules: { coverage: 80, auto_merge: false, max_issues_per_run: 10 },
+        rules: { coverage: 80, auto_merge: false, max_issues_per_run: 10, ci_merge: 'require' as const },
         model: {
           assess: 'large' as const,
           spec: 'large' as const,
@@ -975,7 +975,7 @@ repos:
       command: 'npx',
       args: ['-y', '@anthropic-ai/repo-intel-mcp'],
     });
-    expect(repo.mcp?.servers['shadcn']?.env).toEqual({ SHADCN_KEY: 'test123' });
+    expect(repo.mcp?.servers.shadcn?.env).toEqual({ SHADCN_KEY: 'test123' });
   });
 
   it('loads config with per-wave MCP server assignments', async () => {
@@ -1182,5 +1182,38 @@ repos:
   it('resolveRepoConfig has no playwright by default', () => {
     const config = resolveRepoConfig('/tmp/repo');
     expect(config.playwright).toBeUndefined();
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/*  ci_merge config field                                              */
+/* ------------------------------------------------------------------ */
+
+describe('ci_merge config field', () => {
+  it('parses ci_merge: warn correctly', async () => {
+    const yaml = `repos:\n  my-repo:\n    path: /tmp/my-repo\n    rules:\n      ci_merge: warn\n`;
+    await writeFile(join(tempDir, 'repos.yaml'), yaml);
+
+    const config = await loadConfig(join(tempDir, 'repos.yaml'));
+    const repo = config.repos['my-repo'];
+    expect(repo).toBeDefined();
+    expect(repo?.rules.ci_merge).toBe('warn');
+  });
+
+  it('defaults ci_merge to require when not specified', async () => {
+    const yaml = `repos:\n  my-repo:\n    path: /tmp/my-repo\n`;
+    await writeFile(join(tempDir, 'repos.yaml'), yaml);
+
+    const config = await loadConfig(join(tempDir, 'repos.yaml'));
+    const repo = config.repos['my-repo'];
+    expect(repo).toBeDefined();
+    expect(repo?.rules.ci_merge).toBe('require');
+  });
+
+  it('throws ZodError when ci_merge is invalid', async () => {
+    const yaml = `repos:\n  my-repo:\n    path: /tmp/my-repo\n    rules:\n      ci_merge: invalid\n`;
+    await writeFile(join(tempDir, 'repos.yaml'), yaml);
+
+    await expect(loadConfig(join(tempDir, 'repos.yaml'))).rejects.toThrow(ZodError);
   });
 });
