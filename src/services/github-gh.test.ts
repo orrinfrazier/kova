@@ -125,9 +125,8 @@ const PR_LIST_FIXTURE = [
 /*  Import SUT after mock is installed                                 */
 /* ------------------------------------------------------------------ */
 
-const { fetchIssues, fetchIssue, commentOnIssue, createPR, listOpenPRs, findOpenPR, hasExistingWork } = await import(
-  './github.js'
-);
+const { fetchIssues, fetchIssue, commentOnIssue, createPR, createIssue, listOpenPRs, findOpenPR, hasExistingWork } =
+  await import('./github.js');
 
 /* ------------------------------------------------------------------ */
 /*  Tests                                                              */
@@ -391,5 +390,48 @@ describe('hasExistingWork', () => {
 
     const ghCall = calls.find((c) => c.command.includes('gh pr list'));
     expect(ghCall?.command).toContain('--head kova/fix-777');
+  });
+});
+
+/* ---------- createIssue ----------------------------------------- */
+
+describe('createIssue', () => {
+  it('constructs correct gh arguments', async () => {
+    setResponse('gh issue create', {
+      stdout: JSON.stringify({ number: 50, url: 'https://github.com/owner/repo/issues/50' }),
+    });
+    await createIssue('/repo', 'New bug', 'Bug description', ['bug', 'urgent']);
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.command).toContain('gh issue create');
+    expect(calls[0]?.command).toContain('--title New bug');
+    expect(calls[0]?.command).toContain('--body Bug description');
+    expect(calls[0]?.command).toContain('--label bug');
+    expect(calls[0]?.command).toContain('--label urgent');
+    expect(calls[0]?.cwd).toBe('/repo');
+  });
+
+  it('returns created issue number and URL', async () => {
+    setResponse('gh issue create', {
+      stdout: JSON.stringify({ number: 50, url: 'https://github.com/owner/repo/issues/50' }),
+    });
+    const result = await createIssue('/repo', 'Title', 'Body', []);
+
+    expect(result.number).toBe(50);
+    expect(result.url).toBe('https://github.com/owner/repo/issues/50');
+  });
+
+  it('handles issues with no labels', async () => {
+    setResponse('gh issue create', {
+      stdout: JSON.stringify({ number: 51, url: 'https://github.com/owner/repo/issues/51' }),
+    });
+    await createIssue('/repo', 'No labels', 'Body', []);
+
+    expect(calls[0]?.command).not.toContain('--label');
+  });
+
+  it('throws on gh error', async () => {
+    setResponse('gh issue create', new Error('permission denied'));
+    await expect(createIssue('/repo', 'Title', 'Body', [])).rejects.toThrow('permission denied');
   });
 });
