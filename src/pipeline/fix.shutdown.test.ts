@@ -83,6 +83,7 @@ vi.mock('../services/language-detect.js', () => ({
 
 vi.mock('./prompts.js', () => ({
   loadPrompt: vi.fn().mockResolvedValue('mock system prompt'),
+  resolvePromptsDir: vi.fn().mockReturnValue(undefined),
 }));
 
 vi.mock('../services/worktree.js', async (importOriginal) => {

@@ -21,6 +21,7 @@ vi.mock('../services/language-detect.js', () => ({
 // Mock prompt loading
 vi.mock('./prompts.js', () => ({
   loadPrompt: vi.fn().mockResolvedValue('mock system prompt'),
+  resolvePromptsDir: vi.fn().mockReturnValue(undefined),
 }));
 
 const {

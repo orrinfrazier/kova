@@ -189,6 +189,7 @@ export type CiMergePolicy = z.infer<typeof CiMergePolicySchema>;
 
 export const RepoConfigSchema = z.object({
   path: z.string(),
+  prompts_dir: z.string().optional(),
   vectordb: VectorDBConfigSchema.optional(),
   episodes: EpisodicMemoryConfigSchema.optional(),
   repo_intel: RepoIntelConfigSchema.optional(),

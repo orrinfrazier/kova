@@ -25,7 +25,7 @@ import { ReviewResultSchema } from '../types/index.js';
 import { log } from '../utils/logger.js';
 import { executePiecesInBatches } from './batch-scheduler.js';
 import { buildPieceContext, buildWaveContext } from './context.js';
-import { loadPrompt } from './prompts.js';
+import { loadPrompt, resolvePromptsDir } from './prompts.js';
 
 const exec = promisify(execCb);
 
@@ -403,7 +403,8 @@ export async function runTILoop(config: TILoopConfig): Promise<TILoopResult> {
 
   // Step 1: Spawn test agent — writes tests, verifies they fail
   log.info('[ti-loop] Running test wave (write failing tests)');
-  const testSystemPrompt = await loadPrompt('test', repoConfig.tools, projectContext);
+  const resolvedPromptsDir = resolvePromptsDir(repoConfig.path, repoConfig.prompts_dir);
+  const testSystemPrompt = await loadPrompt('test', repoConfig.tools, projectContext, resolvedPromptsDir);
   const testExecResult = await executeWaveWithRetry({
     wave: 'test',
     systemPrompt: testSystemPrompt,
@@ -452,7 +453,7 @@ export async function runTILoop(config: TILoopConfig): Promise<TILoopResult> {
       implContext += `\n\n## Previous Test Failure Output\n\n\`\`\`\n${lastFailure}\n\`\`\``;
     }
 
-    const implSystemPrompt = await loadPrompt('impl', repoConfig.tools, projectContext);
+    const implSystemPrompt = await loadPrompt('impl', repoConfig.tools, projectContext, resolvedPromptsDir);
     const implExecResult = await executeWaveWithRetry({
       wave: 'impl',
       systemPrompt: implSystemPrompt,
@@ -533,7 +534,8 @@ export async function runPieceTILoop(config: PieceTILoopConfig): Promise<PieceTI
 
   // Step 1: Test agent — scoped to this piece only
   log.info(`[piece-ti-loop] Piece ${pieceIndex}: running test wave`);
-  const testSystemPrompt = await loadPrompt('test', repoConfig.tools, projectContext);
+  const resolvedPromptsDir = resolvePromptsDir(repoConfig.path, repoConfig.prompts_dir);
+  const testSystemPrompt = await loadPrompt('test', repoConfig.tools, projectContext, resolvedPromptsDir);
   const testExecResult = await executeWaveWithRetry({
     wave: 'test',
     systemPrompt: testSystemPrompt,
@@ -571,7 +573,7 @@ export async function runPieceTILoop(config: PieceTILoopConfig): Promise<PieceTI
       ...(failureOutputs.length > 0 && { lastFailureOutput: failureOutputs.at(-1) }),
     });
 
-    const implSystemPrompt = await loadPrompt('impl', repoConfig.tools, projectContext);
+    const implSystemPrompt = await loadPrompt('impl', repoConfig.tools, projectContext, resolvedPromptsDir);
     const implExecResult = await executeWaveWithRetry({
       wave: 'impl',
       systemPrompt: implSystemPrompt,
@@ -816,6 +818,7 @@ export async function runReviewLoop(config: ReviewLoopConfig): Promise<ReviewLoo
   }
 
   const testCmd = await resolveTestCommand(workDir, config.testCommand);
+  const resolvedPromptsDir = resolvePromptsDir(repoConfig.path, repoConfig.prompts_dir);
   let totalCost = 0;
   let reviewWaveResult: WaveResult | undefined;
   let qualityWaveResult: WaveResult | undefined;
@@ -825,7 +828,7 @@ export async function runReviewLoop(config: ReviewLoopConfig): Promise<ReviewLoo
     log.info(`[review-loop] Iteration ${iteration + 1}/${maxIterations}`);
 
     // Step 1: Fresh review agent — no prior review bias
-    const reviewSystemPrompt = await loadPrompt('review', repoConfig.tools, projectContext);
+    const reviewSystemPrompt = await loadPrompt('review', repoConfig.tools, projectContext, resolvedPromptsDir);
     const reviewExecResult = await executeWaveWithRetry({
       wave: 'review',
       systemPrompt: reviewSystemPrompt,
@@ -882,7 +885,7 @@ export async function runReviewLoop(config: ReviewLoopConfig): Promise<ReviewLoo
         } else {
           log.info('[review-loop] Ratchet confirmed — new tests fail, spawning impl agent');
           const implContext = buildNeedsNewTestsImplContext(needsNewTests, testFilesWritten, waveResults, prContext);
-          const implSystemPrompt = await loadPrompt('impl', repoConfig.tools, projectContext);
+          const implSystemPrompt = await loadPrompt('impl', repoConfig.tools, projectContext, resolvedPromptsDir);
           const implExecResult = await executeWaveWithRetry({
             wave: 'impl',
             systemPrompt: implSystemPrompt,
@@ -908,7 +911,7 @@ export async function runReviewLoop(config: ReviewLoopConfig): Promise<ReviewLoo
     if (mechanicalFixes.length > 0) {
       log.info(`[review-loop] Applying ${mechanicalFixes.length} mechanical fix(es)`);
       const implContext = buildMechanicalFixImplContext(mechanicalFixes, waveResults, prContext);
-      const implSystemPrompt = await loadPrompt('impl', repoConfig.tools, projectContext);
+      const implSystemPrompt = await loadPrompt('impl', repoConfig.tools, projectContext, resolvedPromptsDir);
       const implExecResult = await executeWaveWithRetry({
         wave: 'impl',
         systemPrompt: implSystemPrompt,
@@ -931,7 +934,7 @@ export async function runReviewLoop(config: ReviewLoopConfig): Promise<ReviewLoo
 
     // Step 5: Re-run quality gates (only if new code was written or mechanical fixes broke tests)
     if (needQualityRerun) {
-      const qualitySystemPrompt = await loadPrompt('quality', repoConfig.tools, projectContext);
+      const qualitySystemPrompt = await loadPrompt('quality', repoConfig.tools, projectContext, resolvedPromptsDir);
       const qualityExecResult = await executeWaveWithRetry({
         wave: 'quality',
         systemPrompt: qualitySystemPrompt,

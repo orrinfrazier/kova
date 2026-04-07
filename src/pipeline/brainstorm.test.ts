@@ -14,6 +14,7 @@ vi.mock('../ai/index.js', () => ({
 
 vi.mock('./prompts.js', () => ({
   loadPrompt: vi.fn().mockResolvedValue('You are brainstorming issues.'),
+  resolvePromptsDir: vi.fn().mockReturnValue(undefined),
 }));
 
 // --- Mock cross-repo issues ---

@@ -20,7 +20,7 @@ import { loadProjectContext } from '../services/project-context.js';
 import type { BrainstormIssue, BrainstormResult, RepoConfig } from '../types/index.js';
 import { BrainstormResultSchema } from '../types/index.js';
 import { log } from '../utils/logger.js';
-import { loadPrompt } from './prompts.js';
+import { loadPrompt, resolvePromptsDir } from './prompts.js';
 
 function toOutputFormat(schema: z.ZodType): OutputFormat {
   return {
@@ -57,7 +57,8 @@ export async function brainstorm(options: BrainstormOptions): Promise<Brainstorm
   const model = resolveWaveModel(config.model.brainstorm);
   const tools = getWaveTools('brainstorm', repoPath);
   const projectContext = await loadProjectContext(repoPath);
-  const systemPrompt = await loadPrompt('brainstorm', undefined, projectContext);
+  const resolvedPromptsDir = resolvePromptsDir(repoPath, config.prompts_dir);
+  const systemPrompt = await loadPrompt('brainstorm', undefined, projectContext, resolvedPromptsDir);
   const thinkingLevel = resolveThinkingLevel(config, 'brainstorm');
 
   const focusAreas = focus ?? config.rules.focus;
