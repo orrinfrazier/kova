@@ -18,6 +18,7 @@ import {
 import type { FixState, Issue, RepoConfig, WaveName, WaveResult } from '../types/index.js';
 import { type AssessResult, AssessResultSchema, ReviewResultSchema, SpecResultSchema } from '../types/index.js';
 import { log } from '../utils/logger.js';
+import { buildWaveContext } from './context.js';
 import { buildCostReport, printRunSummary, writeCostReport } from './cost-report.js';
 import { loadPrompt } from './prompts.js';
 
@@ -110,9 +111,8 @@ export async function fix(options: FixOptions): Promise<FixResult> {
     }
 
     if (!shouldSkip('spec')) {
-      const assessResult = state.waveResults.assess;
       const result = await runWave('spec', workDir, config, {
-        userMessage: `Issue: ${issue.title}\n${issue.body}\n\nAssessment:\n${JSON.stringify(assessResult?.artifact, null, 2)}${prContext}`,
+        userMessage: buildWaveContext('spec', issue, state.waveResults, { prContext }),
         outputFormat: toOutputFormat(SpecResultSchema),
       });
       state.waveResults.spec = toWaveResult('spec', result);
@@ -124,9 +124,8 @@ export async function fix(options: FixOptions): Promise<FixResult> {
     }
 
     if (!shouldSkip('test')) {
-      const specResult = state.waveResults.spec;
       const result = await runWave('test', workDir, config, {
-        userMessage: `Write failing tests for this spec:\n${JSON.stringify(specResult?.artifact, null, 2)}`,
+        userMessage: buildWaveContext('test', issue, state.waveResults),
       });
       state.waveResults.test = toWaveResult('test', result);
       state.completedWaves.push('test');
@@ -137,9 +136,8 @@ export async function fix(options: FixOptions): Promise<FixResult> {
     }
 
     if (!shouldSkip('impl')) {
-      const specResult = state.waveResults.spec;
       const result = await runWave('impl', workDir, config, {
-        userMessage: `Implement to pass the failing tests. Spec:\n${JSON.stringify(specResult?.artifact, null, 2)}${prContext}`,
+        userMessage: buildWaveContext('impl', issue, state.waveResults, { prContext }),
       });
       state.waveResults.impl = toWaveResult('impl', result);
       state.completedWaves.push('impl');
@@ -151,7 +149,9 @@ export async function fix(options: FixOptions): Promise<FixResult> {
 
     if (!shouldSkip('quality')) {
       const result = await runWave('quality', workDir, config, {
-        userMessage: `Run all quality gates: lint, typecheck, tests, coverage (threshold: ${config.rules.coverage}%). Fix any failures.`,
+        userMessage: buildWaveContext('quality', issue, state.waveResults, {
+          coverageThreshold: config.rules.coverage,
+        }),
       });
       state.waveResults.quality = toWaveResult('quality', result);
       state.completedWaves.push('quality');
@@ -163,7 +163,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
 
     if (!shouldSkip('review')) {
       const result = await runWave('review', workDir, config, {
-        userMessage: `Review the changes for this issue. Spec:\n${JSON.stringify(state.waveResults.spec?.artifact, null, 2)}`,
+        userMessage: buildWaveContext('review', issue, state.waveResults),
         outputFormat: toOutputFormat(ReviewResultSchema),
       });
       state.waveResults.review = toWaveResult('review', result);
@@ -173,12 +173,15 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       const review = result.structuredOutput as { verdict: string } | undefined;
       if (review?.verdict === 'needs_fixes') {
         log.info('[review] Findings detected — re-running impl + quality');
+        state.waveResults.review = toWaveResult('review', result);
         const reimpl = await runWave('impl', workDir, config, {
-          userMessage: `Fix review findings:\n${JSON.stringify(result.structuredOutput, null, 2)}`,
+          userMessage: buildWaveContext('impl', issue, state.waveResults, { isReimpl: true, prContext }),
         });
         state.waveResults.impl = toWaveResult('impl', reimpl);
         const requality = await runWave('quality', workDir, config, {
-          userMessage: `Run all quality gates after review fixes. Coverage threshold: ${config.rules.coverage}%.`,
+          userMessage: buildWaveContext('quality', issue, state.waveResults, {
+            coverageThreshold: config.rules.coverage,
+          }),
         });
         state.waveResults.quality = toWaveResult('quality', requality);
       }
