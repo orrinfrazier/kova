@@ -227,6 +227,37 @@ describe('EpisodeInsertSchema', () => {
     });
     expect(result.success).toBe(false);
   });
+
+  it('accepts optional language field', () => {
+    const result = EpisodeInsertSchema.safeParse({
+      issue_number: 42,
+      approach: 'Refactor service',
+      outcome: 'success',
+      files_changed: ['src/index.ts'],
+      embedding: new Array(1536).fill(0.1),
+      repo: 'kova',
+      language: 'typescript',
+    });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.language).toBe('typescript');
+    }
+  });
+
+  it('validates without language field (optional)', () => {
+    const result = EpisodeInsertSchema.safeParse({
+      issue_number: 42,
+      approach: 'Refactor service',
+      outcome: 'success',
+      files_changed: [],
+      embedding: new Array(1536).fill(0.1),
+      repo: 'kova',
+    });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.language).toBeUndefined();
+    }
+  });
 });
 
 /* ------------------------------------------------------------------ */

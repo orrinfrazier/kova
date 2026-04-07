@@ -98,17 +98,29 @@ export interface EpisodeContext {
   outcome: 'success' | 'partial' | 'failure';
   learnings: string;
   score: number;
+  repo?: string | undefined;
 }
 
 interface EpisodeContextResponse {
   episodes?: EpisodeContext[];
 }
 
+export interface CrossRepoQueryOptions {
+  repo?: string | undefined;
+  language?: string | undefined;
+}
+
 /**
  * Query the episodic memory REST endpoint for past issue learnings similar to the given query.
+ * When cross_repo is enabled, searches across all repos with same-repo weighting.
+ * When language_filter is enabled, filters by language to avoid irrelevant episodes.
  * Returns an empty array if disabled, on error, or if the response is malformed.
  */
-export async function queryEpisodeContext(config: EpisodicMemoryConfig, query: string): Promise<EpisodeContext[]> {
+export async function queryEpisodeContext(
+  config: EpisodicMemoryConfig,
+  query: string,
+  options?: CrossRepoQueryOptions,
+): Promise<EpisodeContext[]> {
   if (!config.enabled) {
     return [];
   }
@@ -119,10 +131,21 @@ export async function queryEpisodeContext(config: EpisodicMemoryConfig, query: s
   }
 
   try {
+    const body: Record<string, unknown> = { query, top_k: config.max_episodes };
+
+    if (options?.repo) {
+      body.repo = options.repo;
+      body.cross_repo = config.cross_repo;
+    }
+
+    if (config.language_filter && options?.language) {
+      body.language = options.language;
+    }
+
     const response = await fetch(config.endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query, top_k: config.max_episodes }),
+      body: JSON.stringify(body),
     });
 
     if (!response.ok) {
@@ -150,22 +173,27 @@ export async function queryEpisodeContext(config: EpisodicMemoryConfig, query: s
 /**
  * Format episodes into a markdown section for injection into assess/spec prompts.
  * Episodes are sorted by score descending (most relevant first).
+ * When currentRepo is provided, shows [same-repo] or [cross-repo: X] attribution.
  */
-export function formatEpisodes(episodes: EpisodeContext[]): string {
+export function formatEpisodes(episodes: EpisodeContext[], currentRepo?: string): string {
   if (episodes.length === 0) {
     return '';
   }
 
   const sorted = [...episodes].sort((a, b) => b.score - a.score);
 
-  const sections = sorted.map((ep) =>
-    [
-      `### #${ep.issue_number}: ${ep.issue_title}`,
-      `- **Approach:** ${ep.approach}`,
-      `- **Outcome:** ${ep.outcome}`,
-      `- **Learning:** ${ep.learnings}`,
-    ].join('\n'),
-  );
+  const sections = sorted.map((ep) => {
+    const lines = [`### #${ep.issue_number}: ${ep.issue_title}`];
+
+    if (currentRepo && ep.repo) {
+      const tag = ep.repo === currentRepo ? '[same-repo]' : `[cross-repo: ${ep.repo}]`;
+      lines.push(`- **Source:** ${tag}`);
+    }
+
+    lines.push(`- **Approach:** ${ep.approach}`, `- **Outcome:** ${ep.outcome}`, `- **Learning:** ${ep.learnings}`);
+
+    return lines.join('\n');
+  });
 
   return `## Learnings from similar past issues\n\n${sections.join('\n\n')}`;
 }
@@ -179,6 +207,7 @@ export interface EpisodeRecord {
   issue_title: string;
   labels: string[];
   repo: string;
+  language?: string | undefined;
   approach: string;
   files_changed: string[];
   quality_gates: {
@@ -349,6 +378,7 @@ export interface EpisodeInput {
   approach: string;
   outcome: 'success' | 'fail';
   files_changed: string[];
+  language?: string | undefined;
 }
 
 export interface PatternInput {
@@ -438,8 +468,8 @@ export async function queryCodeEmbeddings(
 /* ------------------------------------------------------------------ */
 
 const INSERT_EPISODE_SQL = `
-INSERT INTO episodes (repo, issue_number, issue_title, approach, outcome, files_changed, embedding)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
+INSERT INTO episodes (repo, issue_number, issue_title, approach, outcome, files_changed, embedding, language)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 `;
 
 export async function insertEpisode(client: VectorDBClient, episode: EpisodeInput): Promise<void> {
@@ -453,6 +483,7 @@ export async function insertEpisode(client: VectorDBClient, episode: EpisodeInpu
     episode.outcome,
     episode.files_changed,
     JSON.stringify(embedding),
+    episode.language ?? null,
   ]);
 }
 
@@ -468,14 +499,50 @@ ORDER BY embedding <-> $2
 LIMIT $3
 `;
 
+export interface CrossRepoEpisodeOptions {
+  crossRepo?: boolean | undefined;
+  language?: string | undefined;
+  sameRepoWeight?: number | undefined;
+}
+
 export async function queryEpisodes(
   client: VectorDBClient,
   repo: string,
   query: string,
   limit = 5,
+  options?: CrossRepoEpisodeOptions,
 ): Promise<unknown[]> {
   const embedding = await client.embed(query);
-  const result = await client.pool.query(QUERY_EPISODES_SQL, [repo, JSON.stringify(embedding), limit]);
+  const embeddingJson = JSON.stringify(embedding);
+
+  if (options?.crossRepo) {
+    const weight = options.sameRepoWeight ?? 1.5;
+
+    if (options.language) {
+      const sql = `
+SELECT id, repo, issue_number, issue_title, approach, outcome, files_changed, created_at,
+  CASE WHEN repo = $1 THEN (embedding <-> $2) / ${weight} ELSE embedding <-> $2 END AS weighted_distance
+FROM episodes
+WHERE language = $4
+ORDER BY weighted_distance
+LIMIT $3
+`;
+      const result = await client.pool.query(sql, [repo, embeddingJson, limit, options.language]);
+      return result.rows;
+    }
+
+    const sql = `
+SELECT id, repo, issue_number, issue_title, approach, outcome, files_changed, created_at,
+  CASE WHEN repo = $1 THEN (embedding <-> $2) / ${weight} ELSE embedding <-> $2 END AS weighted_distance
+FROM episodes
+ORDER BY weighted_distance
+LIMIT $3
+`;
+    const result = await client.pool.query(sql, [repo, embeddingJson, limit]);
+    return result.rows;
+  }
+
+  const result = await client.pool.query(QUERY_EPISODES_SQL, [repo, embeddingJson, limit]);
   return result.rows;
 }
 
@@ -532,10 +599,13 @@ export async function queryPatterns(
 export async function runMigration(client: VectorDBClient): Promise<void> {
   const thisFile = fileURLToPath(import.meta.url);
   const thisDir = dirname(thisFile);
-  // Resolve relative to the service file → ../../migrations/ (project root)
-  const sqlPath = join(thisDir, '..', '..', 'migrations', '001_pgvector_schema.sql');
-  const sql = await readFile(sqlPath, 'utf-8');
-  await client.pool.query(sql);
+  const migrationsDir = join(thisDir, '..', '..', 'migrations');
+
+  const sql001 = await readFile(join(migrationsDir, '001_pgvector_schema.sql'), 'utf-8');
+  await client.pool.query(sql001);
+
+  const sql002 = await readFile(join(migrationsDir, '002_episodes_language.sql'), 'utf-8');
+  await client.pool.query(sql002);
 }
 
 /* ------------------------------------------------------------------ */

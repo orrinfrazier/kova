@@ -19,6 +19,7 @@ export const EpisodeInsertSchema = z.object({
   files_changed: z.array(z.string()),
   embedding: embedding1536,
   repo: z.string(),
+  language: z.string().optional(),
   created_at: z.string().optional(),
 });
 
