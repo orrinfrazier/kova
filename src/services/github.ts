@@ -55,6 +55,22 @@ export async function commentOnIssue(repoPath: string, issueNumber: number, body
   log.info(`Commented on #${issueNumber}`);
 }
 
+export async function createIssue(
+  repoPath: string,
+  title: string,
+  body: string,
+  labels: string[],
+): Promise<{ number: number; url: string }> {
+  const args = ['issue', 'create', '--title', title, '--body', body, '--json', 'number,url'];
+  for (const label of labels) {
+    args.push('--label', label);
+  }
+  const result = await $({ cwd: repoPath })`gh ${args}`;
+  const parsed = JSON.parse(result.stdout) as { number: number; url: string };
+  log.info(`Issue created: #${parsed.number} ${parsed.url}`);
+  return parsed;
+}
+
 export async function createPR(repoPath: string, branch: string, title: string, body: string): Promise<string> {
   const result = await $({ cwd: repoPath })`gh pr create --title ${title} --body ${body} --head ${branch}`;
   const prUrl = result.stdout.trim();

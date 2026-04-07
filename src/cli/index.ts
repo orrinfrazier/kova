@@ -14,8 +14,9 @@ import { runAuto } from '../pipeline/auto.js';
 import { brainstorm, printBrainstormPreview } from '../pipeline/brainstorm.js';
 import { fix } from '../pipeline/fix.js';
 import { fixLoop } from '../pipeline/loop.js';
+import { approveIssues } from '../services/approval.js';
 import { detectRepoName, resolveRepoConfig } from '../services/config.js';
-import { fetchIssue, hasExistingWork } from '../services/github.js';
+import { createIssue, fetchIssue, hasExistingWork } from '../services/github.js';
 import {
   exitCodeForSignal,
   getShutdownSignal,
@@ -157,7 +158,8 @@ program
   .option('--repo <path>', 'Repository path', '.')
   .option('--threshold <n>', 'Minimum confidence score (0.0-1.0)', '0.7')
   .option('--focus <areas>', 'Comma-separated focus areas (e.g., "security,performance")')
-  .action(async (opts: { repo?: string; threshold?: string; focus?: string }) => {
+  .option('--yes', 'Auto-approve all issues (no interactive prompts)')
+  .action(async (opts: { repo?: string; threshold?: string; focus?: string; yes?: boolean }) => {
     const repoPath = resolve(opts.repo ?? '.');
     const config = resolveRepoConfig(repoPath);
     const threshold = Number.parseFloat(opts.threshold ?? '0.7');
@@ -174,6 +176,31 @@ program
     if (!result.success) {
       process.exit(1);
     }
+
+    // Interactive approval flow
+    const approval = await approveIssues(result.issues, opts.yes ? { autoApprove: true } : {});
+
+    if (approval.approved.length === 0) {
+      log.info('No issues approved — nothing to create.');
+      return;
+    }
+
+    // Create approved issues on GitHub
+    let created = 0;
+    for (const issue of approval.approved) {
+      try {
+        const { number, url } = await createIssue(repoPath, issue.title, issue.body, issue.labels);
+        log.info(`Created #${number}: ${url}`);
+        created++;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        log.error(`Failed to create "${issue.title}": ${message}`);
+      }
+    }
+
+    log.info(
+      `\nSummary: ${created} created, ${approval.rejected} rejected, ${approval.edited} edited, ${approval.skipped} skipped`,
+    );
   });
 
 program.parse();
