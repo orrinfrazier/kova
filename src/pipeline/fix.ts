@@ -33,6 +33,7 @@ function toOutputFormat(schema: z.ZodType): OutputFormat {
   return {
     type: 'json_schema',
     schema: z.toJSONSchema(schema, { target: 'draft-07' }) as Record<string, unknown>,
+    zodSchema: schema,
   };
 }
 
