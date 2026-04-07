@@ -68,6 +68,7 @@ export interface WaveResult {
   artifact: unknown;
   duration: number;
   cost: number;
+  turns: number;
   model?: string | undefined;
 }
 

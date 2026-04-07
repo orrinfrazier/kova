@@ -90,6 +90,7 @@ describe('fix — resume from checkpoint', () => {
           artifact: { grade: 'A', should_proceed: true },
           duration: 100,
           cost: 0.01,
+          turns: 1,
         },
         spec: {
           wave: 'spec',
@@ -97,6 +98,7 @@ describe('fix — resume from checkpoint', () => {
           artifact: { summary: 'test', pieces: [], dependency_order: [], constraints: [] },
           duration: 100,
           cost: 0.01,
+          turns: 1,
         },
       },
       status: 'running',
@@ -107,12 +109,7 @@ describe('fix — resume from checkpoint', () => {
     const mockExecute = vi.mocked(executeWaveWithRetry);
     mockExecute.mockClear();
 
-    await fix({
-      issue: makeIssue(42),
-      repoPath: workDir,
-      repoName: 'test-repo',
-      config: makeConfig(),
-    });
+    await fix({ issue: makeIssue(42), repoPath: workDir, repoName: 'test-repo', config: makeConfig() });
 
     const waveCalls = mockExecute.mock.calls.map((c) => c[0].wave);
     expect(waveCalls).not.toContain('assess');
@@ -137,13 +134,7 @@ describe('fix — resume from checkpoint', () => {
     const mockExecute = vi.mocked(executeWaveWithRetry);
     mockExecute.mockClear();
 
-    await fix({
-      issue: makeIssue(42),
-      repoPath: workDir,
-      repoName: 'test-repo',
-      config: makeConfig(),
-      fresh: true,
-    });
+    await fix({ issue: makeIssue(42), repoPath: workDir, repoName: 'test-repo', config: makeConfig(), fresh: true });
 
     const waveCalls = mockExecute.mock.calls.map((c) => c[0].wave);
     expect(waveCalls).toContain('assess');
@@ -165,28 +156,22 @@ describe('fix — resume from checkpoint', () => {
           artifact: { grade: 'A', should_proceed: true },
           duration: 100,
           cost: 0.01,
+          turns: 1,
         },
-        spec: { wave: 'spec', success: true, artifact: {}, duration: 100, cost: 0.01 },
+        spec: { wave: 'spec', success: true, artifact: {}, duration: 100, cost: 0.01, turns: 1 },
       },
       status: 'running',
     };
     await saveCheckpoint(workDir, existingState);
 
     const consoleSpy = vi.spyOn(console, 'log');
-
-    await fix({
-      issue: makeIssue(42),
-      repoPath: workDir,
-      repoName: 'test-repo',
-      config: makeConfig(),
-    });
+    await fix({ issue: makeIssue(42), repoPath: workDir, repoName: 'test-repo', config: makeConfig() });
 
     const logMessages = consoleSpy.mock.calls.map((c) => c[0] as string);
     const resumeMsg = logMessages.find((m) => m.includes('Resuming'));
     expect(resumeMsg).toBeDefined();
     expect(resumeMsg).toContain('assess');
     expect(resumeMsg).toContain('spec');
-
     consoleSpy.mockRestore();
   });
 });
@@ -226,16 +211,9 @@ describe('fix — grade D/F issue comment', () => {
     const mockComment = vi.mocked(commentOnIssue);
     mockComment.mockClear();
 
-    const result = await fix({
-      issue: makeIssue(42),
-      repoPath: workDir,
-      repoName: 'test-repo',
-      config: makeConfig(),
-    });
-
+    const result = await fix({ issue: makeIssue(42), repoPath: workDir, repoName: 'test-repo', config: makeConfig() });
     expect(result.success).toBe(false);
     expect(mockComment).toHaveBeenCalledOnce();
-
     const commentBody = mockComment.mock.calls[0]?.[2] as string;
     expect(commentBody).toContain('D');
     expect(commentBody).toContain('high');
@@ -267,13 +245,7 @@ describe('fix — grade D/F issue comment', () => {
     const mockComment = vi.mocked(commentOnIssue);
     mockComment.mockClear();
 
-    const result = await fix({
-      issue: makeIssue(99),
-      repoPath: workDir,
-      repoName: 'test-repo',
-      config: makeConfig(),
-    });
-
+    const result = await fix({ issue: makeIssue(99), repoPath: workDir, repoName: 'test-repo', config: makeConfig() });
     expect(result.success).toBe(false);
     expect(mockComment).toHaveBeenCalledOnce();
     const commentBody = mockComment.mock.calls[0]?.[2] as string;
@@ -312,7 +284,6 @@ describe('fix — grade D/F issue comment', () => {
       config: makeConfig(),
       noComment: true,
     });
-
     expect(mockComment).not.toHaveBeenCalled();
   });
 
@@ -325,13 +296,7 @@ describe('fix — grade D/F issue comment', () => {
     const mockComment = vi.mocked(commentOnIssue);
     mockComment.mockClear();
 
-    await fix({
-      issue: makeIssue(42),
-      repoPath: workDir,
-      repoName: 'test-repo',
-      config: makeConfig(),
-    });
-
+    await fix({ issue: makeIssue(42), repoPath: workDir, repoName: 'test-repo', config: makeConfig() });
     expect(mockComment).not.toHaveBeenCalled();
   });
 });
