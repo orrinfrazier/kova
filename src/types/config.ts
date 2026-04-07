@@ -75,7 +75,7 @@ export interface Issue {
   url: string;
 }
 
-export type WaveName = 'assess' | 'spec' | 'test' | 'impl' | 'quality' | 'review' | 'ship';
+export type WaveName = 'assess' | 'spec' | 'test' | 'impl' | 'quality' | 'review' | 'ship' | 'brainstorm';
 
 export interface WaveResult {
   wave: WaveName;

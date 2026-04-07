@@ -22,6 +22,8 @@ export type { WaveHandoff } from './handoffs.js';
 export { loadAllHandoffs, loadHandoff, saveHandoff, WaveHandoffSchema } from './handoffs.js';
 export type {
   AssessResult,
+  BrainstormIssue,
+  BrainstormResult,
   DiagnosisCategory,
   ImplDiagnosis,
   ImplResult,
@@ -34,6 +36,8 @@ export type {
 } from './waves.js';
 export {
   AssessResultSchema,
+  BrainstormIssueSchema,
+  BrainstormResultSchema,
   DiagnosisCategorySchema,
   ImplDiagnosisSchema,
   ImplResultSchema,

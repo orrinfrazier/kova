@@ -12,6 +12,7 @@ export {
 export {
   type AIWaveName,
   DEFAULT_THINKING_LEVELS,
+  type FixAIWaveName,
   getWaveTools,
   resolveThinkingLevel,
   WAVE_TOOLS,
