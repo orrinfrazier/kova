@@ -1,7 +1,9 @@
 // Prompt loader — reads wave prompts from prompts/ directory.
 // Prompts are markdown files, one per wave.
+// Custom tools are appended to impl/quality prompts when configured.
 
 import { fs, path } from 'zx';
+import type { CustomTool } from '../types/index.js';
 
 const PROMPTS_DIR = path.join(import.meta.dirname, '..', '..', 'prompts');
 
@@ -97,15 +99,44 @@ For each issue provide:
 Output structured JSON matching the provided schema.`,
 };
 
-export async function loadPrompt(wave: string): Promise<string> {
+export async function loadPrompt(wave: string, customTools?: readonly CustomTool[]): Promise<string> {
   const filePath = path.join(PROMPTS_DIR, `${wave}.md`);
 
+  let prompt: string;
   try {
-    return await fs.readFile(filePath, 'utf-8');
+    prompt = await fs.readFile(filePath, 'utf-8');
   } catch {
     // Fall back to embedded prompts
     const fallback = FALLBACK_PROMPTS[wave];
-    if (fallback) return fallback;
-    throw new Error(`No prompt found for wave: ${wave}`);
+    if (fallback) {
+      prompt = fallback;
+    } else {
+      throw new Error(`No prompt found for wave: ${wave}`);
+    }
   }
+
+  // Append custom tools section for impl/quality waves
+  if (customTools && customTools.length > 0 && (wave === 'impl' || wave === 'quality')) {
+    prompt += `\n\n${buildCustomToolsSection(customTools)}`;
+  }
+
+  return prompt;
+}
+
+/**
+ * Build a prompt section describing custom tools available to the agent.
+ * Each tool is listed with its name, description, and the command it runs.
+ */
+export function buildCustomToolsSection(tools: readonly CustomTool[]): string {
+  const toolEntries = tools.map((t) => `- **${t.name}**: ${t.description}\n  Command: \`${t.command}\``).join('\n');
+
+  return [
+    '## Custom Tools',
+    '',
+    'The following repo-specific tools are available. Call them by name when needed:',
+    '',
+    toolEntries,
+    '',
+    'These tools run as shell commands in the working directory. Use them when their purpose matches what you need to do.',
+  ].join('\n');
 }

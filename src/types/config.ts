@@ -83,11 +83,23 @@ export const EpisodicMemoryConfigSchema = z
 
 export type EpisodicMemoryConfig = z.infer<typeof EpisodicMemoryConfigSchema>;
 
+export const CustomToolSchema = z.object({
+  name: z
+    .string()
+    .min(1)
+    .regex(/^[a-z0-9_-]+$/, 'Tool name must be lowercase alphanumeric with hyphens/underscores'),
+  description: z.string().min(1),
+  command: z.string().min(1),
+});
+
+export type CustomTool = z.infer<typeof CustomToolSchema>;
+
 export const RepoConfigSchema = z.object({
   path: z.string(),
   vectordb: VectorDBConfigSchema.optional(),
   episodes: EpisodicMemoryConfigSchema.optional(),
   sandbox: SandboxConfigSchema.optional(),
+  tools: z.array(CustomToolSchema).optional(),
   rules: z
     .object({
       coverage: z.number().default(80),

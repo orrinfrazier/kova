@@ -13,7 +13,7 @@ import {
   createReadTool,
   createWriteTool,
 } from '@mariozechner/pi-coding-agent';
-import type { RepoConfig, WaveName } from '../types/index.js';
+import type { CustomTool, RepoConfig, WaveName } from '../types/index.js';
 
 type ToolName = 'read' | 'bash' | 'edit' | 'write' | 'grep' | 'find' | 'ls';
 
@@ -68,7 +68,48 @@ export function resolveThinkingLevel(config: RepoConfig, wave: WaveName): Thinki
   return override ?? DEFAULT_THINKING_LEVELS[wave];
 }
 
-export function getWaveTools(wave: AIWaveName, cwd: string): AnyTool[] {
+/** Waves where custom tools are available. */
+const CUSTOM_TOOL_WAVES: ReadonlySet<AIWaveName> = new Set(['impl', 'quality']);
+
+/**
+ * Create AgentTool wrappers for custom repo tools.
+ * Each custom tool becomes a bash command the agent can invoke by name.
+ */
+export function createCustomTools(tools: readonly CustomTool[], cwd: string): AnyTool[] {
+  return tools.map(
+    (tool): AnyTool => ({
+      name: tool.name,
+      label: tool.name,
+      description: tool.description,
+      parameters: { type: 'object', properties: {} },
+      async execute() {
+        const { execSync } = await import('node:child_process');
+        try {
+          const output = execSync(tool.command, {
+            cwd,
+            encoding: 'utf-8',
+            timeout: 120_000,
+            maxBuffer: 10 * 1024 * 1024,
+            stdio: ['pipe', 'pipe', 'pipe'],
+          });
+          return { content: [{ type: 'text', text: output || '(no output)' }], details: undefined };
+        } catch (error) {
+          const err = error as { stderr?: string; stdout?: string; status?: number };
+          const msg = `Command failed (exit ${err.status ?? 1}):\n${err.stderr ?? err.stdout ?? String(error)}`;
+          return { content: [{ type: 'text', text: msg }], details: undefined };
+        }
+      },
+    }),
+  );
+}
+
+export function getWaveTools(wave: AIWaveName, cwd: string, customTools?: readonly CustomTool[]): AnyTool[] {
   const allowedNames = WAVE_TOOLS[wave];
-  return allowedNames.map((name) => toolCreators[name](cwd));
+  const tools = allowedNames.map((name) => toolCreators[name](cwd));
+
+  if (customTools && customTools.length > 0 && CUSTOM_TOOL_WAVES.has(wave)) {
+    tools.push(...createCustomTools(customTools, cwd));
+  }
+
+  return tools;
 }
