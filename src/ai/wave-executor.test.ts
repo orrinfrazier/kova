@@ -284,6 +284,77 @@ describe('spawnWaveAgent', () => {
     expect(secondConfig.initialState.systemPrompt).toContain('Spec prompt.');
   });
 
+  it('aborts wave with classified agent error when timeout exceeded', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+
+    // Make prompt hang until aborted
+    mockPrompt.mockImplementation(() => new Promise((resolve) => setTimeout(resolve, 60_000)));
+
+    await expect(
+      spawnWaveAgent({
+        wave: 'assess',
+        model: 'claude-sonnet-4-6',
+        tools: [],
+        systemPrompt: 'Prompt.',
+        handoffContext: '',
+        userMessage: 'Message.',
+        cwd: '/tmp/test',
+        timeoutMs: 50,
+      }),
+    ).rejects.toThrow(/timed out/i);
+  });
+
+  it('uses default timeout per wave type when timeoutMs not specified', async () => {
+    const { DEFAULT_WAVE_TIMEOUTS } = await import('./wave-executor.js');
+
+    expect(DEFAULT_WAVE_TIMEOUTS.assess).toBe(5 * 60 * 1000);
+    expect(DEFAULT_WAVE_TIMEOUTS.spec).toBe(5 * 60 * 1000);
+    expect(DEFAULT_WAVE_TIMEOUTS.review).toBe(5 * 60 * 1000);
+    expect(DEFAULT_WAVE_TIMEOUTS.test).toBe(15 * 60 * 1000);
+    expect(DEFAULT_WAVE_TIMEOUTS.impl).toBe(15 * 60 * 1000);
+    expect(DEFAULT_WAVE_TIMEOUTS.quality).toBe(10 * 60 * 1000);
+    expect(DEFAULT_WAVE_TIMEOUTS.ship).toBeUndefined();
+  });
+
+  it('allows custom timeoutMs to override default', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+
+    // Make prompt hang until aborted
+    mockPrompt.mockImplementation(() => new Promise((resolve) => setTimeout(resolve, 60_000)));
+
+    // Custom timeout of 30ms should fire before the default 5min
+    await expect(
+      spawnWaveAgent({
+        wave: 'assess',
+        model: 'claude-sonnet-4-6',
+        tools: [],
+        systemPrompt: 'Prompt.',
+        handoffContext: '',
+        userMessage: 'Message.',
+        cwd: '/tmp/test',
+        timeoutMs: 30,
+      }),
+    ).rejects.toThrow(/timed out/i);
+  });
+
+  it('does not timeout when wave completes within limit', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+
+    // Fast response, large timeout
+    const result = await spawnWaveAgent({
+      wave: 'assess',
+      model: 'claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Message.',
+      cwd: '/tmp/test',
+      timeoutMs: 60_000,
+    });
+
+    expect(result.wave).toBe('assess');
+  });
+
   it('throws KovaError on billing/config errors', async () => {
     const { spawnWaveAgent } = await import('./wave-executor.js');
 
