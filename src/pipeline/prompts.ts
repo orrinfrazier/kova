@@ -3,6 +3,7 @@
 // Custom tools are appended to impl/quality prompts when configured.
 
 import { fs, path } from 'zx';
+import type { ProjectContext } from '../services/project-context.js';
 import type { CustomTool } from '../types/index.js';
 
 const PROMPTS_DIR = path.join(import.meta.dirname, '..', '..', 'prompts');
@@ -99,7 +100,11 @@ For each issue provide:
 Output structured JSON matching the provided schema.`,
 };
 
-export async function loadPrompt(wave: string, customTools?: readonly CustomTool[]): Promise<string> {
+export async function loadPrompt(
+  wave: string,
+  customTools?: readonly CustomTool[],
+  projectContext?: ProjectContext,
+): Promise<string> {
   const filePath = path.join(PROMPTS_DIR, `${wave}.md`);
 
   let prompt: string;
@@ -115,12 +120,30 @@ export async function loadPrompt(wave: string, customTools?: readonly CustomTool
     }
   }
 
+  // Template variable substitution — replace {{VAR}} with project context values
+  prompt = substituteTemplateVars(prompt, projectContext);
+
   // Append custom tools section for impl/quality waves
   if (customTools && customTools.length > 0 && (wave === 'impl' || wave === 'quality')) {
     prompt += `\n\n${buildCustomToolsSection(customTools)}`;
   }
 
   return prompt;
+}
+
+const TEMPLATE_VARS: Record<string, keyof ProjectContext> = {
+  '{{CLAUDE_MD}}': 'claudeMd',
+  '{{STYLE_CONFIG}}': 'styleConfig',
+  '{{CI_CONFIG}}': 'ciConfig',
+};
+
+function substituteTemplateVars(prompt: string, context?: ProjectContext): string {
+  let result = prompt;
+  for (const [placeholder, key] of Object.entries(TEMPLATE_VARS)) {
+    const value = context?.[key] ?? '';
+    result = result.replaceAll(placeholder, value);
+  }
+  return result;
 }
 
 /**

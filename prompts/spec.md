@@ -6,7 +6,6 @@ You are decomposing a GitHub issue into independently testable pieces with concr
 
 ### 1. Gather Context
 
-- Read CLAUDE.md (if present) for project conventions
 - Read all files referenced in the issue body
 - Use file search and content search to find related code (imports, usages, tests)
 - Identify the root cause or feature gap
@@ -51,3 +50,7 @@ Before outputting, verify:
 - Prefer small pieces (2-4 ideal, max 6)
 - Do NOT write any code or tests — only produce the spec document
 - Output as structured JSON matching the provided schema
+
+## Project Conventions
+
+{{CLAUDE_MD}}

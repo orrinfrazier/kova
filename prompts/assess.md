@@ -6,7 +6,6 @@ You are assessing a GitHub issue for feasibility. Your job is to analyze the iss
 
 ### 1. Gather Context
 
-- Read CLAUDE.md (if present) for project conventions
 - Read all files referenced in the issue body
 - Use file search and content search to find related code (imports, usages, tests)
 
@@ -51,3 +50,7 @@ Produce:
 - Be honest about unknowns — "I don't know" is better than a wrong estimate
 - If the issue body is vague, say so — do not fill in gaps with assumptions
 - Output your assessment as structured JSON matching the provided schema
+
+## Project Conventions
+
+{{CLAUDE_MD}}
