@@ -16,14 +16,18 @@ function toOutputFormat(schema: z.ZodType): OutputFormat {
   };
 }
 
+export const DEFAULT_CONFIDENCE_THRESHOLD = 0.7;
+
 export interface BrainstormOptions {
   repoPath: string;
   config: RepoConfig;
+  threshold?: number;
 }
 
 export interface BrainstormReturn {
   success: boolean;
   issues: BrainstormIssue[];
+  filtered: BrainstormIssue[];
   summary?: string;
   cost: number;
   model: string;
@@ -31,7 +35,7 @@ export interface BrainstormReturn {
 }
 
 export async function brainstorm(options: BrainstormOptions): Promise<BrainstormReturn> {
-  const { repoPath, config } = options;
+  const { repoPath, config, threshold = DEFAULT_CONFIDENCE_THRESHOLD } = options;
 
   const model = resolveModel('large');
   const tools = getWaveTools('brainstorm', repoPath);
@@ -56,6 +60,7 @@ export async function brainstorm(options: BrainstormOptions): Promise<Brainstorm
       return {
         success: false,
         issues: [],
+        filtered: [],
         cost: handoff.cost,
         model: handoff.model,
         error: 'Agent output could not be parsed as structured issues',
@@ -63,9 +68,12 @@ export async function brainstorm(options: BrainstormOptions): Promise<Brainstorm
     }
 
     const artifact = handoff.artifact;
+    const passing = artifact.issues.filter((issue) => issue.confidence >= threshold);
+    const filtered = artifact.issues.filter((issue) => issue.confidence < threshold);
     return {
       success: true,
-      issues: artifact.issues,
+      issues: passing,
+      filtered,
       summary: artifact.summary,
       cost: handoff.cost,
       model: handoff.model,
@@ -76,6 +84,7 @@ export async function brainstorm(options: BrainstormOptions): Promise<Brainstorm
     return {
       success: false,
       issues: [],
+      filtered: [],
       cost: 0,
       model: model.id,
       error: message,
@@ -102,6 +111,14 @@ export function printBrainstormPreview(result: BrainstormReturn): void {
     console.log(`     ${issue.category} — ${issue.body.slice(0, 120)}${issue.body.length > 120 ? '...' : ''}`);
     if (issue.dependencies?.length) {
       console.log(`     depends on: ${issue.dependencies.join(', ')}`);
+    }
+    console.log();
+  }
+
+  if (result.filtered.length > 0) {
+    console.log(`Filtered (below threshold): ${result.filtered.length}\n`);
+    for (const issue of result.filtered) {
+      console.log(`  - [${issue.confidence.toFixed(2)}] ${issue.title}`);
     }
     console.log();
   }
