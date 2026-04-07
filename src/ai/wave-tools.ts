@@ -103,12 +103,21 @@ export function createCustomTools(tools: readonly CustomTool[], cwd: string): An
   );
 }
 
-export function getWaveTools(wave: AIWaveName, cwd: string, customTools?: readonly CustomTool[]): AnyTool[] {
+export interface WaveToolOptions {
+  customTools?: readonly CustomTool[] | undefined;
+  mcpTools?: AnyTool[] | undefined;
+}
+
+export function getWaveTools(wave: AIWaveName, cwd: string, options?: WaveToolOptions): AnyTool[] {
   const allowedNames = WAVE_TOOLS[wave];
   const tools = allowedNames.map((name) => toolCreators[name](cwd));
 
-  if (customTools && customTools.length > 0 && CUSTOM_TOOL_WAVES.has(wave)) {
-    tools.push(...createCustomTools(customTools, cwd));
+  if (options?.customTools && options.customTools.length > 0 && CUSTOM_TOOL_WAVES.has(wave)) {
+    tools.push(...createCustomTools(options.customTools, cwd));
+  }
+
+  if (options?.mcpTools && options.mcpTools.length > 0) {
+    tools.push(...options.mcpTools);
   }
 
   return tools;

@@ -405,7 +405,7 @@ export async function executeWave(options: WaveOptions): Promise<WaveExecutionRe
     options;
 
   const model = resolveWaveModel(modelTier);
-  const tools = getWaveTools(wave, cwd, customTools);
+  const tools = getWaveTools(wave, cwd, customTools ? { customTools } : undefined);
   const startTime = Date.now();
 
   try {
