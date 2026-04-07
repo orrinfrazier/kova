@@ -14,6 +14,7 @@ export const RepoConfigSchema = z.object({
       auto_merge: z.boolean().default(false),
       max_issues_per_run: z.number().default(10),
       budget_usd: z.number().optional(),
+      wave_cost_cap_usd: z.number().optional(),
       focus: z.array(z.string()).optional(),
     })
     .default(() => ({ coverage: 80, auto_merge: false, max_issues_per_run: 10 })),
