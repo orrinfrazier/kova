@@ -8,6 +8,7 @@ import { executeWaveWithRetry, type WaveExecutionResult } from '../ai/index.js';
 import { clearCheckpoint, loadCheckpoint, saveCheckpoint } from '../services/checkpoint.js';
 import { createPR, listOpenPRs } from '../services/github.js';
 import {
+  commitAndPush,
   createWorktree,
   worktreePath as getWorktreePath,
   removeWorktree,
@@ -174,6 +175,26 @@ export async function fix(options: FixOptions): Promise<FixResult> {
 
     // === SHIP ===
     if (!shouldSkip('ship')) {
+      const branch = worktree?.branch ?? `kova/fix-${issue.number}`;
+
+      // Stage, commit, and push changes
+      const commitResult = await commitAndPush(workDir, branch, issue);
+      if (!commitResult.committed) {
+        log.warn(`[ship] No changes to commit for #${issue.number} — skipping PR`);
+        state.waveResults.ship = {
+          wave: 'ship',
+          success: true,
+          artifact: { noChanges: true },
+          duration: 0,
+          cost: 0,
+        };
+        state.completedWaves.push('ship');
+        state.status = 'completed';
+        await saveCheckpoint(workDir, state);
+        return { success: true, state };
+      }
+
+      // Create PR after push succeeds
       const openPRs = await listOpenPRs(repoPath);
       const prTitle = `fix: ${issue.title} (#${issue.number})`;
       const prBody = [
@@ -187,14 +208,12 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         ...openPRs.map((pr) => `- ${pr}`),
       ].join('\n');
 
-      // Commit all changes
-      const branch = worktree?.branch ?? `kova/fix-${issue.number}`;
       const prUrl = await createPR(workDir, branch, prTitle, prBody);
 
       state.waveResults.ship = {
         wave: 'ship',
         success: true,
-        artifact: { prUrl },
+        artifact: { prUrl, commitMessage: commitResult.commitMessage, filesStaged: commitResult.filesStaged },
         duration: 0,
         cost: 0,
       };
