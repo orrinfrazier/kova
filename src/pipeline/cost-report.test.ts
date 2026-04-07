@@ -104,6 +104,7 @@ describe('writeCostReport', () => {
       totalTurns: 52,
       totalDuration: 32000,
       waves: [{ wave: 'assess', cost: 0.12, turns: 5, duration: 3000, model: 'test-model' }],
+      fallbackCount: 0,
       startedAt: '2026-04-06T10:00:00.000Z',
       completedAt: '2026-04-06T10:05:00.000Z',
     };
@@ -122,6 +123,7 @@ describe('writeCostReport', () => {
       totalTurns: 30,
       totalDuration: 20000,
       waves: [],
+      fallbackCount: 0,
       startedAt: '2026-04-06T10:00:00.000Z',
       completedAt: '2026-04-06T10:03:00.000Z',
     });
@@ -133,6 +135,7 @@ describe('writeCostReport', () => {
       totalTurns: 55,
       totalDuration: 35000,
       waves: [],
+      fallbackCount: 0,
       startedAt: '2026-04-06T10:00:00.000Z',
       completedAt: '2026-04-06T10:06:00.000Z',
     });
@@ -181,6 +184,59 @@ describe('API vs local cost split', () => {
   });
 });
 
+describe('fallback tracking in cost report', () => {
+  it('counts fallback waves', () => {
+    const state = makeState({
+      waveResults: {
+        assess: makeWaveResult('assess', { cost: 0.12, turns: 5, duration: 3000, fallback_used: true }),
+        spec: makeWaveResult('spec', { cost: 0.08, turns: 3, duration: 2000 }),
+      },
+      completedWaves: ['assess', 'spec'],
+    });
+    const report = buildCostReport(state);
+    expect(report.fallbackCount).toBe(1);
+  });
+
+  it('returns 0 fallbackCount when no fallbacks used', () => {
+    const report = buildCostReport(makeState());
+    expect(report.fallbackCount).toBe(0);
+  });
+
+  it('sums localCost from waves with fallback', () => {
+    const state = makeState({
+      waveResults: {
+        assess: makeWaveResult('assess', {
+          cost: 0.12,
+          turns: 5,
+          duration: 3000,
+          fallback_used: true,
+          local_attempt_cost: 0.0,
+        }),
+        spec: makeWaveResult('spec', { cost: 0.08, turns: 3, duration: 2000 }),
+      },
+      completedWaves: ['assess', 'spec'],
+    });
+    const report = buildCostReport(state);
+    expect(report.localCost).toBe(0.0);
+  });
+
+  it('includes fallback_used flag in per-wave breakdown', () => {
+    const state = makeState({
+      waveResults: {
+        assess: makeWaveResult('assess', {
+          cost: 0.12,
+          turns: 5,
+          duration: 3000,
+          fallback_used: true,
+        }),
+      },
+      completedWaves: ['assess'],
+    });
+    const report = buildCostReport(state);
+    expect(report.waves[0]?.fallback_used).toBe(true);
+  });
+});
+
 describe('printRunSummary', () => {
   it('logs total cost, per-wave breakdown, turns, and duration', () => {
     const report: CostReport = {
@@ -195,6 +251,7 @@ describe('printRunSummary', () => {
         { wave: 'spec', cost: 0.08, turns: 3, duration: 2000, model: 'claude-opus-4-20250514' },
         { wave: 'impl', cost: 0.2, turns: 20, duration: 12000, model: 'claude-sonnet-4-20250514' },
       ],
+      fallbackCount: 0,
       startedAt: '2026-04-06T10:00:00.000Z',
       completedAt: '2026-04-06T10:05:00.000Z',
     };

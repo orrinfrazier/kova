@@ -1046,6 +1046,277 @@ describe('buildStructuredOutputInstructions', () => {
   });
 });
 
+describe('spawnWaveAgentWithFallback', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env.ANTHROPIC_API_KEY = 'test-key';
+    mockPrompt.mockResolvedValue(undefined);
+    mockSubscribe.mockImplementation(() => vi.fn());
+    setAgentResponse('done');
+  });
+
+  afterEach(() => {
+    delete process.env.ANTHROPIC_API_KEY;
+  });
+
+  const baseConfig = {
+    wave: 'assess' as const,
+    model: 'ollama:llama3',
+    tools: [] as AnyTool[],
+    systemPrompt: 'You are an assessor.',
+    handoffContext: '',
+    userMessage: 'Assess this issue.',
+    cwd: '/tmp/test',
+  };
+
+  it('returns primary result when local model succeeds', async () => {
+    const { spawnWaveAgentWithFallback } = await import('./wave-executor.js');
+
+    setAgentResponse('<json>{"grade": "A", "should_proceed": true}</json>', 0.0);
+
+    const result = await spawnWaveAgentWithFallback({
+      ...baseConfig,
+      outputFormat: { type: 'json_schema', schema: { type: 'object' } },
+      fallbackModel: 'claude-sonnet-4-6',
+    });
+
+    expect(result.fallback_used).toBe(false);
+    expect(Agent).toHaveBeenCalledOnce();
+  });
+
+  it('falls back to API model when local model Zod validation fails', async () => {
+    const { spawnWaveAgentWithFallback } = await import('./wave-executor.js');
+
+    const TestSchema = z.object({ grade: z.string(), should_proceed: z.boolean() });
+    let callCount = 0;
+    mockPrompt.mockImplementation(async () => {
+      callCount++;
+      if (callCount === 1) {
+        mockAgentState = {
+          messages: [
+            {
+              role: 'assistant',
+              content: [{ type: 'text', text: '{"bad": "data"}' }],
+              usage: { cost: { total: 0.0 } },
+            },
+          ],
+          errorMessage: undefined,
+        };
+      } else {
+        mockAgentState = {
+          messages: [
+            {
+              role: 'assistant',
+              content: [{ type: 'text', text: '<json>{"grade": "A", "should_proceed": true}</json>' }],
+              usage: { cost: { total: 0.01 } },
+            },
+          ],
+          errorMessage: undefined,
+        };
+      }
+    });
+
+    const result = await spawnWaveAgentWithFallback({
+      ...baseConfig,
+      outputFormat: {
+        type: 'json_schema',
+        schema: { type: 'object' },
+        zodSchema: TestSchema,
+      },
+      fallbackModel: 'claude-sonnet-4-6',
+    });
+
+    expect(result.fallback_used).toBe(true);
+    expect(Agent).toHaveBeenCalledTimes(2);
+  });
+
+  it('falls back to API model when local model returns empty result', async () => {
+    const { spawnWaveAgentWithFallback } = await import('./wave-executor.js');
+
+    let callCount = 0;
+    mockPrompt.mockImplementation(async () => {
+      callCount++;
+      if (callCount === 1) {
+        mockAgentState = {
+          messages: [
+            {
+              role: 'assistant',
+              content: [{ type: 'text', text: '' }],
+              usage: { cost: { total: 0.0 } },
+            },
+          ],
+          errorMessage: undefined,
+        };
+      } else {
+        mockAgentState = {
+          messages: [
+            {
+              role: 'assistant',
+              content: [{ type: 'text', text: '<json>{"grade": "A", "should_proceed": true}</json>' }],
+              usage: { cost: { total: 0.01 } },
+            },
+          ],
+          errorMessage: undefined,
+        };
+      }
+    });
+
+    const result = await spawnWaveAgentWithFallback({
+      ...baseConfig,
+      outputFormat: { type: 'json_schema', schema: { type: 'object' } },
+      fallbackModel: 'claude-sonnet-4-6',
+    });
+
+    expect(result.fallback_used).toBe(true);
+  });
+
+  it('falls back to API model when local model throws error', async () => {
+    const { spawnWaveAgentWithFallback } = await import('./wave-executor.js');
+
+    let callCount = 0;
+    mockPrompt.mockImplementation(async () => {
+      callCount++;
+      if (callCount === 1) {
+        throw new Error('connection refused');
+      }
+      mockAgentState = {
+        messages: [
+          {
+            role: 'assistant',
+            content: [{ type: 'text', text: 'done' }],
+            usage: { cost: { total: 0.01 } },
+          },
+        ],
+        errorMessage: undefined,
+      };
+    });
+
+    const result = await spawnWaveAgentWithFallback({
+      ...baseConfig,
+      fallbackModel: 'claude-sonnet-4-6',
+    });
+
+    expect(result.fallback_used).toBe(true);
+  });
+
+  it('does NOT fall back when model is NOT local (API model)', async () => {
+    const { spawnWaveAgentWithFallback } = await import('./wave-executor.js');
+
+    const TestSchema = z.object({ grade: z.string(), should_proceed: z.boolean() });
+    setAgentResponse('{"bad": "data"}', 0.01);
+
+    const result = await spawnWaveAgentWithFallback({
+      ...baseConfig,
+      model: 'claude-sonnet-4-6',
+      outputFormat: {
+        type: 'json_schema',
+        schema: { type: 'object' },
+        zodSchema: TestSchema,
+      },
+      fallbackModel: 'claude-opus-4-6',
+    });
+
+    expect(result.fallback_used).toBe(false);
+    expect(Agent).toHaveBeenCalledOnce();
+  });
+
+  it('does NOT fall back when no fallbackModel is specified', async () => {
+    const { spawnWaveAgentWithFallback } = await import('./wave-executor.js');
+
+    const TestSchema = z.object({ grade: z.string(), should_proceed: z.boolean() });
+    setAgentResponse('{"bad": "data"}', 0.0);
+
+    const result = await spawnWaveAgentWithFallback({
+      ...baseConfig,
+      outputFormat: {
+        type: 'json_schema',
+        schema: { type: 'object' },
+        zodSchema: TestSchema,
+      },
+    });
+
+    expect(result.fallback_used).toBe(false);
+    expect(Agent).toHaveBeenCalledOnce();
+  });
+
+  it('logs fallback message when falling back', async () => {
+    const { spawnWaveAgentWithFallback } = await import('./wave-executor.js');
+    const { log } = await import('../utils/logger.js');
+    const warnSpy = vi.spyOn(log, 'warn');
+
+    let callCount = 0;
+    mockPrompt.mockImplementation(async () => {
+      callCount++;
+      if (callCount === 1) {
+        throw new Error('connection refused');
+      }
+      mockAgentState = {
+        messages: [
+          {
+            role: 'assistant',
+            content: [{ type: 'text', text: 'done' }],
+            usage: { cost: { total: 0.01 } },
+          },
+        ],
+        errorMessage: undefined,
+      };
+    });
+
+    await spawnWaveAgentWithFallback({
+      ...baseConfig,
+      fallbackModel: 'claude-sonnet-4-6',
+    });
+
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Local model failed, falling back to API'));
+    warnSpy.mockRestore();
+  });
+
+  it('tracks local attempt cost in handoff', async () => {
+    const { spawnWaveAgentWithFallback } = await import('./wave-executor.js');
+
+    let callCount = 0;
+    mockPrompt.mockImplementation(async () => {
+      callCount++;
+      if (callCount === 1) {
+        throw new Error('connection refused');
+      }
+      mockAgentState = {
+        messages: [
+          {
+            role: 'assistant',
+            content: [{ type: 'text', text: 'done' }],
+            usage: { cost: { total: 0.05 } },
+          },
+        ],
+        errorMessage: undefined,
+      };
+    });
+
+    const result = await spawnWaveAgentWithFallback({
+      ...baseConfig,
+      fallbackModel: 'claude-sonnet-4-6',
+    });
+
+    expect(result.fallback_used).toBe(true);
+    expect(result.local_attempt_cost).toBe(0);
+  });
+
+  it('max 1 fallback — does not retry API model if it also fails', async () => {
+    const { spawnWaveAgentWithFallback } = await import('./wave-executor.js');
+
+    mockPrompt.mockRejectedValue(new Error('everything is broken'));
+
+    await expect(
+      spawnWaveAgentWithFallback({
+        ...baseConfig,
+        fallbackModel: 'claude-sonnet-4-6',
+      }),
+    ).rejects.toThrow();
+
+    expect(Agent).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe('isAssistantMessage', () => {
   it('returns true for a valid assistant message', async () => {
     const { isAssistantMessage } = await import('./wave-executor.js');

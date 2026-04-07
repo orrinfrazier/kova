@@ -18,7 +18,9 @@ export interface CostReport {
     duration: number;
     model?: string | undefined;
     provider?: string | undefined;
+    fallback_used?: boolean | undefined;
   }>;
+  fallbackCount: number;
   startedAt: string;
   completedAt: string;
 }
@@ -32,9 +34,11 @@ export function buildCostReport(state: FixState): CostReport {
   let localCost = 0;
   let totalTurns = 0;
   let totalDuration = 0;
+  let fallbackCount = 0;
   for (const wave of WAVE_ORDER) {
     const result = state.waveResults[wave];
     if (!result) continue;
+    const fallbackUsed = result.fallback_used ?? false;
     waves.push({
       wave,
       cost: result.cost,
@@ -42,6 +46,7 @@ export function buildCostReport(state: FixState): CostReport {
       duration: result.duration,
       model: result.model,
       provider: result.provider,
+      fallback_used: fallbackUsed || undefined,
     });
     totalCost += result.cost;
     totalTurns += result.turns;
@@ -53,6 +58,12 @@ export function buildCostReport(state: FixState): CostReport {
     } else {
       apiCost += result.cost;
     }
+
+    if (fallbackUsed) {
+      fallbackCount++;
+      // When fallback was used, the local attempt cost is tracked separately
+      localCost += result.local_attempt_cost ?? 0;
+    }
   }
   return {
     issueNumber: state.issue.number,
@@ -62,6 +73,7 @@ export function buildCostReport(state: FixState): CostReport {
     totalTurns,
     totalDuration,
     waves,
+    fallbackCount,
     startedAt: state.startedAt,
     completedAt: new Date().toISOString(),
   };
@@ -92,12 +104,16 @@ export function printRunSummary(report: CostReport): void {
   }
   log.info(`Turns:    ${report.totalTurns}`);
   log.info(`Duration: ${formatDuration(report.totalDuration)}`);
+  if (report.fallbackCount > 0) {
+    log.info(`Fallbacks: ${report.fallbackCount} (local cost: $${report.localCost.toFixed(2)})`);
+  }
   if (report.waves.length > 0) {
     log.info('');
     log.info('Per-wave breakdown:');
     for (const wave of report.waves) {
       const model = wave.model ? ` (${wave.model})` : '';
       const provider = wave.provider ? ` [${wave.provider}]` : '';
+      const fallback = wave.fallback_used ? ' [fallback]' : '';
       log.info(
         '  ' +
           wave.wave.padEnd(8) +
@@ -108,7 +124,8 @@ export function printRunSummary(report: CostReport): void {
           ' turns  ' +
           formatDuration(wave.duration) +
           model +
-          provider,
+          provider +
+          fallback,
       );
     }
   }

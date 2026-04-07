@@ -86,6 +86,33 @@ describe('WaveHandoff', () => {
       const result = WaveHandoffSchema.safeParse(handoff);
       expect(result.success).toBe(false);
     });
+
+    it('accepts optional fallback_used field', () => {
+      const handoff = { ...makeAssessHandoff(), fallback_used: true };
+      const result = WaveHandoffSchema.safeParse(handoff);
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.fallback_used).toBe(true);
+      }
+    });
+
+    it('accepts optional local_attempt_cost field', () => {
+      const handoff = { ...makeAssessHandoff(), local_attempt_cost: 0.0 };
+      const result = WaveHandoffSchema.safeParse(handoff);
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.local_attempt_cost).toBe(0.0);
+      }
+    });
+
+    it('omits fallback_used when not present (backward compat)', () => {
+      const handoff = makeAssessHandoff();
+      const result = WaveHandoffSchema.safeParse(handoff);
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.fallback_used).toBeUndefined();
+      }
+    });
   });
 
   describe('saveHandoff', () => {

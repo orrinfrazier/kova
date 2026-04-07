@@ -5,11 +5,13 @@
 import { z } from 'zod';
 import {
   type FixAIWaveName,
+  getApiFallbackModelString,
   getWaveTools,
+  isLocalModel,
   type OutputFormat,
   resolveThinkingLevel,
   resolveWaveModel,
-  spawnWaveAgent,
+  spawnWaveAgentWithFallback,
 } from '../ai/index.js';
 import { clearCheckpoint, loadCheckpoint, saveCheckpoint } from '../services/checkpoint.js';
 import { commentOnIssue, createPR, listOpenPRs } from '../services/github.js';
@@ -29,6 +31,7 @@ import type {
   RepoConfig,
   SpecResult,
   WaveHandoff,
+  WaveModelConfig,
   WaveName,
   WaveResult,
 } from '../types/index.js';
@@ -81,7 +84,16 @@ function waveProvider(config: RepoConfig, wave: FixAIWaveName): string {
   return resolveWaveModel(waveModel).provider;
 }
 
-/** Spawn a wave agent directly via spawnWaveAgent — no backward-compat wrapper. */
+/** Determine the API fallback model string for a wave config, if applicable. */
+function waveFallbackModel(waveConfig: WaveModelConfig, modelString: string): string | undefined {
+  if (!isLocalModel(modelString)) return undefined;
+  // If the wave config is a tier string, use that tier for the fallback
+  if (typeof waveConfig === 'string') return getApiFallbackModelString(waveConfig);
+  // Object override with a local provider — fall back to medium tier
+  return getApiFallbackModelString('medium');
+}
+
+/** Spawn a wave agent with automatic local-to-API fallback. */
 async function spawnWave<T>(
   wave: FixAIWaveName,
   workDir: string,
@@ -93,15 +105,18 @@ async function spawnWave<T>(
   const tools = getWaveTools(wave, workDir);
   const systemPrompt = await loadPrompt(wave);
   const thinkingLevel = resolveThinkingLevel(config, wave);
-  return spawnWaveAgent<T>({
+  const modelString = model.id;
+  const fallbackModel = waveFallbackModel(config.model[wave], modelString);
+  return spawnWaveAgentWithFallback<T>({
     wave,
-    model: model.id,
+    model: modelString,
     tools,
     systemPrompt,
     handoffContext: '',
     userMessage,
     cwd: workDir,
     thinkingLevel,
+    fallbackModel,
     ...(outputFormat != null && { outputFormat }),
   });
 }
@@ -117,6 +132,8 @@ function handoffToResult(handoff: WaveHandoff, provider?: string): WaveResult {
     turns: handoff.turns,
     model: handoff.model,
     provider,
+    fallback_used: handoff.fallback_used || undefined,
+    local_attempt_cost: handoff.local_attempt_cost,
   };
 }
 

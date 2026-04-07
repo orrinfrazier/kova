@@ -1,8 +1,13 @@
 export { classifyError, type ErrorClassification, isRetryable, isSpendingCapBehavior, KovaError } from './errors.js';
 export {
+  clearCustomModels,
+  getApiFallbackModelString,
+  isLocalModel,
   isLocalProvider,
   type ModelSpec,
+  type OllamaModelDef,
   parseModelSpec,
+  registerOllamaModels,
   resolveModel,
   resolveModelFromString,
   resolveWaveModel,
@@ -21,9 +26,12 @@ export {
 export {
   executeWave,
   executeWaveWithRetry,
+  type FallbackWaveHandoff,
   type OutputFormat,
   type SpawnWaveAgentConfig,
+  type SpawnWithFallbackConfig,
   spawnWaveAgent,
+  spawnWaveAgentWithFallback,
   type WaveExecutionResult,
   type WaveOptions,
 } from './wave-executor.js';
