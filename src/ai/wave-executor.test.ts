@@ -941,3 +941,101 @@ describe('executeWave backward compat (delegates internally)', () => {
     expect(Array.isArray(agentConfig.initialState.tools)).toBe(true);
   });
 });
+
+describe('parseStructuredOutput', () => {
+  it('extracts JSON from <json> tags (primary method)', async () => {
+    const { parseStructuredOutput } = await import('./wave-executor.js');
+    const input = 'Here is my result:\n<json>{"grade": "A", "files": ["foo.ts"]}</json>\nDone!';
+    expect(parseStructuredOutput(input)).toEqual({ grade: 'A', files: ['foo.ts'] });
+  });
+
+  it('extracts JSON from markdown fence when no <json> tags (secondary method)', async () => {
+    const { parseStructuredOutput } = await import('./wave-executor.js');
+    const input = 'Here is the output:\n```json\n{"grade": "B"}\n```';
+    expect(parseStructuredOutput(input)).toEqual({ grade: 'B' });
+  });
+
+  it('extracts JSON from bare markdown fence (no language tag)', async () => {
+    const { parseStructuredOutput } = await import('./wave-executor.js');
+    const input = '```\n{"grade": "C"}\n```';
+    expect(parseStructuredOutput(input)).toEqual({ grade: 'C' });
+  });
+
+  it('parses direct JSON as tertiary fallback', async () => {
+    const { parseStructuredOutput } = await import('./wave-executor.js');
+    const input = '{"grade": "A", "should_proceed": true}';
+    expect(parseStructuredOutput(input)).toEqual({ grade: 'A', should_proceed: true });
+  });
+
+  it('returns undefined when no valid JSON found (greedy regex removed)', async () => {
+    const { parseStructuredOutput } = await import('./wave-executor.js');
+    const input = 'Some text with { braces } and more { stuff } here';
+    expect(parseStructuredOutput(input)).toBeUndefined();
+  });
+
+  it('prefers <json> tags over markdown fence when both present', async () => {
+    const { parseStructuredOutput } = await import('./wave-executor.js');
+    const input = '<json>{"source": "tag"}</json>\n```json\n{"source": "fence"}\n```';
+    expect(parseStructuredOutput(input)).toEqual({ source: 'tag' });
+  });
+
+  it('handles <json> tags with whitespace/newlines inside', async () => {
+    const { parseStructuredOutput } = await import('./wave-executor.js');
+    const input = '<json>\n  {\n    "grade": "A"\n  }\n</json>';
+    expect(parseStructuredOutput(input)).toEqual({ grade: 'A' });
+  });
+
+  it('returns undefined for invalid JSON in <json> tags and does not fall through', async () => {
+    const { parseStructuredOutput } = await import('./wave-executor.js');
+    const input = '<json>not valid json</json>\n```json\n{"fallback": true}\n```';
+    // If tags are present but contain invalid JSON, try next method (fence)
+    expect(parseStructuredOutput(input)).toEqual({ fallback: true });
+  });
+
+  it('does NOT match greedy brace pattern across unrelated content', async () => {
+    const { parseStructuredOutput } = await import('./wave-executor.js');
+    // This would previously match the greedy regex {[\s\S]*}
+    const input = 'I modified the function { return x } and also updated { config } at line 42';
+    expect(parseStructuredOutput(input)).toBeUndefined();
+  });
+
+  it('handles empty string', async () => {
+    const { parseStructuredOutput } = await import('./wave-executor.js');
+    expect(parseStructuredOutput('')).toBeUndefined();
+  });
+
+  it('logs extraction method on success', async () => {
+    const { parseStructuredOutput } = await import('./wave-executor.js');
+    const { log } = await import('../utils/logger.js');
+    const debugSpy = vi.spyOn(log, 'debug');
+
+    parseStructuredOutput('<json>{"ok": true}</json>');
+    expect(debugSpy).toHaveBeenCalledWith(expect.stringContaining('json-tag'));
+
+    debugSpy.mockClear();
+    parseStructuredOutput('```json\n{"ok": true}\n```');
+    expect(debugSpy).toHaveBeenCalledWith(expect.stringContaining('markdown-fence'));
+
+    debugSpy.mockClear();
+    parseStructuredOutput('{"ok": true}');
+    expect(debugSpy).toHaveBeenCalledWith(expect.stringContaining('direct-parse'));
+
+    debugSpy.mockRestore();
+  });
+});
+
+describe('buildStructuredOutputInstructions', () => {
+  it('includes <json> tag protocol in instructions', async () => {
+    const { buildStructuredOutputInstructions } = await import('./wave-executor.js');
+    const instructions = buildStructuredOutputInstructions({ type: 'object' });
+    expect(instructions).toContain('<json>');
+    expect(instructions).toContain('</json>');
+  });
+
+  it('includes the schema in the instructions', async () => {
+    const { buildStructuredOutputInstructions } = await import('./wave-executor.js');
+    const schema = { type: 'object', properties: { grade: { type: 'string' } } };
+    const instructions = buildStructuredOutputInstructions(schema);
+    expect(instructions).toContain('"grade"');
+  });
+});
