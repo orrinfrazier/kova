@@ -42,7 +42,7 @@ import {
 import { log } from '../utils/logger.js';
 import { buildWaveContext } from './context.js';
 import { buildCostReport, printRunSummary, writeCostReport } from './cost-report.js';
-import { runReviewLoop, runTILoop, type TestRunner } from './loops.js';
+import { runParallelPieceTILoop, runReviewLoop, type TestRunner } from './loops.js';
 import { loadPrompt } from './prompts.js';
 import { validatePieceFileOwnership } from './spec-validator.js';
 
@@ -240,9 +240,9 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       }
     }
 
-    // WAVE T + I: TI Loop
+    // WAVE T + I: Parallel Piece TI Loop (fan-out per piece, backward compat for 1 piece)
     if (!(shouldSkip('test') && shouldSkip('impl'))) {
-      const tiResult = await runTILoop({
+      const tiResult = await runParallelPieceTILoop({
         issue,
         workDir,
         repoConfig: config,
@@ -280,7 +280,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         await saveHandoff(workDir, specHandoff);
         state.waveResults.spec = handoffToResult(specHandoff);
 
-        const retryTI = await runTILoop({
+        const retryTI = await runParallelPieceTILoop({
           issue,
           workDir,
           repoConfig: config,

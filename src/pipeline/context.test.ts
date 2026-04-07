@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import type { AssessResult, Issue, QualityResult, ReviewResult, SpecResult, WaveResult } from '../types/index.js';
-import { buildWaveContext, estimateTokens, truncateToTokenBudget } from './context.js';
+import type {
+  AssessResult,
+  Issue,
+  QualityResult,
+  ReviewResult,
+  SpecPiece,
+  SpecResult,
+  WaveResult,
+} from '../types/index.js';
+import { buildPieceContext, buildWaveContext, estimateTokens, truncateToTokenBudget } from './context.js';
 
 function makeIssue(overrides?: Partial<Issue>): Issue {
   return {
@@ -374,5 +382,88 @@ describe('truncateToTokenBudget', () => {
     const truncatedContent = result.split('\n\n[truncated')[0];
     expect(truncatedContent).toBeDefined();
     expect(truncatedContent?.length).toBeGreaterThan(400);
+  });
+});
+
+// --- buildPieceContext ---
+
+describe('buildPieceContext', () => {
+  const piece: SpecPiece = {
+    name: 'Token expiry validation',
+    description: 'Check token TTL before making API request',
+    files: ['src/auth/token.ts', 'src/auth/refresh.ts'],
+    acceptance_criteria: ['Returns 401 when token expired', 'Refreshes token if within grace period'],
+    wiring: ['Export from auth/index.ts'],
+  };
+
+  it('includes piece name and description', () => {
+    const ctx = buildPieceContext('test', piece);
+    expect(ctx).toContain('Token expiry validation');
+    expect(ctx).toContain('Check token TTL before making API request');
+  });
+
+  it('includes files with "ONLY modify these" restriction', () => {
+    const ctx = buildPieceContext('test', piece);
+    expect(ctx).toContain('ONLY modify these');
+    expect(ctx).toContain('src/auth/token.ts');
+    expect(ctx).toContain('src/auth/refresh.ts');
+  });
+
+  it('includes acceptance criteria', () => {
+    const ctx = buildPieceContext('test', piece);
+    expect(ctx).toContain('Acceptance Criteria');
+    expect(ctx).toContain('Returns 401 when token expired');
+    expect(ctx).toContain('Refreshes token if within grace period');
+  });
+
+  it('includes wiring when present', () => {
+    const ctx = buildPieceContext('test', piece);
+    expect(ctx).toContain('Wiring');
+    expect(ctx).toContain('Export from auth/index.ts');
+  });
+
+  it('omits wiring section when empty', () => {
+    const noWiring = { ...piece, wiring: [] };
+    const ctx = buildPieceContext('test', noWiring);
+    expect(ctx).not.toContain('Wiring');
+  });
+
+  it('does NOT include full spec fields', () => {
+    const ctx = buildPieceContext('test', piece);
+    // Should not contain spec-level fields like summary or dependency_order
+    expect(ctx).not.toContain('dependency_order');
+    expect(ctx).not.toContain('constraints');
+  });
+
+  it('includes escalation hint for impl wave when provided', () => {
+    const ctx = buildPieceContext('impl', piece, {
+      escalationHint: 'Try a different algorithm',
+    });
+    expect(ctx).toContain('Escalation');
+    expect(ctx).toContain('Try a different algorithm');
+  });
+
+  it('does NOT include escalation for test wave', () => {
+    const ctx = buildPieceContext('test', piece, {
+      escalationHint: 'Try a different algorithm',
+    });
+    expect(ctx).not.toContain('Escalation');
+  });
+
+  it('includes last failure output for impl wave when provided', () => {
+    const ctx = buildPieceContext('impl', piece, {
+      lastFailureOutput: 'Error: cannot find module',
+    });
+    expect(ctx).toContain('Previous Test Failure Output');
+    expect(ctx).toContain('Error: cannot find module');
+  });
+
+  it('truncates to token budget', () => {
+    const longPiece: SpecPiece = {
+      ...piece,
+      description: 'x'.repeat(100_000),
+    };
+    const ctx = buildPieceContext('test', longPiece, { tokenBudget: 100 });
+    expect(ctx).toContain('truncated');
   });
 });

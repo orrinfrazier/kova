@@ -56,9 +56,11 @@ vi.mock('../ai/index.js', async (importOriginal) => {
 });
 
 const mockRunTILoop = vi.fn();
+const mockRunParallelPieceTILoop = vi.fn();
 const mockRunReviewLoop = vi.fn();
 vi.mock('./loops.js', () => ({
   runTILoop: (...args: unknown[]) => mockRunTILoop(...args),
+  runParallelPieceTILoop: (...args: unknown[]) => mockRunParallelPieceTILoop(...args),
   runReviewLoop: (...args: unknown[]) => mockRunReviewLoop(...args),
 }));
 
@@ -120,12 +122,14 @@ function setupDefaultMocks(): void {
     return makeHandoff(config.wave, artifacts[config.wave] ?? 'done');
   });
 
-  mockRunTILoop.mockResolvedValue({
+  mockRunParallelPieceTILoop.mockResolvedValue({
     testWaveResult: makeWaveResult('test', 'tests written'),
     implWaveResult: makeWaveResult('impl', { tests_passing: true, files_modified: ['src/fix.ts'] }),
     testsPassing: true,
     totalCost: 0.02,
     attempts: 1,
+    pieceResults: [],
+    modifiedFilesPerAttempt: [],
   });
 
   mockRunReviewLoop.mockResolvedValue({
@@ -175,7 +179,7 @@ describe('fix — resume from checkpoint', () => {
     expect(waveCalls).not.toContain('spec');
     expect(waveCalls).toContain('quality');
     // TI loop should have been called (test + impl not in completedWaves)
-    expect(mockRunTILoop).toHaveBeenCalledOnce();
+    expect(mockRunParallelPieceTILoop).toHaveBeenCalledOnce();
   });
 
   it('starts fresh when fresh option is true', async () => {
@@ -196,7 +200,7 @@ describe('fix — resume from checkpoint', () => {
     // Fresh run — all waves should execute
     const waveCalls = mockSpawnWaveAgent.mock.calls.map((c: unknown[]) => (c[0] as { wave: string }).wave);
     expect(waveCalls).toContain('assess');
-    expect(mockRunTILoop).toHaveBeenCalledOnce();
+    expect(mockRunParallelPieceTILoop).toHaveBeenCalledOnce();
   });
 
   it('prints resume message when loading checkpoint', async () => {
@@ -339,7 +343,7 @@ describe('fix — TI loop escalation', () => {
 
   it('SPEC_WRONG: re-runs spec then TI loop after diagnosis', async () => {
     let tiCallCount = 0;
-    mockRunTILoop.mockImplementation(async () => {
+    mockRunParallelPieceTILoop.mockImplementation(async () => {
       tiCallCount++;
       if (tiCallCount === 1) {
         return {
@@ -349,6 +353,8 @@ describe('fix — TI loop escalation', () => {
           totalCost: 0.03,
           attempts: 3,
           diagnosis: 'SPEC_WRONG',
+          pieceResults: [],
+          modifiedFilesPerAttempt: [],
         };
       }
       // Second call (after spec re-run) succeeds
@@ -358,6 +364,8 @@ describe('fix — TI loop escalation', () => {
         testsPassing: true,
         totalCost: 0.02,
         attempts: 1,
+        pieceResults: [],
+        modifiedFilesPerAttempt: [],
       };
     });
 
@@ -371,73 +379,81 @@ describe('fix — TI loop escalation', () => {
   });
 
   it('APPROACH_WRONG: marks piece as failed (no extra escalation)', async () => {
-    mockRunTILoop.mockResolvedValue({
+    mockRunParallelPieceTILoop.mockResolvedValue({
       testWaveResult: makeWaveResult('test', 'tests written'),
       implWaveResult: makeWaveResult('impl', { tests_passing: false }),
       testsPassing: false,
       totalCost: 0.03,
       attempts: 3,
       diagnosis: 'APPROACH_WRONG',
+      pieceResults: [],
+      modifiedFilesPerAttempt: [],
     });
 
     const result = await fix({ issue: makeIssue(42), repoPath: workDir, repoName: 'test-repo', config: makeConfig() });
 
     // Only 1 TI loop call — no escalation re-run for APPROACH_WRONG
-    expect(mockRunTILoop).toHaveBeenCalledOnce();
+    expect(mockRunParallelPieceTILoop).toHaveBeenCalledOnce();
     expect(result.state.failedPieces).toHaveLength(1);
     expect(result.state.failedPieces?.[0]?.diagnosis.category).toBe('APPROACH_WRONG');
   });
 
   it('STUCK: marks piece as failed without extra retries', async () => {
-    mockRunTILoop.mockResolvedValue({
+    mockRunParallelPieceTILoop.mockResolvedValue({
       testWaveResult: makeWaveResult('test', 'tests written'),
       implWaveResult: makeWaveResult('impl', { tests_passing: false }),
       testsPassing: false,
       totalCost: 0.03,
       attempts: 3,
       diagnosis: 'STUCK',
+      pieceResults: [],
+      modifiedFilesPerAttempt: [],
     });
 
     const result = await fix({ issue: makeIssue(42), repoPath: workDir, repoName: 'test-repo', config: makeConfig() });
 
-    expect(mockRunTILoop).toHaveBeenCalledOnce();
+    expect(mockRunParallelPieceTILoop).toHaveBeenCalledOnce();
     expect(result.state.failedPieces).toHaveLength(1);
     expect(result.state.failedPieces?.[0]?.diagnosis.category).toBe('STUCK');
   });
 
   it('tracks failed piece when SPEC_WRONG escalation also fails', async () => {
     // Both TI loop calls fail
-    mockRunTILoop.mockResolvedValue({
+    mockRunParallelPieceTILoop.mockResolvedValue({
       testWaveResult: makeWaveResult('test', 'tests written'),
       implWaveResult: makeWaveResult('impl', { tests_passing: false }),
       testsPassing: false,
       totalCost: 0.03,
       attempts: 3,
       diagnosis: 'SPEC_WRONG',
+      pieceResults: [],
+      modifiedFilesPerAttempt: [],
     });
 
     const result = await fix({ issue: makeIssue(42), repoPath: workDir, repoName: 'test-repo', config: makeConfig() });
 
     // 2 TI loop calls: initial + escalation retry
-    expect(mockRunTILoop).toHaveBeenCalledTimes(2);
+    expect(mockRunParallelPieceTILoop).toHaveBeenCalledTimes(2);
     expect(result.state.failedPieces).toHaveLength(1);
   });
 
   it('succeeds on first TI loop attempt without escalation', async () => {
     const result = await fix({ issue: makeIssue(42), repoPath: workDir, repoName: 'test-repo', config: makeConfig() });
 
-    expect(mockRunTILoop).toHaveBeenCalledOnce();
+    expect(mockRunParallelPieceTILoop).toHaveBeenCalledOnce();
     expect(result.state.failedPieces ?? []).toHaveLength(0);
     expect(result.success).toBe(true);
   });
 
   it('handles missing diagnosis gracefully (defaults to STUCK)', async () => {
-    mockRunTILoop.mockResolvedValue({
+    mockRunParallelPieceTILoop.mockResolvedValue({
       testWaveResult: makeWaveResult('test', 'tests written'),
       implWaveResult: makeWaveResult('impl', { tests_passing: false }),
       testsPassing: false,
       totalCost: 0.03,
       attempts: 3,
+      pieceResults: [],
+      modifiedFilesPerAttempt: [],
     });
 
     const result = await fix({ issue: makeIssue(42), repoPath: workDir, repoName: 'test-repo', config: makeConfig() });
