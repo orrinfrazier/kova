@@ -6,18 +6,23 @@ import { z } from 'zod';
 import {
   type FixAIWaveName,
   getApiFallbackModelString,
+  getMCPToolsForWave,
   getWaveTools,
   isLocalModel,
+  type MCPServerHandle,
   type OutputFormat,
+  resolveMCPServers,
   resolveThinkingLevel,
   resolveWaveModel,
   spawnWaveAgentWithFallback,
+  startAllMCPServers,
+  stopAllMCPServers,
 } from '../ai/index.js';
 import { clearCheckpoint, loadCheckpoint, saveCheckpoint } from '../services/checkpoint.js';
 import { commentOnIssue, createPR, listOpenPRs } from '../services/github.js';
+import { validateIsolation } from '../services/isolation.js';
 import { detectTooling } from '../services/language-detect.js';
 import { formatPRContext, type OpenPR } from '../services/pr-context.js';
-import { validateIsolation } from '../services/isolation.js';
 import {
   buildSandboxImage,
   DEFAULT_SANDBOX_LIMITS,
@@ -132,9 +137,14 @@ async function spawnWave<T>(
   config: RepoConfig,
   userMessage: string,
   outputFormat?: OutputFormat,
+  mcpHandles?: Map<string, MCPServerHandle>,
 ): Promise<WaveHandoff<T>> {
   const model = resolveWaveModel(config.model[wave]);
-  const tools = getWaveTools(wave, workDir);
+  const mcpTools =
+    mcpHandles && mcpHandles.size > 0
+      ? getMCPToolsForWave(wave, mcpHandles, config.mcp?.waves as Partial<Record<FixAIWaveName, string[]>> | undefined)
+      : undefined;
+  const tools = getWaveTools(wave, workDir, mcpTools);
   const systemPrompt = await loadPrompt(wave);
   const thinkingLevel = resolveThinkingLevel(config, wave);
   const modelString = model.id;
@@ -244,6 +254,18 @@ export async function fix(options: FixOptions): Promise<FixResult> {
     }, timeoutMs);
   }
 
+  // MCP server startup: resolve config and start servers for tool augmentation
+  let mcpHandles = new Map<string, MCPServerHandle>();
+  try {
+    const mcpServers = await resolveMCPServers(config.mcp);
+    if (Object.keys(mcpServers).length > 0) {
+      mcpHandles = await startAllMCPServers(mcpServers);
+      log.info(`[mcp] ${mcpHandles.size} MCP server(s) running`);
+    }
+  } catch (error) {
+    log.warn(`[mcp] Failed to start MCP servers: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
   if (fresh) {
     await clearCheckpoint(workDir);
     log.info(`[fresh] Cleared checkpoint — starting from scratch`);
@@ -307,6 +329,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           },
         ),
         toOutputFormat(AssessResultSchema),
+        mcpHandles,
       );
       await saveHandoff(workDir, handoff);
       state.waveResults.assess = handoffToResult(handoff, waveProvider(config, 'assess'));
@@ -352,6 +375,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           ...(codebaseContext != null && { codebaseContext }),
         }),
         toOutputFormat(SpecResultSchema),
+        mcpHandles,
       );
       await saveHandoff(workDir, handoff);
       state.waveResults.spec = handoffToResult(handoff, waveProvider(config, 'spec'));
@@ -419,6 +443,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
             ...(codebaseContext != null && { codebaseContext }),
           }),
           toOutputFormat(SpecResultSchema),
+          mcpHandles,
         );
         await saveHandoff(workDir, specHandoff);
         state.waveResults.spec = handoffToResult(specHandoff, waveProvider(config, 'spec'));
@@ -457,6 +482,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           coverageThreshold: config.rules.coverage,
         }),
         undefined,
+        mcpHandles,
       );
       await saveHandoff(workDir, handoff);
       state.waveResults.quality = handoffToResult(handoff, waveProvider(config, 'quality'));
@@ -625,6 +651,11 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       await recordEpisode(config.episodes, episode).catch((err) => {
         log.warn(`Failed to record episode: ${err instanceof Error ? err.message : String(err)}`);
       });
+    }
+
+    // MCP server cleanup
+    if (mcpHandles.size > 0) {
+      await stopAllMCPServers(mcpHandles);
     }
 
     if (worktree && state.status === 'completed') {
