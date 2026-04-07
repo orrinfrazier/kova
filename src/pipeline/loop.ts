@@ -1,6 +1,7 @@
 import { fetchIssues } from '../services/github.js';
 import { extractPRFromResult, fetchOpenPRsDetailed, type OpenPR } from '../services/pr-context.js';
 import { prioritizeIssues } from '../services/prioritize.js';
+import { shutdownRequested } from '../services/shutdown.js';
 import type { Issue, RepoConfig, WaveResult } from '../types/index.js';
 import { log } from '../utils/logger.js';
 import { type FixResult, fix } from './fix.js';
@@ -13,6 +14,7 @@ export interface LoopOptions {
   filter?: string | undefined;
   maxIssues?: number | undefined;
   budgetUsd?: number | undefined;
+  force?: boolean | undefined;
 }
 
 export interface LoopResult {
@@ -117,6 +119,10 @@ export async function fixLoop(options: LoopOptions): Promise<LoopResult> {
       log.info(
         'Budget exceeded: $' + totalCost.toFixed(2) + ' spent of $' + budget.toFixed(2) + ' budget — stopping loop',
       );
+      break;
+    }
+    if (shutdownRequested()) {
+      log.info('Shutdown requested — stopping loop after #' + issue.number);
       break;
     }
   }
