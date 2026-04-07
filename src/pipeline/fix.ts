@@ -1,14 +1,13 @@
 // Fix pipeline — Assess → Spec → Test → Impl → Quality → Review → Ship
-// Each wave runs Agent SDK query() with wave-specific prompts and structured output.
+// Each wave runs pi-mono agent sessions with wave-specific prompts and structured output.
 // Waves are strictly sequential. Quality gates run inside the agent (self-healing).
 
-import type { JsonSchemaOutputFormat } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
-import { executeWaveWithRetry, type WaveExecutionResult } from '../ai/index.js';
+import { executeWaveWithRetry, type OutputFormat, type WaveExecutionResult } from '../ai/index.js';
 import { clearCheckpoint, loadCheckpoint, saveCheckpoint } from '../services/checkpoint.js';
 import { commentOnIssue, createPR, listOpenPRs } from '../services/github.js';
-import { shutdownRequested } from '../services/shutdown.js';
 import { formatPRContext, type OpenPR } from '../services/pr-context.js';
+import { shutdownRequested } from '../services/shutdown.js';
 import {
   commitAndPush,
   createWorktree,
@@ -22,7 +21,7 @@ import { log } from '../utils/logger.js';
 import { buildCostReport, printRunSummary, writeCostReport } from './cost-report.js';
 import { loadPrompt } from './prompts.js';
 
-function toOutputFormat(schema: z.ZodType): JsonSchemaOutputFormat {
+function toOutputFormat(schema: z.ZodType): OutputFormat {
   return {
     type: 'json_schema',
     schema: z.toJSONSchema(schema, { target: 'draft-07' }) as Record<string, unknown>,
@@ -261,7 +260,7 @@ async function runWave(
   wave: WaveName,
   workDir: string,
   config: RepoConfig,
-  opts: { userMessage: string; outputFormat?: JsonSchemaOutputFormat },
+  opts: { userMessage: string; outputFormat?: OutputFormat },
 ): Promise<WaveExecutionResult> {
   const systemPrompt = await loadPrompt(wave);
   return executeWaveWithRetry({
