@@ -4,7 +4,7 @@
 // Quality gets bash + read for running checks.
 // Ship gets bash for git operations.
 
-import type { AgentTool } from '@mariozechner/pi-agent-core';
+import type { AgentTool, ThinkingLevel } from '@mariozechner/pi-agent-core';
 import {
   createBashTool,
   createEditTool,
@@ -16,6 +16,19 @@ import {
 import type { WaveName } from '../types/index.js';
 
 type ToolName = 'read' | 'bash' | 'edit' | 'write' | 'grep' | 'find' | 'ls';
+
+/** Default extended thinking levels per wave type.
+ *  Reasoning waves (assess, spec, review) benefit from extended thinking.
+ *  Coding/mechanical waves (test, impl, quality, ship) do not. */
+export const DEFAULT_THINKING_LEVELS: Record<WaveName, ThinkingLevel> = {
+  assess: 'medium',
+  spec: 'medium',
+  review: 'medium',
+  test: 'off',
+  impl: 'off',
+  quality: 'off',
+  ship: 'off',
+};
 
 export const WAVE_TOOLS: Record<WaveName, ToolName[]> = {
   assess: ['read', 'find', 'grep'],

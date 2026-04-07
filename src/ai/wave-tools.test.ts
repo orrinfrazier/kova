@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { WaveName } from '../types/index.js';
-import { getWaveTools, WAVE_TOOLS } from './wave-tools.js';
+import { DEFAULT_THINKING_LEVELS, getWaveTools, WAVE_TOOLS } from './wave-tools.js';
 
 describe('WAVE_TOOLS', () => {
   it('defines tool sets for all seven waves', () => {
@@ -85,5 +85,30 @@ describe('getWaveTools', () => {
     expect(names).not.toContain('write');
     expect(names).not.toContain('edit');
     expect(names).not.toContain('bash');
+  });
+});
+
+describe('DEFAULT_THINKING_LEVELS', () => {
+  it('defines thinking levels for all seven waves', () => {
+    const waves: WaveName[] = ['assess', 'spec', 'test', 'impl', 'quality', 'review', 'ship'];
+    for (const wave of waves) {
+      expect(DEFAULT_THINKING_LEVELS[wave]).toBeDefined();
+    }
+  });
+
+  it('reasoning waves use medium thinking', () => {
+    expect(DEFAULT_THINKING_LEVELS.assess).toBe('medium');
+    expect(DEFAULT_THINKING_LEVELS.spec).toBe('medium');
+    expect(DEFAULT_THINKING_LEVELS.review).toBe('medium');
+  });
+
+  it('coding waves use off thinking', () => {
+    expect(DEFAULT_THINKING_LEVELS.test).toBe('off');
+    expect(DEFAULT_THINKING_LEVELS.impl).toBe('off');
+    expect(DEFAULT_THINKING_LEVELS.quality).toBe('off');
+  });
+
+  it('ship wave uses off thinking', () => {
+    expect(DEFAULT_THINKING_LEVELS.ship).toBe('off');
   });
 });
