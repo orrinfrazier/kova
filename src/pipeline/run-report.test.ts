@@ -124,8 +124,14 @@ describe('buildRunReport', () => {
   it('handles empty loop (no issues)', () => {
     const report = buildRunReport(
       makeLoopResult({
-        total: 0, succeeded: 0, failed: 0, skipped: 0,
-        totalCost: 0, totalTurns: 0, totalDuration: 0, results: [],
+        total: 0,
+        succeeded: 0,
+        failed: 0,
+        skipped: 0,
+        totalCost: 0,
+        totalTurns: 0,
+        totalDuration: 0,
+        results: [],
       }),
     );
     expect(report.total).toBe(0);
@@ -157,9 +163,7 @@ describe('writeRunReport', () => {
   it('writes run-report.json to .kova directory', async () => {
     const report = buildRunReport(makeLoopResult());
     await writeRunReport(workDir, report);
-    const json = JSON.parse(
-      await readFile(join(workDir, '.kova', 'run-report.json'), 'utf-8'),
-    ) as RunReport;
+    const json = JSON.parse(await readFile(join(workDir, '.kova', 'run-report.json'), 'utf-8')) as RunReport;
     expect(json.total).toBe(3);
     expect(json.succeeded).toBe(2);
     expect(json.issues).toHaveLength(3);
@@ -190,7 +194,9 @@ describe('writeRunReport', () => {
     const issue = makeIssue(99, 'Fix A | B regression');
     const report = buildRunReport(
       makeLoopResult({
-        total: 1, succeeded: 1, failed: 0,
+        total: 1,
+        succeeded: 1,
+        failed: 0,
         results: [{ issue, result: makeSuccessResult(issue) }],
       }),
     );
