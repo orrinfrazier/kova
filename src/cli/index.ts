@@ -30,6 +30,7 @@ import {
   resolveRepoConfig,
 } from '../services/config.js';
 import { createIssue, fetchIssue, hasExistingWork } from '../services/github.js';
+import { computeStats, formatHistoryTable, formatStatsTable, readHistory } from '../services/history.js';
 import { collectChangedFiles, reindexFiles } from '../services/reindex.js';
 import { buildSandboxImage } from '../services/sandbox.js';
 import {
@@ -576,6 +577,28 @@ sandbox
     } else {
       log.error(`Sandbox build failed: ${result.error}`);
       process.exit(1);
+    }
+  });
+
+program
+  .command('history')
+  .description('Show run history and analytics')
+  .option('--stats', 'Show aggregate statistics')
+  .option('--repo <name-or-path>', 'Filter by repository name or path', '.')
+  .option('--limit <n>', 'Maximum entries to show', '20')
+  .action(async (opts: { stats?: boolean; repo?: string; limit?: string }) => {
+    const kovaConfig = await tryLoadConfig(program.opts().config);
+    const { repoPath } = resolveRepo(opts.repo ?? '.', kovaConfig);
+    const limit = Number.parseInt(opts.limit ?? '20', 10);
+
+    const entries = await readHistory(repoPath);
+
+    if (opts.stats) {
+      const stats = computeStats(entries);
+      console.log(formatStatsTable(stats));
+    } else {
+      const recent = entries.slice(-limit);
+      console.log(formatHistoryTable(recent));
     }
   });
 
