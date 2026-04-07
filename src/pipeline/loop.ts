@@ -6,7 +6,9 @@ import { prioritizeIssues } from '../services/prioritize.js';
 import { shutdownRequested } from '../services/shutdown.js';
 import type { Issue, RepoConfig, WaveResult } from '../types/index.js';
 import { log } from '../utils/logger.js';
+import { CostAccumulator } from './cost-accumulator.js';
 import { type FixResult, fix } from './fix.js';
+import { buildDependencyTiers, type FixExecutor, runFixesWithConcurrency } from './issue-scheduler.js';
 import { buildRunReport, printRunReport, writeRunReport } from './run-report.js';
 import type { SharedBudgetTracker } from './shared-budget.js';
 
@@ -54,11 +56,27 @@ function aggregateWaveCosts(waveResults: Partial<Record<string, WaveResult>>): {
   return { cost, turns, duration };
 }
 
+function emptyResult(startedAt: string): LoopResult {
+  return {
+    total: 0,
+    succeeded: 0,
+    failed: 0,
+    skipped: 0,
+    totalCost: 0,
+    totalTurns: 0,
+    totalDuration: 0,
+    budgetExceeded: false,
+    startedAt,
+    results: [],
+  };
+}
+
 export async function fixLoop(options: LoopOptions): Promise<LoopResult> {
   const { repoPath, repoName, config, filter, maxIssues, budgetUsd, budgetTracker } = options;
   const startedAt = new Date().toISOString();
   const limit = maxIssues ?? config.auto?.max_per_run ?? config.rules.max_issues_per_run;
   const budget = budgetTracker ? undefined : (budgetUsd ?? config.rules.budget_usd);
+  const concurrency = config.rules.concurrency ?? 1;
   log.info(`Fetching open issues for ${repoName}...`);
   if (budgetTracker) {
     log.info(`Shared budget cap: $${budgetTracker.limitUsd.toFixed(2)}`);
@@ -68,18 +86,7 @@ export async function fixLoop(options: LoopOptions): Promise<LoopResult> {
   const issues = await fetchIssues(repoPath, filter);
   if (issues.length === 0) {
     log.info('No open issues found.');
-    return {
-      total: 0,
-      succeeded: 0,
-      failed: 0,
-      skipped: 0,
-      totalCost: 0,
-      totalTurns: 0,
-      totalDuration: 0,
-      budgetExceeded: false,
-      startedAt,
-      results: [],
-    };
+    return emptyResult(startedAt);
   }
   log.info(`Found ${issues.length} issues, prioritizing...`);
   const prioritized = prioritizeIssues(issues);
@@ -93,15 +100,27 @@ export async function fixLoop(options: LoopOptions): Promise<LoopResult> {
   if (pendingPRs.length > 0) {
     log.info(`Loaded ${pendingPRs.length} open PRs for conflict awareness`);
   }
-  const results: Array<{ issue: Issue; result: FixResult }> = [];
-  let succeeded = 0;
-  let failed = 0;
-  const skipped = 0;
-  let totalCost = 0;
-  let totalTurns = 0;
-  let totalDuration = 0;
-  let budgetExceeded = false;
-  for (const issue of toFix) {
+
+  // Build dependency tiers from prioritization
+  const deps = prioritized.slice(0, limit).map((p) => ({
+    issueNumber: p.issue.number,
+    blockedBy: p.blockedBy ?? [],
+  }));
+  const tiers = buildDependencyTiers(toFix, deps);
+
+  // Shared state across concurrent fixes
+  const accumulator = new CostAccumulator({
+    onCostUpdate: (total) => {
+      metrics.setCurrentCostUsd(total);
+      if (budgetTracker) budgetTracker.addCost(0); // sync check only; real cost added below
+    },
+  });
+  const fixResultsMap = new Map<number, { issue: Issue; result: FixResult }>();
+
+  // pendingPRs is shared across concurrent executors. Each executor snapshots
+  // it at call time, so concurrent siblings may or may not see each other's PRs.
+  // This is acceptable — PR conflict awareness is best-effort.
+  const executor: FixExecutor = async (issue) => {
     log.info(`\n${'='.repeat(60)}`);
     log.info(`Fixing #${issue.number}: ${issue.title}`);
     log.info('='.repeat(60));
@@ -114,43 +133,71 @@ export async function fixLoop(options: LoopOptions): Promise<LoopResult> {
       log.warn(`Failed to fetch origin: ${err instanceof Error ? err.message : String(err)}`);
     }
 
-    const result = await fix({ issue, repoPath, repoName, config, pendingPRs });
-    results.push({ issue, result });
+    const result = await fix({ issue, repoPath, repoName, config, pendingPRs: [...pendingPRs] });
+
     const waveCosts = aggregateWaveCosts(result.state.waveResults);
-    totalCost += waveCosts.cost;
-    totalTurns += waveCosts.turns;
-    totalDuration += waveCosts.duration;
-    metrics.setCurrentCostUsd(totalCost);
+    accumulator.add(waveCosts.cost);
+    accumulator.addTurns(waveCosts.turns);
+    accumulator.addDuration(waveCosts.duration);
+    if (budgetTracker) budgetTracker.addCost(waveCosts.cost);
+
     if (result.success) {
-      succeeded++;
       log.info(`#${issue.number} — PR created: ${result.prUrl}`);
       const newPR = extractPRFromResult(issue, result);
-      if (newPR) {
-        pendingPRs.push(newPR);
-      }
+      if (newPR) pendingPRs.push(newPR);
     } else {
-      failed++;
       log.error(`#${issue.number} — Failed: ${result.error}`);
     }
-    if (budgetTracker) {
-      budgetTracker.addCost(waveCosts.cost);
-      if (budgetTracker.isExceeded()) {
-        budgetExceeded = true;
-        log.info(
-          `Shared budget exceeded: $${budgetTracker.totalSpent().toFixed(2)} spent of $${budgetTracker.limitUsd.toFixed(2)} budget — stopping loop`,
-        );
-        break;
-      }
-    } else if (budget !== undefined && totalCost >= budget) {
-      budgetExceeded = true;
-      log.info(`Budget exceeded: $${totalCost.toFixed(2)} spent of $${budget.toFixed(2)} budget — stopping loop`);
-      break;
-    }
-    if (shutdownRequested()) {
-      log.info(`Shutdown requested — stopping loop after #${issue.number}`);
-      break;
+
+    fixResultsMap.set(issue.number, { issue, result });
+    return { success: result.success };
+  };
+
+  // Determine effective budget: use shared tracker if available, otherwise local budget
+  const effectiveBudgetExceeded = budgetTracker
+    ? () => budgetTracker.isExceeded()
+    : undefined;
+
+  await runFixesWithConcurrency(toFix, tiers, executor, {
+    concurrency,
+    ...(budget !== undefined ? { budget } : {}),
+    costAccumulator: accumulator,
+    shutdownRequested: () => {
+      if (effectiveBudgetExceeded?.()) return true;
+      return shutdownRequested();
+    },
+  });
+
+  // Build LoopResult from executed fixes (preserve issue order)
+  const results: Array<{ issue: Issue; result: FixResult }> = [];
+  let succeeded = 0;
+  let failed = 0;
+
+  for (const issue of toFix) {
+    const fr = fixResultsMap.get(issue.number);
+    if (fr) {
+      results.push(fr);
+      if (fr.result.success) succeeded++;
+      else failed++;
     }
   }
+
+  const budgetExceeded = budgetTracker
+    ? budgetTracker.isExceeded()
+    : budget !== undefined && accumulator.exceedsBudget(budget);
+
+  if (budgetExceeded) {
+    if (budgetTracker) {
+      log.info(
+        `Shared budget exceeded: $${budgetTracker.totalSpent().toFixed(2)} spent of $${budgetTracker.limitUsd.toFixed(2)} budget — stopping loop`,
+      );
+    } else {
+      log.info(
+        `Budget exceeded: $${accumulator.get().toFixed(2)} spent of $${budget?.toFixed(2)} budget — stopping loop`,
+      );
+    }
+  }
+
   log.info(`\n${'='.repeat(60)}`);
   log.info(
     'Loop complete: ' +
@@ -158,8 +205,7 @@ export async function fixLoop(options: LoopOptions): Promise<LoopResult> {
       ' succeeded, ' +
       failed +
       ' failed, ' +
-      skipped +
-      ' skipped (' +
+      '0 skipped (' +
       results.length +
       '/' +
       issues.length +
@@ -167,21 +213,21 @@ export async function fixLoop(options: LoopOptions): Promise<LoopResult> {
   );
   log.info(
     'Cumulative cost: $' +
-      totalCost.toFixed(2) +
+      accumulator.get().toFixed(2) +
       ' | ' +
-      totalTurns +
+      accumulator.getTurns() +
       ' turns | ' +
-      Math.floor(totalDuration / 1000) +
+      Math.floor(accumulator.getDuration() / 1000) +
       's',
   );
   const loopResult: LoopResult = {
     total: results.length,
     succeeded,
     failed,
-    skipped,
-    totalCost,
-    totalTurns,
-    totalDuration,
+    skipped: 0,
+    totalCost: accumulator.get(),
+    totalTurns: accumulator.getTurns(),
+    totalDuration: accumulator.getDuration(),
     budgetExceeded,
     startedAt,
     results,
@@ -209,6 +255,7 @@ export async function fixByNumbers(options: FixByNumbersOptions): Promise<LoopRe
   const { repoPath, repoName, config, issueNumbers, budgetUsd } = options;
   const startedAt = new Date().toISOString();
   const budget = budgetUsd;
+  const concurrency = config.rules.concurrency ?? 1;
 
   if (budget !== undefined) {
     log.info(`Budget cap: $${budget.toFixed(2)}`);
@@ -216,18 +263,7 @@ export async function fixByNumbers(options: FixByNumbersOptions): Promise<LoopRe
 
   if (issueNumbers.length === 0) {
     log.info('No issue numbers provided.');
-    return {
-      total: 0,
-      succeeded: 0,
-      failed: 0,
-      skipped: 0,
-      totalCost: 0,
-      totalTurns: 0,
-      totalDuration: 0,
-      budgetExceeded: false,
-      startedAt,
-      results: [],
-    };
+    return emptyResult(startedAt);
   }
 
   log.info(`Processing ${issueNumbers.length} issues by number`);
@@ -241,27 +277,19 @@ export async function fixByNumbers(options: FixByNumbersOptions): Promise<LoopRe
     log.info(`Loaded ${pendingPRs.length} open PRs for conflict awareness`);
   }
 
+  // Fetch all issues, tracking failures
+  const fetchedIssues: Issue[] = [];
   const results: Array<{ issue: Issue; result: FixResult }> = [];
   let succeeded = 0;
   let failed = 0;
-  const skipped = 0;
-  let totalCost = 0;
-  let totalTurns = 0;
-  let totalDuration = 0;
-  let budgetExceeded = false;
 
   for (const issueNumber of issueNumbers) {
-    if (shutdownRequested()) {
-      log.info(`Shutdown requested — stopping loop before #${issueNumber}`);
-      break;
-    }
-
     log.info(`\n${'='.repeat(60)}`);
     log.info(`Fetching issue #${issueNumber}...`);
 
-    let issue: Issue;
     try {
-      issue = await fetchIssue(repoPath, issueNumber);
+      const issue = await fetchIssue(repoPath, issueNumber);
+      fetchedIssues.push(issue);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       log.error(`#${issueNumber} — Failed to fetch: ${msg}`);
@@ -282,80 +310,144 @@ export async function fixByNumbers(options: FixByNumbersOptions): Promise<LoopRe
           },
         },
       });
-      continue;
-    }
-
-    log.info(`Fixing #${issue.number}: ${issue.title}`);
-    log.info('='.repeat(60));
-
-    // Pull latest before each fix to stay current with default branch
-    try {
-      await $`git -C ${repoPath} fetch origin`;
-      log.debug('Fetched latest from origin before fix');
-    } catch (err) {
-      log.warn(`Failed to fetch origin: ${err instanceof Error ? err.message : String(err)}`);
-    }
-
-    const result = await fix({ issue, repoPath, repoName, config, pendingPRs: [...pendingPRs] });
-    results.push({ issue, result });
-    const waveCosts = aggregateWaveCosts(result.state.waveResults);
-    totalCost += waveCosts.cost;
-    totalTurns += waveCosts.turns;
-    totalDuration += waveCosts.duration;
-    metrics.setCurrentCostUsd(totalCost);
-
-    if (result.success) {
-      succeeded++;
-      log.info(`#${issue.number} — PR created: ${result.prUrl}`);
-      const newPR = extractPRFromResult(issue, result);
-      if (newPR) {
-        pendingPRs.push(newPR);
-      }
-    } else {
-      failed++;
-      log.error(`#${issue.number} — Failed: ${result.error}`);
-    }
-
-    if (budget !== undefined && totalCost >= budget) {
-      budgetExceeded = true;
-      log.info(`Budget exceeded: $${totalCost.toFixed(2)} spent of $${budget.toFixed(2)} budget — stopping loop`);
-      break;
     }
   }
 
+  if (fetchedIssues.length > 0) {
+    // Single tier — no dependency info for explicit issue numbers
+    const tiers: number[][] = [fetchedIssues.map((_, i) => i)];
+
+    const accumulator = new CostAccumulator({
+      onCostUpdate: (total) => metrics.setCurrentCostUsd(total),
+    });
+    const fixResultsMap = new Map<number, { issue: Issue; result: FixResult }>();
+
+    // pendingPRs is shared across concurrent executors. Each executor snapshots
+    // it at call time, so concurrent siblings may or may not see each other's PRs.
+    // This is acceptable — PR conflict awareness is best-effort.
+    const executor: FixExecutor = async (issue) => {
+      log.info(`Fixing #${issue.number}: ${issue.title}`);
+      log.info('='.repeat(60));
+
+      // Pull latest before each fix to stay current with default branch
+      try {
+        await $`git -C ${repoPath} fetch origin`;
+        log.debug('Fetched latest from origin before fix');
+      } catch (err) {
+        log.warn(`Failed to fetch origin: ${err instanceof Error ? err.message : String(err)}`);
+      }
+
+      const result = await fix({ issue, repoPath, repoName, config, pendingPRs: [...pendingPRs] });
+
+      const waveCosts = aggregateWaveCosts(result.state.waveResults);
+      accumulator.add(waveCosts.cost);
+      accumulator.addTurns(waveCosts.turns);
+      accumulator.addDuration(waveCosts.duration);
+
+      if (result.success) {
+        log.info(`#${issue.number} — PR created: ${result.prUrl}`);
+        const newPR = extractPRFromResult(issue, result);
+        if (newPR) pendingPRs.push(newPR);
+      } else {
+        log.error(`#${issue.number} — Failed: ${result.error}`);
+      }
+
+      fixResultsMap.set(issue.number, { issue, result });
+      return { success: result.success };
+    };
+
+    await runFixesWithConcurrency(fetchedIssues, tiers, executor, {
+      concurrency,
+      ...(budget !== undefined ? { budget } : {}),
+      costAccumulator: accumulator,
+      shutdownRequested,
+    });
+
+    // Collect results preserving issue order
+    for (const issue of fetchedIssues) {
+      const fr = fixResultsMap.get(issue.number);
+      if (fr) {
+        results.push(fr);
+        if (fr.result.success) succeeded++;
+        else failed++;
+      }
+    }
+
+    const budgetExceeded = budget !== undefined && accumulator.exceedsBudget(budget);
+
+    if (budgetExceeded) {
+      log.info(
+        `Budget exceeded: $${accumulator.get().toFixed(2)} spent of $${budget?.toFixed(2)} budget — stopping loop`,
+      );
+    }
+
+    log.info(`\n${'='.repeat(60)}`);
+    log.info(
+      'Loop complete: ' +
+        succeeded +
+        ' succeeded, ' +
+        failed +
+        ' failed, ' +
+        '0 skipped (' +
+        results.length +
+        '/' +
+        issueNumbers.length +
+        ' total)',
+    );
+    log.info(
+      'Cumulative cost: $' +
+        accumulator.get().toFixed(2) +
+        ' | ' +
+        accumulator.getTurns() +
+        ' turns | ' +
+        Math.floor(accumulator.getDuration() / 1000) +
+        's',
+    );
+
+    const loopResult: LoopResult = {
+      total: results.length,
+      succeeded,
+      failed,
+      skipped: 0,
+      totalCost: accumulator.get(),
+      totalTurns: accumulator.getTurns(),
+      totalDuration: accumulator.getDuration(),
+      budgetExceeded,
+      startedAt,
+      results,
+    };
+
+    const runReport = buildRunReport(loopResult);
+    printRunReport(runReport);
+    await writeRunReport(repoPath, runReport).catch((err) => {
+      log.warn(`Failed to write run report: ${err instanceof Error ? err.message : String(err)}`);
+    });
+
+    return loopResult;
+  }
+
+  // All fetches failed — no fixes to run
   log.info(`\n${'='.repeat(60)}`);
   log.info(
-    'Loop complete: ' +
-      succeeded +
-      ' succeeded, ' +
+    'Loop complete: 0 succeeded, ' +
       failed +
-      ' failed, ' +
-      skipped +
-      ' skipped (' +
+      ' failed, 0 skipped (' +
       results.length +
       '/' +
       issueNumbers.length +
       ' total)',
   );
-  log.info(
-    'Cumulative cost: $' +
-      totalCost.toFixed(2) +
-      ' | ' +
-      totalTurns +
-      ' turns | ' +
-      Math.floor(totalDuration / 1000) +
-      's',
-  );
+  log.info('Cumulative cost: $0.00 | 0 turns | 0s');
 
   const loopResult: LoopResult = {
     total: results.length,
-    succeeded,
+    succeeded: 0,
     failed,
-    skipped,
-    totalCost,
-    totalTurns,
-    totalDuration,
-    budgetExceeded,
+    skipped: 0,
+    totalCost: 0,
+    totalTurns: 0,
+    totalDuration: 0,
+    budgetExceeded: false,
     startedAt,
     results,
   };

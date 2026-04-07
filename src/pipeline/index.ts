@@ -14,9 +14,18 @@ export {
   type PieceContextOptions,
   truncateToTokenBudget,
 } from './context.js';
+export { CostAccumulator, type CostAccumulatorOptions } from './cost-accumulator.js';
 export { buildCostReport, type CostReport, printRunSummary, writeCostReport } from './cost-report.js';
 export { type FixOptions, type FixResult, fix } from './fix.js';
-export { fixLoop, type LoopOptions, type LoopResult } from './loop.js';
+export {
+  buildDependencyTiers,
+  type ConcurrencyOptions,
+  type DependencyInfo,
+  type FixExecutor,
+  type IssueFixResult,
+  runFixesWithConcurrency,
+} from './issue-scheduler.js';
+export { type FixByNumbersOptions, fixByNumbers, fixLoop, type LoopOptions, type LoopResult } from './loop.js';
 export { type MergeOptions, type MergeResult, runMerge } from './merge.js';
 export type { ExportPromptsResult } from './prompts.js';
 export { exportPrompts, getDefaultPromptsDir, loadPrompt, resolvePromptsDir } from './prompts.js';
