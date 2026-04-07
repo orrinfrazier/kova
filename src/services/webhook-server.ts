@@ -3,6 +3,7 @@
 
 import http from 'node:http';
 import { log } from '../utils/logger.js';
+import * as metrics from './metrics.js';
 import { handleWebhookEvent } from './webhook-handler.js';
 import { verifyWebhookSignature } from './webhook-verify.js';
 
@@ -11,6 +12,7 @@ export interface WebhookServerOptions {
   port: number;
   enqueue: (issueNumber: number) => boolean;
   queue?: { size(): number; isRunning(): boolean };
+  metricsEnabled?: boolean;
 }
 
 export interface WebhookServer {
@@ -57,7 +59,7 @@ function readBody(req: http.IncomingMessage): Promise<{ ok: true; body: string }
 }
 
 export function createWebhookServer(options: WebhookServerOptions): WebhookServer {
-  const { secret, enqueue, queue } = options;
+  const { secret, enqueue, queue, metricsEnabled } = options;
   let assignedPort = options.port;
   let httpServer: http.Server | undefined;
 
@@ -72,6 +74,18 @@ export function createWebhookServer(options: WebhookServerOptions): WebhookServe
         queueSize: queue?.size() ?? 0,
         running: queue?.isRunning() ?? false,
       });
+      return;
+    }
+
+    // GET /metrics
+    if (url === '/metrics' && method === 'GET') {
+      if (!metricsEnabled) {
+        jsonResponse(res, 404, { error: 'Not found' });
+        return;
+      }
+      const body = metrics.serialize();
+      res.writeHead(200, { 'content-type': 'text/plain; version=0.0.4; charset=utf-8' });
+      res.end(body);
       return;
     }
 
