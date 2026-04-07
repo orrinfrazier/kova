@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { executeWaveWithRetry, type WaveExecutionResult } from '../ai/index.js';
 import { clearCheckpoint, loadCheckpoint, saveCheckpoint } from '../services/checkpoint.js';
 import { commentOnIssue, createPR, listOpenPRs } from '../services/github.js';
+import { formatPRContext, type OpenPR } from '../services/pr-context.js';
 import {
   commitAndPush,
   createWorktree,
@@ -34,6 +35,7 @@ export interface FixOptions {
   config: RepoConfig;
   fresh?: boolean | undefined;
   noComment?: boolean | undefined;
+  pendingPRs?: OpenPR[] | undefined;
 }
 
 export interface FixResult {
@@ -44,7 +46,7 @@ export interface FixResult {
 }
 
 export async function fix(options: FixOptions): Promise<FixResult> {
-  const { issue, repoPath, repoName, config, fresh, noComment } = options;
+  const { issue, repoPath, repoName, config, fresh, noComment, pendingPRs } = options;
 
   if (fresh) {
     if (config.isolation === 'worktree' && (await worktreeExists(repoPath, issue.number))) {
@@ -72,6 +74,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
   }
 
   const shouldSkip = (wave: WaveName): boolean => state.completedWaves.includes(wave);
+  const prContext = formatPRContext(pendingPRs ?? []);
 
   try {
     if (!shouldSkip('assess')) {
@@ -98,7 +101,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
     if (!shouldSkip('spec')) {
       const assessResult = state.waveResults.assess;
       const result = await runWave('spec', workDir, config, {
-        userMessage: `Issue: ${issue.title}\n${issue.body}\n\nAssessment:\n${JSON.stringify(assessResult?.artifact, null, 2)}`,
+        userMessage: `Issue: ${issue.title}\n${issue.body}\n\nAssessment:\n${JSON.stringify(assessResult?.artifact, null, 2)}${prContext}`,
         outputFormat: toOutputFormat(SpecResultSchema),
       });
       state.waveResults.spec = toWaveResult('spec', result);
@@ -119,7 +122,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
     if (!shouldSkip('impl')) {
       const specResult = state.waveResults.spec;
       const result = await runWave('impl', workDir, config, {
-        userMessage: `Implement to pass the failing tests. Spec:\n${JSON.stringify(specResult?.artifact, null, 2)}`,
+        userMessage: `Implement to pass the failing tests. Spec:\n${JSON.stringify(specResult?.artifact, null, 2)}${prContext}`,
       });
       state.waveResults.impl = toWaveResult('impl', result);
       state.completedWaves.push('impl');
