@@ -86,7 +86,7 @@ import { closeFileLogger, initFileLogger, type Logger, log } from '../utils/logg
 import { buildWaveContext } from './context.js';
 import { buildCostReport, printRunSummary, writeCostReport } from './cost-report.js';
 import { runParallelPieceTILoop, runReviewLoop, type TestRunner } from './loops.js';
-import { loadPrompt } from './prompts.js';
+import { loadPrompt, resolvePromptsDir } from './prompts.js';
 import { validatePieceFileOwnership } from './spec-validator.js';
 
 function toOutputFormat(schema: z.ZodType): OutputFormat {
@@ -157,6 +157,7 @@ async function spawnWave<T>(
   outputFormat?: OutputFormat,
   mcpHandles?: Map<string, MCPServerHandle>,
   playwright?: { enabled: boolean },
+  promptsDir?: string,
   projectContext?: ProjectContext,
 ): Promise<{ handoff: WaveHandoff<T>; promptHash: string }> {
   const model = resolveWaveModel(config.model[wave]);
@@ -165,7 +166,7 @@ async function spawnWave<T>(
       ? getMCPToolsForWave(wave, mcpHandles, config.mcp?.waves as Partial<Record<FixAIWaveName, string[]>> | undefined)
       : undefined;
   const tools = getWaveTools(wave, workDir, { customTools: config.tools, mcpTools, playwright });
-  const systemPrompt = await loadPrompt(wave, config.tools, projectContext);
+  const systemPrompt = await loadPrompt(wave, config.tools, projectContext, promptsDir);
   const promptHash = hashPrompt(systemPrompt);
 
   // Prompt versioning: detect changes and record version
@@ -174,7 +175,6 @@ async function spawnWave<T>(
     log.info(`Prompt changed for ${wave}: ${change.previousHash} → ${change.currentHash}`);
   }
   await recordPromptVersion(repoPath, wave, systemPrompt).catch(() => {});
-
   const thinkingLevel = resolveThinkingLevel(config, wave);
   const modelString = model.id;
   const fallbackModel = waveFallbackModel(config.model[wave], modelString, config.model.fallback);
@@ -265,6 +265,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
 
   const worktree = config.isolation === 'worktree' ? await createWorktree(repoPath, issue.number) : undefined;
   const workDir = worktree?.path ?? repoPath;
+  const resolvedPromptsDir = resolvePromptsDir(repoPath, config.prompts_dir);
 
   // Docker sandbox: start container with resource limits
   let sandboxContainerId: string | undefined;
@@ -424,6 +425,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         toOutputFormat(AssessResultSchema),
         mcpHandles,
         undefined,
+        resolvedPromptsDir,
         projectContext,
       );
       await saveHandoff(workDir, handoff);
@@ -488,6 +490,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         toOutputFormat(SpecResultSchema),
         mcpHandles,
         undefined,
+        resolvedPromptsDir,
         projectContext,
       );
       await saveHandoff(workDir, handoff);
@@ -572,6 +575,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           toOutputFormat(SpecResultSchema),
           mcpHandles,
           undefined,
+          resolvedPromptsDir,
           projectContext,
         );
         await saveHandoff(workDir, specHandoff);
@@ -627,6 +631,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         undefined,
         mcpHandles,
         undefined,
+        resolvedPromptsDir,
         projectContext,
       );
       await saveHandoff(workDir, handoff);

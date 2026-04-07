@@ -1,12 +1,15 @@
 // Prompt loader — reads wave prompts from prompts/ directory.
 // Prompts are markdown files, one per wave.
 // Custom tools are appended to impl/quality prompts when configured.
+// Per-repo custom prompts override defaults when prompts_dir is configured.
 
 import { fs, path } from 'zx';
 import type { ProjectContext } from '../services/project-context.js';
 import type { CustomTool } from '../types/index.js';
 
 const PROMPTS_DIR = path.join(import.meta.dirname, '..', '..', 'prompts');
+
+const DEFAULT_PROMPT_PLACEHOLDER = '{{DEFAULT_PROMPT}}';
 
 const FALLBACK_PROMPTS: Record<string, string> = {
   assess: `You are assessing a GitHub issue for feasibility.
@@ -100,24 +103,59 @@ For each issue provide:
 Output structured JSON matching the provided schema.`,
 };
 
+/**
+ * Load the default (built-in) prompt for a wave.
+ * Reads from the prompts/ directory, falls back to embedded strings.
+ */
+async function loadDefaultPrompt(wave: string): Promise<string> {
+  const filePath = path.join(PROMPTS_DIR, `${wave}.md`);
+  try {
+    return await fs.readFile(filePath, 'utf-8');
+  } catch {
+    const fallback = FALLBACK_PROMPTS[wave];
+    if (fallback) {
+      return fallback;
+    }
+    throw new Error(`No prompt found for wave: ${wave}`);
+  }
+}
+
 export async function loadPrompt(
   wave: string,
   customTools?: readonly CustomTool[],
-  projectContext?: ProjectContext,
+  projectContextOrPromptsDir?: ProjectContext | string,
+  promptsDirOrProjectContext?: string | ProjectContext,
 ): Promise<string> {
-  const filePath = path.join(PROMPTS_DIR, `${wave}.md`);
+  // Resolve overloaded arguments: callers may pass (ProjectContext, promptsDir) or (promptsDir, ProjectContext)
+  let projectContext: ProjectContext | undefined;
+  let promptsDir: string | undefined;
+  for (const arg of [projectContextOrPromptsDir, promptsDirOrProjectContext]) {
+    if (arg == null) continue;
+    if (typeof arg === 'string') {
+      promptsDir = arg;
+    } else {
+      projectContext = arg;
+    }
+  }
 
   let prompt: string;
-  try {
-    prompt = await fs.readFile(filePath, 'utf-8');
-  } catch {
-    // Fall back to embedded prompts
-    const fallback = FALLBACK_PROMPTS[wave];
-    if (fallback) {
-      prompt = fallback;
-    } else {
-      throw new Error(`No prompt found for wave: ${wave}`);
+
+  if (promptsDir) {
+    const customPath = path.join(promptsDir, `${wave}.md`);
+    try {
+      const customContent = await fs.readFile(customPath, 'utf-8');
+      if (customContent.includes(DEFAULT_PROMPT_PLACEHOLDER)) {
+        const defaultPrompt = await loadDefaultPrompt(wave);
+        prompt = customContent.replaceAll(DEFAULT_PROMPT_PLACEHOLDER, defaultPrompt);
+      } else {
+        prompt = customContent;
+      }
+    } catch {
+      // Custom file doesn't exist for this wave — fall back to default
+      prompt = await loadDefaultPrompt(wave);
     }
+  } else {
+    prompt = await loadDefaultPrompt(wave);
   }
 
   // Template variable substitution — replace {{VAR}} with project context values
@@ -162,4 +200,61 @@ export function buildCustomToolsSection(tools: readonly CustomTool[]): string {
     '',
     'These tools run as shell commands in the working directory. Use them when their purpose matches what you need to do.',
   ].join('\n');
+}
+
+/**
+ * Resolve a prompts_dir config value to an absolute path.
+ * Relative paths are resolved against the repo root.
+ */
+export function resolvePromptsDir(repoPath: string, promptsDir: string | undefined): string | undefined {
+  if (!promptsDir) return undefined;
+  if (path.isAbsolute(promptsDir)) return promptsDir;
+  return path.join(repoPath, promptsDir);
+}
+
+/** Returns the path to the built-in default prompts directory. */
+export function getDefaultPromptsDir(): string {
+  return PROMPTS_DIR;
+}
+
+export interface ExportPromptsResult {
+  exported: string[];
+  skipped: string[];
+}
+
+/**
+ * Export all built-in prompt files to a target directory.
+ * By default, existing files are skipped; pass force=true to overwrite.
+ */
+export async function exportPrompts(outputDir: string, force?: boolean): Promise<ExportPromptsResult> {
+  await fs.mkdir(outputDir, { recursive: true });
+
+  const entries = await fs.readdir(PROMPTS_DIR);
+  const mdFiles = entries.filter((f: string) => f.endsWith('.md'));
+
+  const exported: string[] = [];
+  const skipped: string[] = [];
+
+  for (const file of mdFiles) {
+    const dest = path.join(outputDir, file);
+
+    if (!force) {
+      try {
+        await fs.access(dest);
+        // File exists and force is not set — skip
+        skipped.push(file);
+        continue;
+      } catch {
+        // File doesn't exist — proceed with copy
+      }
+    }
+
+    let content = await fs.readFile(path.join(PROMPTS_DIR, file), 'utf-8');
+    // Strip template variables so exported files match loadPrompt() output
+    content = substituteTemplateVars(content);
+    await fs.writeFile(dest, content);
+    exported.push(file);
+  }
+
+  return { exported, skipped };
 }

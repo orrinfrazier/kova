@@ -19,6 +19,7 @@ import { fix } from '../pipeline/fix.js';
 import { indexCodebase } from '../pipeline/index-codebase.js';
 import { fixLoop } from '../pipeline/loop.js';
 import { runMerge } from '../pipeline/merge.js';
+import { exportPrompts } from '../pipeline/prompts.js';
 import { gatherStatus, printStatusDashboard } from '../pipeline/status.js';
 import { runSupervised } from '../pipeline/supervised.js';
 import { approveIssues } from '../services/approval.js';
@@ -602,7 +603,28 @@ program
     }
   });
 
-const prompts = program.command('prompts').description('Prompt versioning and analytics');
+const prompts = program.command('prompts').description('Manage wave prompts');
+
+prompts
+  .command('export')
+  .description('Export default prompts to a directory for customization')
+  .option('--output <dir>', 'Output directory', './kova-prompts/')
+  .option('--force', 'Overwrite existing files')
+  .action(async (opts: { output?: string; force?: boolean }) => {
+    const outputDir = resolve(opts.output ?? './kova-prompts/');
+
+    log.info(`Exporting prompts to ${outputDir}...`);
+    const result = await exportPrompts(outputDir, opts.force);
+
+    if (result.exported.length > 0) {
+      log.info(`Exported: ${result.exported.join(', ')}`);
+    }
+    if (result.skipped.length > 0) {
+      log.info(`Skipped (already exist): ${result.skipped.join(', ')}`);
+    }
+    log.info(`\nTo extend a default prompt, use {{DEFAULT_PROMPT}} in your custom file.`);
+    log.info('Then set prompts_dir in repos.yaml to point to your custom prompts directory.');
+  });
 
 prompts
   .command('list')

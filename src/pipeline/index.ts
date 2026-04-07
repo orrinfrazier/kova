@@ -18,6 +18,7 @@ export { buildCostReport, type CostReport, printRunSummary, writeCostReport } fr
 export { type FixOptions, type FixResult, fix } from './fix.js';
 export { fixLoop, type LoopOptions, type LoopResult } from './loop.js';
 export { type MergeOptions, type MergeResult, runMerge } from './merge.js';
-export { loadPrompt } from './prompts.js';
+export type { ExportPromptsResult } from './prompts.js';
+export { exportPrompts, getDefaultPromptsDir, loadPrompt, resolvePromptsDir } from './prompts.js';
 export { buildRunReport, printRunReport, type RunReport, type RunReportIssue, writeRunReport } from './run-report.js';
 export { type FileOverlap, type ValidationResult, validatePieceFileOwnership } from './spec-validator.js';
