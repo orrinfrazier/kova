@@ -7,10 +7,10 @@ import { Agent, type AgentTool, type ThinkingLevel } from '@mariozechner/pi-agen
 import { type AssistantMessage, streamSimple } from '@mariozechner/pi-ai';
 import { convertToLlm } from '@mariozechner/pi-coding-agent';
 import type { z } from 'zod';
-import type { ModelTier, WaveHandoff, WaveName } from '../types/index.js';
+import type { WaveHandoff, WaveModelConfig, WaveName } from '../types/index.js';
 import { log } from '../utils/logger.js';
 import { classifyError, isSpendingCapBehavior, KovaError } from './errors.js';
-import { resolveModel, resolveModelFromString } from './models.js';
+import { resolveModelFromString, resolveWaveModel } from './models.js';
 import { isOllamaProvider, resolveOllamaApiKey } from './ollama.js';
 import { type AIWaveName, DEFAULT_THINKING_LEVELS, getWaveTools } from './wave-tools.js';
 
@@ -308,7 +308,7 @@ export interface WaveOptions {
   systemPrompt: string;
   userMessage: string;
   cwd: string;
-  modelTier: ModelTier;
+  modelTier: WaveModelConfig;
   outputFormat?: OutputFormat;
   maxTurns?: number;
   thinkingLevel?: ThinkingLevel;
@@ -321,13 +321,14 @@ export interface WaveExecutionResult {
   turns: number;
   cost: number;
   model?: string | undefined;
+  provider?: string | undefined;
   structuredOutput?: unknown;
 }
 
 export async function executeWave(options: WaveOptions): Promise<WaveExecutionResult> {
   const { wave, systemPrompt, userMessage, cwd, modelTier, outputFormat, maxTurns, thinkingLevel } = options;
 
-  const model = resolveModel(modelTier);
+  const model = resolveWaveModel(modelTier);
   const tools = getWaveTools(wave, cwd);
   const startTime = Date.now();
 
@@ -354,6 +355,7 @@ export async function executeWave(options: WaveOptions): Promise<WaveExecutionRe
       turns: handoff.turns,
       cost: handoff.cost,
       model: handoff.model,
+      provider: model.provider,
       ...(handoff.confidence === 'high' && { structuredOutput: handoff.artifact }),
     };
   } catch (error) {
@@ -370,6 +372,7 @@ export async function executeWave(options: WaveOptions): Promise<WaveExecutionRe
       turns: 0,
       cost: 0,
       model: model.id,
+      provider: model.provider,
     };
   }
 }

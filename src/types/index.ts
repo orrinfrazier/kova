@@ -11,6 +11,8 @@ export type {
   RepoConfig,
   ReviewKnownIssue,
   ThinkingLevel,
+  WaveModelConfig,
+  WaveModelOverride,
   WaveName,
   WaveResult,
 } from './config.js';
@@ -23,6 +25,8 @@ export {
   ProvidersSchema,
   RepoConfigSchema,
   ThinkingLevelSchema,
+  WaveModelConfigSchema,
+  WaveModelOverrideSchema,
 } from './config.js';
 export type { WaveHandoff } from './handoffs.js';
 export { loadAllHandoffs, loadHandoff, saveHandoff, WaveHandoffSchema } from './handoffs.js';

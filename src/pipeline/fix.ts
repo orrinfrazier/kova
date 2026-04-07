@@ -7,8 +7,8 @@ import {
   type FixAIWaveName,
   getWaveTools,
   type OutputFormat,
-  resolveModel,
   resolveThinkingLevel,
+  resolveWaveModel,
   spawnWaveAgent,
 } from '../ai/index.js';
 import { clearCheckpoint, loadCheckpoint, saveCheckpoint } from '../services/checkpoint.js';
@@ -74,6 +74,13 @@ export interface FixResult {
 
 // --- Helpers ---
 
+/** Extract provider name from a wave's model config. */
+function waveProvider(config: RepoConfig, wave: FixAIWaveName): string {
+  const waveModel = config.model[wave];
+  if (typeof waveModel !== 'string') return waveModel.provider;
+  return resolveWaveModel(waveModel).provider;
+}
+
 /** Spawn a wave agent directly via spawnWaveAgent — no backward-compat wrapper. */
 async function spawnWave<T>(
   wave: FixAIWaveName,
@@ -82,7 +89,7 @@ async function spawnWave<T>(
   userMessage: string,
   outputFormat?: OutputFormat,
 ): Promise<WaveHandoff<T>> {
-  const model = resolveModel(config.model[wave]);
+  const model = resolveWaveModel(config.model[wave]);
   const tools = getWaveTools(wave, workDir);
   const systemPrompt = await loadPrompt(wave);
   const thinkingLevel = resolveThinkingLevel(config, wave);
@@ -100,7 +107,7 @@ async function spawnWave<T>(
 }
 
 /** Convert a WaveHandoff to WaveResult for checkpoint/cost-report compatibility. */
-function handoffToResult(handoff: WaveHandoff): WaveResult {
+function handoffToResult(handoff: WaveHandoff, provider?: string): WaveResult {
   return {
     wave: handoff.wave,
     success: true,
@@ -109,6 +116,7 @@ function handoffToResult(handoff: WaveHandoff): WaveResult {
     cost: handoff.cost,
     turns: handoff.turns,
     model: handoff.model,
+    provider,
   };
 }
 
@@ -185,7 +193,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         toOutputFormat(AssessResultSchema),
       );
       await saveHandoff(workDir, handoff);
-      state.waveResults.assess = handoffToResult(handoff);
+      state.waveResults.assess = handoffToResult(handoff, waveProvider(config, 'assess'));
       state.completedWaves.push('assess');
       await saveCheckpoint(workDir, state);
 
@@ -216,7 +224,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         toOutputFormat(SpecResultSchema),
       );
       await saveHandoff(workDir, handoff);
-      state.waveResults.spec = handoffToResult(handoff);
+      state.waveResults.spec = handoffToResult(handoff, waveProvider(config, 'spec'));
       state.completedWaves.push('spec');
       await saveCheckpoint(workDir, state);
 
@@ -278,7 +286,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           toOutputFormat(SpecResultSchema),
         );
         await saveHandoff(workDir, specHandoff);
-        state.waveResults.spec = handoffToResult(specHandoff);
+        state.waveResults.spec = handoffToResult(specHandoff, waveProvider(config, 'spec'));
 
         const retryTI = await runParallelPieceTILoop({
           issue,
@@ -314,7 +322,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         }),
       );
       await saveHandoff(workDir, handoff);
-      state.waveResults.quality = handoffToResult(handoff);
+      state.waveResults.quality = handoffToResult(handoff, waveProvider(config, 'quality'));
       state.completedWaves.push('quality');
       await saveCheckpoint(workDir, state);
 

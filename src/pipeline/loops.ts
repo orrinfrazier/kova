@@ -351,6 +351,7 @@ function toWaveResult(
     cost: number;
     turns: number;
     model?: string | undefined;
+    provider?: string | undefined;
     structuredOutput?: unknown;
   },
 ): WaveResult {
@@ -362,6 +363,7 @@ function toWaveResult(
     cost: execResult.cost,
     turns: execResult.turns,
     ...(execResult.model != null && { model: execResult.model }),
+    ...(execResult.provider != null && { provider: execResult.provider }),
   };
 }
 

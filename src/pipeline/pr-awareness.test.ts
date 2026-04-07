@@ -112,7 +112,8 @@ const mockRunParallelPieceTILoop = vi.fn();
 vi.mock('../ai/index.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../ai/index.js')>();
   return {
-    resolveModel: vi.fn().mockReturnValue({ id: 'test-model' }),
+    resolveWaveModel: vi.fn().mockReturnValue({ id: 'test-model', provider: 'anthropic' }),
+    isLocalProvider: actual.isLocalProvider,
     spawnWaveAgent: (...args: unknown[]) => mockSpawnWaveAgent(...args),
     getWaveTools: vi.fn().mockReturnValue([]),
     resolveThinkingLevel: actual.resolveThinkingLevel,

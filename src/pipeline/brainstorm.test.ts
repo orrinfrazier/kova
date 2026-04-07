@@ -6,7 +6,7 @@ import type { RepoConfig, WaveHandoff } from '../types/index.js';
 
 const mockSpawnWaveAgent = vi.fn();
 vi.mock('../ai/index.js', () => ({
-  resolveModel: vi.fn().mockReturnValue({ id: 'test-model' }),
+  resolveWaveModel: vi.fn().mockReturnValue({ id: 'test-model', provider: 'anthropic' }),
   spawnWaveAgent: (...args: unknown[]) => mockSpawnWaveAgent(...args),
   getWaveTools: vi.fn().mockReturnValue([]),
   resolveThinkingLevel: vi.fn().mockReturnValue('medium'),
