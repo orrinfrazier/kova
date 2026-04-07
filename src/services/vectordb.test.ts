@@ -394,9 +394,10 @@ describe('formatEpisodes', () => {
   });
 
   it('shows repo attribution when episodes have repo field and currentRepo given', () => {
+    const [ep0, ep1] = sampleEpisodes as [EpisodeContext, EpisodeContext];
     const episodesWithRepo: EpisodeContext[] = [
-      { ...sampleEpisodes[0]!, repo: 'my-repo', score: 0.9 },
-      { ...sampleEpisodes[1]!, repo: 'other-repo', score: 0.8 },
+      { ...ep0, repo: 'my-repo', score: 0.9 },
+      { ...ep1, repo: 'other-repo', score: 0.8 },
     ];
 
     const result = formatEpisodes(episodesWithRepo, 'my-repo');
@@ -406,7 +407,8 @@ describe('formatEpisodes', () => {
   });
 
   it('omits repo attribution when currentRepo is not provided', () => {
-    const episodesWithRepo: EpisodeContext[] = [{ ...sampleEpisodes[0]!, repo: 'my-repo', score: 0.9 }];
+    const [ep0] = sampleEpisodes as [EpisodeContext];
+    const episodesWithRepo: EpisodeContext[] = [{ ...ep0, repo: 'my-repo', score: 0.9 }];
 
     const result = formatEpisodes(episodesWithRepo);
 

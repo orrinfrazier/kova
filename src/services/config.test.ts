@@ -94,6 +94,21 @@ repos:
     expect(repo.isolation).toBe('docker');
   });
 
+  it('loads config with isolation: none for copilot mode', async () => {
+    const yaml = `
+repos:
+  copilot-repo:
+    path: /tmp/copilot
+    isolation: none
+`;
+    await writeFile(join(tempDir, 'repos.yaml'), yaml);
+
+    const config = await loadConfig(join(tempDir, 'repos.yaml'));
+    const repo = config.repos['copilot-repo'];
+    expect(repo).toBeDefined();
+    expect(repo?.isolation).toBe('none');
+  });
+
   it('loads config with per-wave thinking levels', async () => {
     const yaml = `
 repos:
