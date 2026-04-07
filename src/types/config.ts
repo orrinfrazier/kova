@@ -187,9 +187,27 @@ export type GitHubConfig = z.infer<typeof GitHubConfigSchema>;
 export const CiMergePolicySchema = z.enum(['require', 'warn']);
 export type CiMergePolicy = z.infer<typeof CiMergePolicySchema>;
 
+export const ABTestWaveNames = ['assess', 'spec', 'test', 'impl', 'quality', 'review'] as const;
+
+/** A/B test config: map wave names to arrays of variant names (at least 2 per wave). */
+export const ABTestConfigSchema = z
+  .object({
+    assess: z.array(z.string().min(1)).min(2).optional(),
+    spec: z.array(z.string().min(1)).min(2).optional(),
+    test: z.array(z.string().min(1)).min(2).optional(),
+    impl: z.array(z.string().min(1)).min(2).optional(),
+    quality: z.array(z.string().min(1)).min(2).optional(),
+    review: z.array(z.string().min(1)).min(2).optional(),
+  })
+  .refine((obj) => Object.values(obj).some((v) => v != null), {
+    message: 'At least one wave must have A/B test variants configured',
+  });
+export type ABTestConfig = z.infer<typeof ABTestConfigSchema>;
+
 export const RepoConfigSchema = z.object({
   path: z.string(),
   prompts_dir: z.string().optional(),
+  ab_test: ABTestConfigSchema.optional(),
   vectordb: VectorDBConfigSchema.optional(),
   episodes: EpisodicMemoryConfigSchema.optional(),
   repo_intel: RepoIntelConfigSchema.optional(),

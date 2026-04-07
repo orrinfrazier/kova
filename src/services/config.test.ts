@@ -96,6 +96,54 @@ repos:
     expect(repo.isolation).toBe('docker');
   });
 
+  it('loads config with ab_test field', async () => {
+    const yaml = `
+repos:
+  ab-repo:
+    path: /tmp/ab-repo
+    prompts_dir: ./custom-prompts
+    ab_test:
+      assess:
+        - v1
+        - v2
+      spec:
+        - control
+        - experiment
+`;
+    await writeFile(join(tempDir, 'repos.yaml'), yaml);
+
+    const config = await loadConfig(join(tempDir, 'repos.yaml'));
+    const repo = config.repos['ab-repo'];
+    expect(repo).toBeDefined();
+    expect(repo?.ab_test).toBeDefined();
+    expect(repo?.ab_test?.assess).toEqual(['v1', 'v2']);
+    expect(repo?.ab_test?.spec).toEqual(['control', 'experiment']);
+  });
+
+  it('rejects ab_test with fewer than 2 variants', async () => {
+    const yaml = `
+repos:
+  bad-ab:
+    path: /tmp/bad-ab
+    ab_test:
+      assess:
+        - v1
+`;
+    await writeFile(join(tempDir, 'repos.yaml'), yaml);
+
+    await expect(loadConfig(join(tempDir, 'repos.yaml'))).rejects.toThrow();
+  });
+
+  it('loads config without ab_test (backward compat)', async () => {
+    const yaml = `repos:\n  simple:\n    path: /tmp/simple\n`;
+    await writeFile(join(tempDir, 'repos.yaml'), yaml);
+
+    const config = await loadConfig(join(tempDir, 'repos.yaml'));
+    const repo = config.repos.simple;
+    expect(repo).toBeDefined();
+    expect(repo?.ab_test).toBeUndefined();
+  });
+
   it('loads config with isolation: none for copilot mode', async () => {
     const yaml = `
 repos:

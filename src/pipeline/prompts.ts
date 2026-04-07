@@ -120,11 +120,17 @@ async function loadDefaultPrompt(wave: string): Promise<string> {
   }
 }
 
+export interface LoadPromptOptions {
+  /** A/B test variant name for this wave. When set, loads {wave}.{variant}.md from promptsDir. */
+  abTestVariant?: string | undefined;
+}
+
 export async function loadPrompt(
   wave: string,
   customTools?: readonly CustomTool[],
   projectContextOrPromptsDir?: ProjectContext | string,
   promptsDirOrProjectContext?: string | ProjectContext,
+  options?: LoadPromptOptions,
 ): Promise<string> {
   // Resolve overloaded arguments: callers may pass (ProjectContext, promptsDir) or (promptsDir, ProjectContext)
   let projectContext: ProjectContext | undefined;
@@ -140,20 +146,24 @@ export async function loadPrompt(
 
   let prompt: string;
 
-  if (promptsDir) {
-    const customPath = path.join(promptsDir, `${wave}.md`);
+  if (promptsDir && options?.abTestVariant) {
+    // A/B test variant: load {wave}.{variant}.md from promptsDir
+    const variantFile = `${wave}.${options.abTestVariant}.md`;
+    const variantPath = path.join(promptsDir, variantFile);
     try {
-      const customContent = await fs.readFile(customPath, 'utf-8');
-      if (customContent.includes(DEFAULT_PROMPT_PLACEHOLDER)) {
+      const variantContent = await fs.readFile(variantPath, 'utf-8');
+      if (variantContent.includes(DEFAULT_PROMPT_PLACEHOLDER)) {
         const defaultPrompt = await loadDefaultPrompt(wave);
-        prompt = customContent.replaceAll(DEFAULT_PROMPT_PLACEHOLDER, defaultPrompt);
+        prompt = variantContent.replaceAll(DEFAULT_PROMPT_PLACEHOLDER, defaultPrompt);
       } else {
-        prompt = customContent;
+        prompt = variantContent;
       }
     } catch {
-      // Custom file doesn't exist for this wave — fall back to default
-      prompt = await loadDefaultPrompt(wave);
+      // Variant file doesn't exist — fall back to standard custom/default loading
+      prompt = await loadCustomOrDefault(wave, promptsDir);
     }
+  } else if (promptsDir) {
+    prompt = await loadCustomOrDefault(wave, promptsDir);
   } else {
     prompt = await loadDefaultPrompt(wave);
   }
@@ -167,6 +177,22 @@ export async function loadPrompt(
   }
 
   return prompt;
+}
+
+/** Load a custom prompt from promptsDir, falling back to built-in default. */
+async function loadCustomOrDefault(wave: string, promptsDir: string): Promise<string> {
+  const customPath = path.join(promptsDir, `${wave}.md`);
+  try {
+    const customContent = await fs.readFile(customPath, 'utf-8');
+    if (customContent.includes(DEFAULT_PROMPT_PLACEHOLDER)) {
+      const defaultPrompt = await loadDefaultPrompt(wave);
+      return customContent.replaceAll(DEFAULT_PROMPT_PLACEHOLDER, defaultPrompt);
+    }
+    return customContent;
+  } catch {
+    // Custom file doesn't exist for this wave — fall back to default
+    return loadDefaultPrompt(wave);
+  }
 }
 
 const TEMPLATE_VARS: Record<string, keyof ProjectContext> = {
