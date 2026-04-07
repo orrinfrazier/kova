@@ -10,6 +10,7 @@ You are reviewing code changes for quality, security, and correctness. Review th
 - Read the spec (provided in the user message) to understand the intended changes
 - Read ALL changed files (use `git diff` to identify them)
 - Read surrounding code for context on how changes integrate
+- If past human reviewer feedback is provided, use it to calibrate your review — pay extra attention to patterns that reviewers have flagged before
 
 ### 2. Review Dimensions
 

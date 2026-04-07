@@ -81,6 +81,7 @@ export interface ReviewLoopConfig {
   fileWriter?: FileWriter;
   prContext?: string;
   playwright?: { enabled: boolean } | undefined;
+  reviewFeedbackContext?: string;
 }
 
 export interface ReviewLoopResult {
@@ -787,6 +788,7 @@ export async function runReviewLoop(config: ReviewLoopConfig): Promise<ReviewLoo
     waveResults,
     maxIterations = 2,
     prContext,
+    reviewFeedbackContext,
     testRunner = defaultTestRunner,
     fileWriter = defaultFileWriter,
   } = config;
@@ -809,7 +811,9 @@ export async function runReviewLoop(config: ReviewLoopConfig): Promise<ReviewLoo
     const reviewExecResult = await executeWaveWithRetry({
       wave: 'review',
       systemPrompt: reviewSystemPrompt,
-      userMessage: buildWaveContext('review', issue, waveResults),
+      userMessage: buildWaveContext('review', issue, waveResults, {
+        ...(reviewFeedbackContext != null && { reviewFeedbackContext }),
+      }),
       cwd: workDir,
       modelTier: repoConfig.model.review,
       outputFormat: reviewOutputFormat(),
