@@ -661,3 +661,66 @@ describe('buildPieceContext', () => {
     expect(ctx).toContain('truncated');
   });
 });
+
+// --- Review feedback context (Piece 5 of #48) ---
+
+describe('review wave — past feedback injection', () => {
+  const reviewFeedbackContext =
+    '## Past Reviewer Feedback\n\n' +
+    '### PR #38: Token refresh logic\n' +
+    '- Reviewer flagged missing error boundary around refresh call\n' +
+    '- Suggestion: add retry with exponential backoff\n' +
+    '### PR #35: Auth middleware\n' +
+    '- Reviewer requested integration test coverage for edge cases';
+
+  it('includes reviewFeedbackContext in review wave when provided', () => {
+    const handoffs: Partial<Record<string, WaveResult>> = {
+      spec: makeWaveResult('spec', specArtifact),
+      quality: makeWaveResult('quality', qualityArtifact),
+    };
+    const ctx = buildWaveContext('review', makeIssue(), handoffs, { reviewFeedbackContext });
+
+    expect(ctx).toContain('Past Reviewer Feedback');
+    expect(ctx).toContain('PR #38: Token refresh logic');
+    expect(ctx).toContain('missing error boundary around refresh call');
+    expect(ctx).toContain('PR #35: Auth middleware');
+  });
+
+  it('omits feedback section when reviewFeedbackContext is undefined', () => {
+    const handoffs: Partial<Record<string, WaveResult>> = {
+      spec: makeWaveResult('spec', specArtifact),
+      quality: makeWaveResult('quality', qualityArtifact),
+    };
+    const ctx = buildWaveContext('review', makeIssue(), handoffs, {});
+
+    expect(ctx).not.toContain('Past Reviewer Feedback');
+  });
+
+  it('omits feedback section when reviewFeedbackContext is empty string', () => {
+    const handoffs: Partial<Record<string, WaveResult>> = {
+      spec: makeWaveResult('spec', specArtifact),
+      quality: makeWaveResult('quality', qualityArtifact),
+    };
+    const ctx = buildWaveContext('review', makeIssue(), handoffs, { reviewFeedbackContext: '' });
+
+    expect(ctx).not.toContain('Past Reviewer Feedback');
+  });
+
+  it('still includes spec summary and quality gates alongside feedback', () => {
+    const handoffs: Partial<Record<string, WaveResult>> = {
+      spec: makeWaveResult('spec', specArtifact),
+      quality: makeWaveResult('quality', qualityArtifact),
+    };
+    const ctx = buildWaveContext('review', makeIssue(), handoffs, { reviewFeedbackContext });
+
+    // Existing review context sections must still be present
+    expect(ctx).toContain('Spec Summary');
+    expect(ctx).toContain('Add token expiry check before API call');
+    expect(ctx).toContain('Quality Gates');
+    expect(ctx).toContain('lint: pass');
+    expect(ctx).toContain('coverage: 85%');
+
+    // And the feedback section is also present
+    expect(ctx).toContain('Past Reviewer Feedback');
+  });
+});

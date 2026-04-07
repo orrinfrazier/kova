@@ -34,3 +34,29 @@ export const PatternInsertSchema = z.object({
 });
 
 export type PatternInsert = z.infer<typeof PatternInsertSchema>;
+
+export const FeedbackTypeSchema = z.enum([
+  'style_issue',
+  'logic_error',
+  'missing_test',
+  'security_concern',
+  'performance',
+  'naming',
+  'architecture',
+  'documentation',
+]);
+
+export type FeedbackType = z.infer<typeof FeedbackTypeSchema>;
+
+export const ReviewFeedbackInsertSchema = z.object({
+  repo: z.string(),
+  pr_number: z.number().int(),
+  feedback_type: FeedbackTypeSchema,
+  comment_text: z.string(),
+  author: z.string(),
+  file_path: z.string().optional(),
+  line: z.number().int().optional(),
+  embedding: embedding1536,
+});
+
+export type ReviewFeedbackInsert = z.infer<typeof ReviewFeedbackInsertSchema>;
