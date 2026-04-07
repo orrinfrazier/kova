@@ -382,49 +382,62 @@ export async function executeWaveWithRetry(options: WaveOptions, maxRetries = 2)
 
 // --- Helpers ---
 
-function buildStructuredOutputInstructions(schema: Record<string, unknown>): string {
+export function buildStructuredOutputInstructions(schema: Record<string, unknown>): string {
   return [
     '## Required Output Format',
     '',
-    'Your FINAL message must be ONLY a valid JSON object matching this schema (no markdown fences, no explanation):',
+    'Your FINAL message must contain a valid JSON object matching this schema, wrapped in `<json>` tags:',
     '',
-    '```json',
+    '```',
     JSON.stringify(schema, null, 2),
     '```',
     '',
-    'Return ONLY the JSON object as your final message after completing all work.',
+    'Wrap your JSON output like this:',
+    '<json>',
+    '{ ... your JSON here ... }',
+    '</json>',
+    '',
+    'The `<json>` tags are REQUIRED. Do not include any text inside the tags other than the JSON object.',
   ].join('\n');
 }
 
-function parseStructuredOutput(text: string): unknown | undefined {
+export function parseStructuredOutput(text: string): unknown | undefined {
   const trimmed = text.trim();
+  if (!trimmed) return undefined;
 
-  // Try direct parse first
+  // 1. Primary: extract from <json>...</json> tags
+  const tagMatch = trimmed.match(/<json>([\s\S]*?)<\/json>/);
+  if (tagMatch?.[1]) {
+    try {
+      const result = JSON.parse(tagMatch[1].trim());
+      log.debug('[parse] Extracted structured output via json-tag');
+      return result;
+    } catch {
+      // Invalid JSON in tags — fall through to next method
+    }
+  }
+
+  // 2. Secondary: extract from markdown code fences
+  const fenceMatch = trimmed.match(/```(?:json)?\s*\n?([\s\S]*?)\n?\s*```/);
+  if (fenceMatch?.[1]) {
+    try {
+      const result = JSON.parse(fenceMatch[1].trim());
+      log.debug('[parse] Extracted structured output via markdown-fence');
+      return result;
+    } catch {
+      // Invalid JSON in fence — fall through
+    }
+  }
+
+  // 3. Tertiary: direct JSON parse of entire text
   try {
-    return JSON.parse(trimmed);
+    const result = JSON.parse(trimmed);
+    log.debug('[parse] Extracted structured output via direct-parse');
+    return result;
   } catch {
     // Not pure JSON
   }
 
-  // Try extracting from markdown code fences
-  const fenceMatch = trimmed.match(/```(?:json)?\s*\n?([\s\S]*?)\n?\s*```/);
-  if (fenceMatch?.[1]) {
-    try {
-      return JSON.parse(fenceMatch[1].trim());
-    } catch {
-      // Not valid JSON in fence
-    }
-  }
-
-  // Try finding the last JSON object in the text
-  const jsonMatch = trimmed.match(/\{[\s\S]*\}/);
-  if (jsonMatch) {
-    try {
-      return JSON.parse(jsonMatch[0]);
-    } catch {
-      // Not valid JSON
-    }
-  }
-
+  // No greedy regex fallback — return undefined if none of the above worked
   return undefined;
 }
