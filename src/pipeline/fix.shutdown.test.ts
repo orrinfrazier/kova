@@ -55,10 +55,10 @@ vi.mock('../ai/index.js', async (importOriginal) => {
   };
 });
 
-const mockRunTILoop = vi.fn();
+const mockRunParallelPieceTILoop = vi.fn();
 const mockRunReviewLoop = vi.fn();
 vi.mock('./loops.js', () => ({
-  runTILoop: (...args: unknown[]) => mockRunTILoop(...args),
+  runParallelPieceTILoop: (...args: unknown[]) => mockRunParallelPieceTILoop(...args),
   runReviewLoop: (...args: unknown[]) => mockRunReviewLoop(...args),
 }));
 
@@ -125,12 +125,14 @@ function setupDefaultMocks(): void {
     return makeHandoff(config.wave, artifacts[config.wave] ?? 'done');
   });
 
-  mockRunTILoop.mockResolvedValue({
+  mockRunParallelPieceTILoop.mockResolvedValue({
     testWaveResult: makeWaveResult('test', 'tests written'),
     implWaveResult: makeWaveResult('impl', { tests_passing: true }),
     testsPassing: true,
     totalCost: 0.02,
     attempts: 1,
+    pieceResults: [],
+    modifiedFilesPerAttempt: [],
   });
 
   mockRunReviewLoop.mockResolvedValue({

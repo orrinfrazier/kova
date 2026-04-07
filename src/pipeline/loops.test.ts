@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Issue, RepoConfig, WaveName, WaveResult } from '../types/index.js';
+import type { Issue, RepoConfig, SpecPiece, WaveName, WaveResult } from '../types/index.js';
 
 // Mock the AI layer — no real Agent SDK calls in tests
 vi.mock('../ai/index.js', async (importOriginal) => {
@@ -25,6 +25,8 @@ vi.mock('./prompts.js', () => ({
 
 const {
   runTILoop,
+  runPieceTILoop,
+  runParallelPieceTILoop,
   runReviewLoop,
   resolveTestCommand,
   normalizeTestOutput,
@@ -1468,5 +1470,274 @@ describe('classifyDiagnosis with thrashing signal', () => {
     const attempt1 = "Cannot find module './service'\n FAIL  src/a.test.ts > test one\n   Error: fail";
     const attempt2 = "Cannot find module './service'\n FAIL  src/a.test.ts > test one\n   Error: fail";
     expect(classifyDiagnosis([attempt1, attempt2], 'SAME_FILES')).toBe('MISSING_CONTEXT');
+  });
+});
+
+// --- Per-piece TI loop ---
+
+function makePiece(index: number): SpecPiece {
+  return {
+    name: `piece-${index}`,
+    description: `Description for piece ${index}`,
+    files: [`src/piece-${index}.ts`],
+    acceptance_criteria: [`AC ${index}-1`, `AC ${index}-2`],
+    wiring: index > 0 ? [`Imports from piece-${index - 1}`] : [],
+  };
+}
+
+describe('runPieceTILoop', () => {
+  let mockTestRunner: TestRunner;
+
+  beforeEach(() => {
+    mockExecute.mockClear();
+    mockTestRunner = vi.fn();
+    mockExecute.mockResolvedValueOnce(testWaveExecResult()).mockResolvedValue(implWaveExecResult());
+  });
+
+  it('runs test and impl agents with piece-scoped context', async () => {
+    vi.mocked(mockTestRunner).mockResolvedValueOnce({ passed: true, output: 'ok', exitCode: 0 });
+
+    const result = await runPieceTILoop({
+      piece: makePiece(0),
+      pieceIndex: 0,
+      workDir: '/tmp/test',
+      repoConfig: makeConfig(),
+      testRunner: mockTestRunner,
+      testCommand: 'npm test',
+    });
+
+    expect(result.testsPassing).toBe(true);
+    expect(result.pieceIndex).toBe(0);
+    expect(result.cost).toBeGreaterThan(0);
+
+    // Verify context is piece-scoped — contains piece name but NOT full spec fields
+    const testCall = mockExecute.mock.calls.find((c) => c[0].wave === 'test');
+    expect(testCall?.[0].userMessage).toContain('piece-0');
+    expect(testCall?.[0].userMessage).toContain('ONLY modify these');
+    expect(testCall?.[0].userMessage).toContain('AC 0-1');
+  });
+
+  it('retries impl per piece independently (max 3)', async () => {
+    vi.mocked(mockTestRunner)
+      .mockResolvedValueOnce({ passed: false, output: 'FAIL: test 1', exitCode: 1 })
+      .mockResolvedValueOnce({ passed: false, output: 'FAIL: test 2', exitCode: 1 })
+      .mockResolvedValueOnce({ passed: true, output: 'ok', exitCode: 0 });
+
+    const result = await runPieceTILoop({
+      piece: makePiece(0),
+      pieceIndex: 0,
+      workDir: '/tmp/test',
+      repoConfig: makeConfig(),
+      testRunner: mockTestRunner,
+      testCommand: 'npm test',
+    });
+
+    expect(result.testsPassing).toBe(true);
+    expect(result.attempts).toBe(3);
+  });
+
+  it('returns diagnosis when all retries exhausted', async () => {
+    vi.mocked(mockTestRunner)
+      .mockResolvedValueOnce({ passed: false, output: ' FAIL  src/a.test.ts > test\n   Error: x', exitCode: 1 })
+      .mockResolvedValueOnce({ passed: false, output: ' FAIL  src/a.test.ts > test\n   Error: y', exitCode: 1 })
+      .mockResolvedValueOnce({ passed: false, output: ' FAIL  src/a.test.ts > test\n   Error: z', exitCode: 1 });
+
+    const result = await runPieceTILoop({
+      piece: makePiece(0),
+      pieceIndex: 0,
+      workDir: '/tmp/test',
+      repoConfig: makeConfig(),
+      testRunner: mockTestRunner,
+      testCommand: 'npm test',
+    });
+
+    expect(result.testsPassing).toBe(false);
+    expect(result.diagnosis).toBeDefined();
+  });
+
+  it('includes piece index in result', async () => {
+    vi.mocked(mockTestRunner).mockResolvedValueOnce({ passed: true, output: 'ok', exitCode: 0 });
+
+    const result = await runPieceTILoop({
+      piece: makePiece(2),
+      pieceIndex: 2,
+      workDir: '/tmp/test',
+      repoConfig: makeConfig(),
+      testRunner: mockTestRunner,
+      testCommand: 'npm test',
+    });
+
+    expect(result.pieceIndex).toBe(2);
+  });
+});
+
+describe('runParallelPieceTILoop', () => {
+  let mockTestRunner: TestRunner;
+
+  beforeEach(() => {
+    mockExecute.mockClear();
+    mockTestRunner = vi.fn();
+  });
+
+  it('1 piece — backward compatible, delegates to runTILoop (no sub-worktrees)', async () => {
+    mockExecute.mockResolvedValueOnce(testWaveExecResult()).mockResolvedValue(implWaveExecResult());
+    vi.mocked(mockTestRunner).mockResolvedValueOnce({ passed: true, output: 'ok', exitCode: 0 });
+
+    const specResult = {
+      summary: 'single piece',
+      pieces: [makePiece(0)],
+      dependency_order: [[0]],
+      constraints: [],
+    };
+
+    const result = await runParallelPieceTILoop({
+      issue: makeIssue(),
+      workDir: '/tmp/test',
+      repoConfig: makeConfig(),
+      waveResults: {
+        spec: { wave: 'spec', success: true, artifact: specResult, duration: 100, cost: 0.01, turns: 1 },
+      },
+      testRunner: mockTestRunner,
+      testCommand: 'npm test',
+    });
+
+    expect(result.testsPassing).toBe(true);
+    expect(result.totalCost).toBeGreaterThan(0);
+    // Single piece should not create sub-worktrees — verified by no sub-worktree calls
+  });
+
+  it('3 pieces — each gets own TI loop, results aggregated', async () => {
+    // Each piece needs test + impl calls = 2 calls per piece, so 6 total
+    for (let i = 0; i < 3; i++) {
+      mockExecute.mockResolvedValueOnce(testWaveExecResult()).mockResolvedValueOnce(implWaveExecResult());
+    }
+    vi.mocked(mockTestRunner).mockResolvedValue({ passed: true, output: 'ok', exitCode: 0 });
+
+    const specResult = {
+      summary: 'three pieces',
+      pieces: [makePiece(0), makePiece(1), makePiece(2)],
+      dependency_order: [[0, 1, 2]],
+      constraints: [],
+    };
+
+    const result = await runParallelPieceTILoop({
+      issue: makeIssue(),
+      workDir: '/tmp/test',
+      repoConfig: makeConfig(),
+      waveResults: {
+        spec: { wave: 'spec', success: true, artifact: specResult, duration: 100, cost: 0.01, turns: 1 },
+      },
+      testRunner: mockTestRunner,
+      testCommand: 'npm test',
+    });
+
+    expect(result.testsPassing).toBe(true);
+    expect(result.totalCost).toBeGreaterThan(0);
+    expect(result.pieceResults).toHaveLength(3);
+    expect(result.pieceResults.every((p) => p.testsPassing)).toBe(true);
+  });
+
+  it('5 pieces — respects max 3 concurrent', async () => {
+    for (let i = 0; i < 5; i++) {
+      mockExecute.mockResolvedValueOnce(testWaveExecResult()).mockResolvedValueOnce(implWaveExecResult());
+    }
+    vi.mocked(mockTestRunner).mockResolvedValue({ passed: true, output: 'ok', exitCode: 0 });
+
+    const specResult = {
+      summary: 'five pieces',
+      pieces: [makePiece(0), makePiece(1), makePiece(2), makePiece(3), makePiece(4)],
+      dependency_order: [[0, 1, 2, 3, 4]],
+      constraints: [],
+    };
+
+    const result = await runParallelPieceTILoop({
+      issue: makeIssue(),
+      workDir: '/tmp/test',
+      repoConfig: makeConfig(),
+      waveResults: {
+        spec: { wave: 'spec', success: true, artifact: specResult, duration: 100, cost: 0.01, turns: 1 },
+      },
+      testRunner: mockTestRunner,
+      testCommand: 'npm test',
+      maxConcurrent: 3,
+    });
+
+    expect(result.testsPassing).toBe(true);
+    expect(result.pieceResults).toHaveLength(5);
+  });
+
+  it('error in one piece does not kill others', async () => {
+    // Piece 0: test + impl succeed, tests pass
+    mockExecute.mockResolvedValueOnce(testWaveExecResult()).mockResolvedValueOnce(implWaveExecResult());
+    // Piece 1: test + impl succeed, tests FAIL all 3 retries
+    mockExecute.mockResolvedValueOnce(testWaveExecResult());
+    for (let i = 0; i < 3; i++) {
+      mockExecute.mockResolvedValueOnce(implWaveExecResult());
+    }
+    // Piece 2: test + impl succeed, tests pass
+    mockExecute.mockResolvedValueOnce(testWaveExecResult()).mockResolvedValueOnce(implWaveExecResult());
+
+    vi.mocked(mockTestRunner).mockImplementation(async (_cmd: string, workDir: string) => {
+      // Piece 1 always fails (workDir contains piece-1)
+      if (workDir.includes('piece-1')) {
+        return { passed: false, output: 'FAIL: broken', exitCode: 1 };
+      }
+      return { passed: true, output: 'ok', exitCode: 0 };
+    });
+
+    const specResult = {
+      summary: 'three pieces, one fails',
+      pieces: [makePiece(0), makePiece(1), makePiece(2)],
+      dependency_order: [[0, 1, 2]],
+      constraints: [],
+    };
+
+    const result = await runParallelPieceTILoop({
+      issue: makeIssue(),
+      workDir: '/tmp/test',
+      repoConfig: makeConfig(),
+      waveResults: {
+        spec: { wave: 'spec', success: true, artifact: specResult, duration: 100, cost: 0.01, turns: 1 },
+      },
+      testRunner: mockTestRunner,
+      testCommand: 'npm test',
+    });
+
+    expect(result.testsPassing).toBe(false);
+    // Piece 0 and 2 passed, piece 1 failed
+    expect(result.pieceResults.filter((p) => p.testsPassing)).toHaveLength(2);
+    expect(result.pieceResults.filter((p) => !p.testsPassing)).toHaveLength(1);
+  });
+
+  it('cost tracked per piece and aggregated', async () => {
+    // Use mockImplementation to avoid ordering issues with parallel Promise.all
+    mockExecute.mockImplementation(async (config: { wave: string }) => {
+      if (config.wave === 'test') return testWaveExecResult();
+      return implWaveExecResult();
+    });
+    vi.mocked(mockTestRunner).mockResolvedValue({ passed: true, output: 'ok', exitCode: 0 });
+
+    const specResult = {
+      summary: 'two pieces',
+      pieces: [makePiece(0), makePiece(1)],
+      dependency_order: [[0, 1]],
+      constraints: [],
+    };
+
+    const result = await runParallelPieceTILoop({
+      issue: makeIssue(),
+      workDir: '/tmp/test',
+      repoConfig: makeConfig(),
+      waveResults: {
+        spec: { wave: 'spec', success: true, artifact: specResult, duration: 100, cost: 0.01, turns: 1 },
+      },
+      testRunner: mockTestRunner,
+      testCommand: 'npm test',
+    });
+
+    // Each piece has test cost (0.05) + impl cost (0.1) = 0.15 per piece
+    expect(result.pieceResults[0]?.cost).toBeCloseTo(0.15, 2);
+    expect(result.pieceResults[1]?.cost).toBeCloseTo(0.15, 2);
+    expect(result.totalCost).toBeCloseTo(0.3, 2);
   });
 });

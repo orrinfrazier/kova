@@ -107,7 +107,7 @@ describe('extractPRFromResult', () => {
 // --- Module-level mocks for fix() pipeline tests ---
 
 const mockSpawnWaveAgent = vi.fn();
-const mockRunTILoop = vi.fn();
+const mockRunParallelPieceTILoop = vi.fn();
 
 vi.mock('../ai/index.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../ai/index.js')>();
@@ -120,7 +120,7 @@ vi.mock('../ai/index.js', async (importOriginal) => {
 });
 
 vi.mock('./loops.js', () => ({
-  runTILoop: (...args: unknown[]) => mockRunTILoop(...args),
+  runParallelPieceTILoop: (...args: unknown[]) => mockRunParallelPieceTILoop(...args),
   runReviewLoop: vi.fn().mockResolvedValue({
     reviewWaveResult: {
       wave: 'review',
@@ -193,7 +193,7 @@ describe('fix — PR context injection', () => {
             : { lint: 'pass', typecheck: 'pass', tests: 'pass', coverage: 90, audit: 'pass', all_passing: true },
       approach_notes: '',
     }));
-    mockRunTILoop.mockResolvedValue({
+    mockRunParallelPieceTILoop.mockResolvedValue({
       testWaveResult: {
         wave: 'test',
         success: true,
@@ -215,6 +215,8 @@ describe('fix — PR context injection', () => {
       testsPassing: true,
       totalCost: 0.02,
       attempts: 1,
+      pieceResults: [],
+      modifiedFilesPerAttempt: [],
     });
   }
 
@@ -264,7 +266,7 @@ describe('fix — PR context injection', () => {
     try {
       const { fix } = await import('./fix.js');
       setupMocks();
-      mockRunTILoop.mockClear();
+      mockRunParallelPieceTILoop.mockClear();
 
       const pendingPRs: OpenPR[] = [
         { number: 11, title: 'Add logger', branch: 'kova/fix-11', files: ['src/logger.ts'] },
@@ -284,8 +286,8 @@ describe('fix — PR context injection', () => {
       });
 
       // impl runs via runTILoop — check prContext is passed in config
-      expect(mockRunTILoop).toHaveBeenCalled();
-      const tiConfig = mockRunTILoop.mock.calls[0]?.[0] as { prContext?: string };
+      expect(mockRunParallelPieceTILoop).toHaveBeenCalled();
+      const tiConfig = mockRunParallelPieceTILoop.mock.calls[0]?.[0] as { prContext?: string };
       expect(tiConfig.prContext).toBeDefined();
       expect(tiConfig.prContext).toContain('Pending PRs');
       expect(tiConfig.prContext).toContain('#11');
