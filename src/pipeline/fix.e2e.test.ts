@@ -635,6 +635,114 @@ describe('fix — E2E with mock pi-mono', () => {
     });
   });
 
+  describe('provider selection per wave', () => {
+    it('resolves correct provider from model tier for each wave', async () => {
+      setupResponseSequence(happyPathResponses());
+
+      await fix({
+        issue: makeIssue(7),
+        repoPath: workDir,
+        repoName: 'test-repo',
+        config: makeConfig(),
+        testRunner: mockTestRunner,
+      });
+
+      // Default config: large→opus (anthropic), medium→sonnet (anthropic), small→haiku (anthropic)
+      // Wave order: assess(large), spec(large), test(medium), impl(medium), quality(small), review(large)
+      const providers = mockAgentConstructor.mock.calls.map(
+        (c: unknown[]) => (c[0] as { initialState: { model: { provider: string } } }).initialState.model.provider,
+      );
+      expect(providers).toHaveLength(6);
+      for (const provider of providers) {
+        expect(provider).toBe('anthropic');
+      }
+    });
+
+    it('maps model tiers to distinct providers per wave role', async () => {
+      setupResponseSequence(happyPathResponses());
+
+      await fix({
+        issue: makeIssue(7),
+        repoPath: workDir,
+        repoName: 'test-repo',
+        config: makeConfig(),
+        testRunner: mockTestRunner,
+      });
+
+      // Verify that each wave resolves the full model object (not just a string)
+      // and the provider matches the tier's resolved provider
+      const models = mockAgentConstructor.mock.calls.map((c: unknown[]) => {
+        const model = (c[0] as { initialState: { model: { provider: string; id: string } } }).initialState.model;
+        return { provider: model.provider, id: model.id };
+      });
+
+      // large tier waves (assess, spec, review) share one provider+model
+      expect(models[0]?.provider).toBe(models[1]?.provider); // assess == spec
+      expect(models[0]?.provider).toBe(models[5]?.provider); // assess == review
+      expect(models[0]?.id).toBe(models[1]?.id);
+      expect(models[0]?.id).toBe(models[5]?.id);
+
+      // medium tier waves (test, impl) share one provider+model
+      expect(models[2]?.provider).toBe(models[3]?.provider); // test == impl
+      expect(models[2]?.id).toBe(models[3]?.id);
+
+      // small tier (quality) is distinct from large and medium
+      expect(models[4]?.id).not.toBe(models[0]?.id); // quality != large
+      expect(models[4]?.id).not.toBe(models[2]?.id); // quality != medium
+    });
+  });
+
+  describe('tool restriction per wave', () => {
+    it('passes correct tool set to Agent for each wave', async () => {
+      setupResponseSequence(happyPathResponses());
+
+      await fix({
+        issue: makeIssue(7),
+        repoPath: workDir,
+        repoName: 'test-repo',
+        config: makeConfig(),
+        testRunner: mockTestRunner,
+      });
+
+      const toolSets = mockAgentConstructor.mock.calls.map((c: unknown[]) =>
+        (c[0] as { initialState: { tools: Array<{ name: string }> } }).initialState.tools.map((t) => t.name),
+      );
+
+      // Wave order: assess, spec, test, impl, quality, review
+      expect(toolSets[0]).toEqual(['read', 'find', 'grep']); // assess: read-only
+      expect(toolSets[1]).toEqual(['read', 'find', 'grep']); // spec: read-only
+      expect(toolSets[2]).toEqual(['read', 'write', 'edit', 'bash']); // test: coding tools
+      expect(toolSets[3]).toEqual(['read', 'write', 'edit', 'bash']); // impl: coding tools
+      expect(toolSets[4]).toEqual(['bash', 'read']); // quality: bash + read
+      expect(toolSets[5]).toEqual(['read', 'grep']); // review: read-only subset
+    });
+
+    it('read-only waves cannot write or execute', async () => {
+      setupResponseSequence(happyPathResponses());
+
+      await fix({
+        issue: makeIssue(7),
+        repoPath: workDir,
+        repoName: 'test-repo',
+        config: makeConfig(),
+        testRunner: mockTestRunner,
+      });
+
+      const toolSets = mockAgentConstructor.mock.calls.map((c: unknown[]) =>
+        (c[0] as { initialState: { tools: Array<{ name: string }> } }).initialState.tools.map((t) => t.name),
+      );
+
+      // assess (0), spec (1), review (5) must not have write/edit/bash
+      const readOnlyIndices = [0, 1, 5];
+      const dangerousTools = ['write', 'edit', 'bash'];
+      for (const idx of readOnlyIndices) {
+        for (const tool of dangerousTools) {
+          expect(toolSets[idx]).not.toContain(tool);
+        }
+      }
+    });
+  });
+
   describe('assess gate', () => {
     it('stops pipeline when assess says should_proceed=false', async () => {
       setupResponseSequence([{ structuredOutput: ASSESS_FAIL, cost: 0.05 }]);
