@@ -663,6 +663,70 @@ repos:
 });
 
 /* ------------------------------------------------------------------ */
+/*  sandbox resource limits config                                     */
+/* ------------------------------------------------------------------ */
+
+describe('sandbox resource limits config', () => {
+  it('loads sandbox config with resource limits', async () => {
+    const yaml = `
+repos:
+  sandbox-repo:
+    path: /tmp/sandbox
+    isolation: docker
+    sandbox:
+      image: node:20-bookworm
+      cpus: 4
+      memory: 8g
+      timeout: 1h
+`;
+    await writeFile(join(tempDir, 'repos.yaml'), yaml);
+
+    const config = await loadConfig(join(tempDir, 'repos.yaml'));
+    const repo = config.repos['sandbox-repo'];
+    expect(repo).toBeDefined();
+    if (!repo) return;
+
+    expect(repo.sandbox?.cpus).toBe(4);
+    expect(repo.sandbox?.memory).toBe('8g');
+    expect(repo.sandbox?.timeout).toBe('1h');
+  });
+
+  it('applies default resource limits when not specified', async () => {
+    const yaml = `
+repos:
+  default-sandbox:
+    path: /tmp/sandbox
+    isolation: docker
+    sandbox:
+      image: ubuntu:22.04
+`;
+    await writeFile(join(tempDir, 'repos.yaml'), yaml);
+
+    const config = await loadConfig(join(tempDir, 'repos.yaml'));
+    const repo = config.repos['default-sandbox'];
+    expect(repo).toBeDefined();
+    if (!repo) return;
+
+    expect(repo.sandbox?.cpus).toBe(2);
+    expect(repo.sandbox?.memory).toBe('4g');
+    expect(repo.sandbox?.timeout).toBe('30m');
+  });
+
+  it('rejects non-positive cpus', async () => {
+    const yaml = `
+repos:
+  bad-sandbox:
+    path: /tmp/bad
+    sandbox:
+      cpus: 0
+`;
+    await writeFile(join(tempDir, 'repos.yaml'), yaml);
+
+    await expect(loadConfig(join(tempDir, 'repos.yaml'))).rejects.toThrow(ZodError);
+  });
+});
+
+/* ------------------------------------------------------------------ */
 /*  detectRepoName                                                     */
 /* ------------------------------------------------------------------ */
 
