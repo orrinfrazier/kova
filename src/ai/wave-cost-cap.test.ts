@@ -1,8 +1,4 @@
-import type { AgentTool } from '@mariozechner/pi-agent-core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-
-// biome-ignore lint/suspicious/noExplicitAny: pi-mono AgentTool uses any for tool parameter schemas
-type AnyTool = AgentTool<any>;
 
 const mockPrompt = vi.fn();
 const mockAbort = vi.fn();

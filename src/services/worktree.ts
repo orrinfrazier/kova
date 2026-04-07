@@ -48,6 +48,58 @@ export async function createWorktree(repoPath: string, issueNumber: number): Pro
   return { path: wtPath, branch };
 }
 
+export interface SubWorktree {
+  path: string;
+  branch: string;
+}
+
+export function subWorktreePath(fixWorktreePath: string, issueNumber: number, pieceIndex: number): string {
+  return path.join(fixWorktreePath, '..', `fix-${issueNumber}-piece-${pieceIndex}`);
+}
+
+export async function createSubWorktree(
+  fixWorktreePath: string,
+  issueNumber: number,
+  pieceIndex: number,
+): Promise<SubWorktree> {
+  const branch = `kova/fix-${issueNumber}-piece-${pieceIndex}`;
+  const swPath = subWorktreePath(fixWorktreePath, issueNumber, pieceIndex);
+  const fixBranch = (await $`git -C ${fixWorktreePath} rev-parse --abbrev-ref HEAD`).stdout.trim();
+
+  // Create branch from the fix branch
+  try {
+    await $`git -C ${fixWorktreePath} branch ${branch} ${fixBranch}`;
+  } catch {
+    log.debug(`Branch ${branch} already exists`);
+  }
+
+  // Create sub-worktree
+  try {
+    await $`git -C ${fixWorktreePath} worktree add ${swPath} ${branch}`;
+    log.info(`Sub-worktree created: ${swPath} (${branch})`);
+  } catch {
+    log.debug(`Sub-worktree already exists at ${swPath}`);
+  }
+
+  return { path: swPath, branch };
+}
+
+export async function removeSubWorktree(repoPath: string, swPath: string, branch: string): Promise<void> {
+  try {
+    await $`git -C ${repoPath} worktree remove ${swPath} --force`;
+    log.info(`Sub-worktree removed: ${swPath}`);
+  } catch (error) {
+    log.warn(`Failed to remove sub-worktree: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  try {
+    await $`git -C ${repoPath} branch -D ${branch}`;
+    log.info(`Sub-worktree branch deleted: ${branch}`);
+  } catch (error) {
+    log.warn(`Failed to delete branch ${branch}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 export async function removeWorktree(repoPath: string, worktreePath: string): Promise<void> {
   try {
     await $`git -C ${repoPath} worktree remove ${worktreePath} --force`;
