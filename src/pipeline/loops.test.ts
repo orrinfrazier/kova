@@ -30,6 +30,7 @@ const {
   normalizeTestOutput,
   extractFailingTestNames,
   classifyDiagnosis,
+  detectThrashing,
 } = await import('./loops.js');
 const { executeWaveWithRetry } = await import('../ai/index.js');
 const { detectTooling } = await import('../services/language-detect.js');
@@ -1258,5 +1259,214 @@ describe('runReviewLoop', () => {
     expect(reviewCall?.[0].modelTier).toBe('large');
     expect(implCall?.[0].modelTier).toBe('medium');
     expect(qualityCall?.[0].modelTier).toBe('small');
+  });
+});
+
+// --- detectThrashing tests ---
+
+describe('detectThrashing', () => {
+  it('returns INSUFFICIENT_DATA when fewer than 2 attempts', () => {
+    expect(detectThrashing([])).toBe('INSUFFICIENT_DATA');
+    expect(detectThrashing([['src/a.ts']])).toBe('INSUFFICIENT_DATA');
+  });
+
+  it('returns SAME_FILES when identical files modified across all attempts', () => {
+    const attempts = [
+      ['src/auth.ts', 'src/handler.ts'],
+      ['src/auth.ts', 'src/handler.ts'],
+      ['src/auth.ts', 'src/handler.ts'],
+    ];
+    expect(detectThrashing(attempts)).toBe('SAME_FILES');
+  });
+
+  it('returns SAME_FILES when overlap is >= 80%', () => {
+    const attempts = [
+      ['src/a.ts', 'src/b.ts', 'src/c.ts', 'src/d.ts', 'src/e.ts'],
+      ['src/a.ts', 'src/b.ts', 'src/c.ts', 'src/d.ts', 'src/f.ts'], // 4/5 = 80%
+    ];
+    expect(detectThrashing(attempts)).toBe('SAME_FILES');
+  });
+
+  it('returns DIFFERENT_FILES when overlap is < 20%', () => {
+    const attempts = [
+      ['src/a.ts', 'src/b.ts', 'src/c.ts', 'src/d.ts', 'src/e.ts'],
+      ['src/f.ts', 'src/g.ts', 'src/h.ts', 'src/i.ts', 'src/j.ts'], // 0/5 = 0%
+    ];
+    expect(detectThrashing(attempts)).toBe('DIFFERENT_FILES');
+  });
+
+  it('returns NORMAL for partial overlap between 20% and 80%', () => {
+    const attempts = [
+      ['src/a.ts', 'src/b.ts', 'src/c.ts', 'src/d.ts'],
+      ['src/a.ts', 'src/b.ts', 'src/e.ts', 'src/f.ts'], // 2/4 = 50%
+    ];
+    expect(detectThrashing(attempts)).toBe('NORMAL');
+  });
+
+  it('handles empty file lists within attempts', () => {
+    const attempts = [[], []];
+    // No files modified at all — insufficient signal, treat as INSUFFICIENT_DATA
+    expect(detectThrashing(attempts)).toBe('INSUFFICIENT_DATA');
+  });
+
+  it('compares all pairs, not just adjacent attempts', () => {
+    // Attempt 1 and 3 match, but attempt 2 is completely different
+    const attempts = [
+      ['src/a.ts', 'src/b.ts'],
+      ['src/x.ts', 'src/y.ts'],
+      ['src/a.ts', 'src/b.ts'],
+    ];
+    // Average overlap across consecutive pairs: (0% + 0%) / 2 = not SAME_FILES
+    expect(detectThrashing(attempts)).not.toBe('SAME_FILES');
+  });
+});
+
+// --- TILoop modified files tracking tests ---
+
+describe('runTILoop — modified files tracking', () => {
+  let mockTestRunner: TestRunner;
+  type DiffRunner = (workDir: string) => Promise<string[]>;
+  let mockDiffRunner: DiffRunner;
+
+  beforeEach(() => {
+    mockExecute.mockReset();
+    mockTestRunner = vi.fn();
+    mockDiffRunner = vi.fn();
+    mockExecute.mockResolvedValueOnce(testWaveExecResult()).mockResolvedValue(implWaveExecResult());
+  });
+
+  it('captures modified files per attempt via diffRunner', async () => {
+    vi.mocked(mockDiffRunner)
+      .mockResolvedValueOnce(['src/auth.ts', 'src/handler.ts'])
+      .mockResolvedValueOnce(['src/auth.ts', 'src/handler.ts']);
+
+    vi.mocked(mockTestRunner)
+      .mockResolvedValueOnce({ passed: false, output: 'fail', exitCode: 1 })
+      .mockResolvedValueOnce({ passed: true, output: 'ok', exitCode: 0 });
+
+    const result = await runTILoop({
+      issue: makeIssue(),
+      workDir: '/tmp/test',
+      repoConfig: makeConfig(),
+      waveResults: {},
+      testRunner: mockTestRunner,
+      diffRunner: mockDiffRunner,
+      testCommand: 'npm test',
+    });
+
+    expect(result.modifiedFilesPerAttempt).toEqual([
+      ['src/auth.ts', 'src/handler.ts'],
+      ['src/auth.ts', 'src/handler.ts'],
+    ]);
+  });
+
+  it('includes modifiedFilesPerAttempt even when tests pass on first attempt', async () => {
+    vi.mocked(mockDiffRunner).mockResolvedValueOnce(['src/auth.ts']);
+    vi.mocked(mockTestRunner).mockResolvedValueOnce({ passed: true, output: 'ok', exitCode: 0 });
+
+    const result = await runTILoop({
+      issue: makeIssue(),
+      workDir: '/tmp/test',
+      repoConfig: makeConfig(),
+      waveResults: {},
+      testRunner: mockTestRunner,
+      diffRunner: mockDiffRunner,
+      testCommand: 'npm test',
+    });
+
+    expect(result.modifiedFilesPerAttempt).toEqual([['src/auth.ts']]);
+  });
+
+  it('returns thrashingSignal in result when all attempts fail', async () => {
+    // Same files every time → SAME_FILES thrashing
+    vi.mocked(mockDiffRunner)
+      .mockResolvedValueOnce(['src/auth.ts'])
+      .mockResolvedValueOnce(['src/auth.ts'])
+      .mockResolvedValueOnce(['src/auth.ts']);
+
+    vi.mocked(mockTestRunner).mockResolvedValue({ passed: false, output: 'fail', exitCode: 1 });
+
+    const result = await runTILoop({
+      issue: makeIssue(),
+      workDir: '/tmp/test',
+      repoConfig: makeConfig(),
+      waveResults: {},
+      testRunner: mockTestRunner,
+      diffRunner: mockDiffRunner,
+      testCommand: 'npm test',
+    });
+
+    expect(result.thrashingSignal).toBe('SAME_FILES');
+    expect(result.modifiedFilesPerAttempt).toHaveLength(3);
+  });
+
+  it('passes thrashing signal to classifyDiagnosis when all attempts fail', async () => {
+    // Different files each time → DIFFERENT_FILES
+    vi.mocked(mockDiffRunner)
+      .mockResolvedValueOnce(['src/a.ts'])
+      .mockResolvedValueOnce(['src/b.ts'])
+      .mockResolvedValueOnce(['src/c.ts']);
+
+    // Same test name → would normally be SPEC_WRONG, but DIFFERENT_FILES thrashing should bias to STUCK
+    const sameTestFail = ' FAIL  src/auth.test.ts > AuthService > validates expired tokens\n   Error: fail';
+    vi.mocked(mockTestRunner).mockResolvedValue({ passed: false, output: sameTestFail, exitCode: 1 });
+
+    const result = await runTILoop({
+      issue: makeIssue(),
+      workDir: '/tmp/test',
+      repoConfig: makeConfig(),
+      waveResults: {},
+      testRunner: mockTestRunner,
+      diffRunner: mockDiffRunner,
+      testCommand: 'npm test',
+    });
+
+    expect(result.thrashingSignal).toBe('DIFFERENT_FILES');
+    expect(result.diagnosis).toBe('STUCK');
+  });
+});
+
+// --- classifyDiagnosis with thrashing signal ---
+
+describe('classifyDiagnosis with thrashing signal', () => {
+  it('existing behavior unchanged when no thrashing signal', () => {
+    const attempt1 = ' FAIL  src/a.test.ts > suite > test one\n   Error: fail';
+    const attempt2 = ' FAIL  src/a.test.ts > suite > test one\n   Error: fail';
+    expect(classifyDiagnosis([attempt1, attempt2])).toBe('SPEC_WRONG');
+    expect(classifyDiagnosis([attempt1, attempt2], undefined)).toBe('SPEC_WRONG');
+  });
+
+  it('SAME_FILES thrashing overrides SPEC_WRONG to APPROACH_WRONG', () => {
+    // Same tests fail → normally SPEC_WRONG
+    // But SAME_FILES thrashing = right files, wrong strategy → APPROACH_WRONG
+    const attempt1 = ' FAIL  src/a.test.ts > suite > test one\n   Error: fail';
+    const attempt2 = ' FAIL  src/a.test.ts > suite > test one\n   Error: fail';
+    expect(classifyDiagnosis([attempt1, attempt2], 'SAME_FILES')).toBe('APPROACH_WRONG');
+  });
+
+  it('DIFFERENT_FILES thrashing overrides to STUCK', () => {
+    // Different tests fail → normally APPROACH_WRONG
+    // But DIFFERENT_FILES thrashing = searching randomly → STUCK
+    const attempt1 = ' FAIL  src/a.test.ts > suite > test one\n   Error: fail';
+    const attempt2 = ' FAIL  src/b.test.ts > suite > test two\n   Error: fail';
+    expect(classifyDiagnosis([attempt1, attempt2], 'DIFFERENT_FILES')).toBe('STUCK');
+  });
+
+  it('NORMAL thrashing does not change diagnosis', () => {
+    const attempt1 = ' FAIL  src/a.test.ts > suite > test one\n   Error: fail';
+    const attempt2 = ' FAIL  src/a.test.ts > suite > test one\n   Error: fail';
+    expect(classifyDiagnosis([attempt1, attempt2], 'NORMAL')).toBe('SPEC_WRONG');
+  });
+
+  it('INSUFFICIENT_DATA thrashing does not change diagnosis', () => {
+    const attempt1 = ' FAIL  src/a.test.ts > suite > test one\n   Error: fail';
+    const attempt2 = ' FAIL  src/a.test.ts > suite > test one\n   Error: fail';
+    expect(classifyDiagnosis([attempt1, attempt2], 'INSUFFICIENT_DATA')).toBe('SPEC_WRONG');
+  });
+
+  it('MISSING_CONTEXT still takes priority over thrashing', () => {
+    const attempt1 = "Cannot find module './service'\n FAIL  src/a.test.ts > test one\n   Error: fail";
+    const attempt2 = "Cannot find module './service'\n FAIL  src/a.test.ts > test one\n   Error: fail";
+    expect(classifyDiagnosis([attempt1, attempt2], 'SAME_FILES')).toBe('MISSING_CONTEXT');
   });
 });
