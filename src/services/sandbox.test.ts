@@ -253,7 +253,7 @@ describe('buildRunArgs', () => {
     expect(args[wIdx + 1]).toBe('/workspace');
   });
 
-  it('includes --rm, --name, and -d flags', () => {
+  it('includes --name and -d flags (no --rm for long-lived containers)', () => {
     const args = buildRunArgs({
       repoName: 'my-repo',
       issueNumber: 42,
@@ -261,14 +261,14 @@ describe('buildRunArgs', () => {
       imageTag: 'kova-sandbox-my-repo:latest',
     });
 
-    expect(args).toContain('--rm');
+    expect(args).not.toContain('--rm');
     expect(args).toContain('-d');
     expect(args).toContain('--name');
     const nameIdx = args.indexOf('--name');
     expect(args[nameIdx + 1]).toBe('kova-sandbox-my-repo-42');
   });
 
-  it('ends with the image tag and sleep command', () => {
+  it('ends with image tag followed by sleep infinity', () => {
     const args = buildRunArgs({
       repoName: 'my-repo',
       issueNumber: 42,
@@ -276,6 +276,35 @@ describe('buildRunArgs', () => {
       imageTag: 'kova-sandbox-my-repo:latest',
     });
 
-    expect(args).toContain('kova-sandbox-my-repo:latest');
+    const imageIdx = args.indexOf('kova-sandbox-my-repo:latest');
+    expect(imageIdx).toBeGreaterThan(-1);
+    expect(args[imageIdx + 1]).toBe('sleep');
+    expect(args[imageIdx + 2]).toBe('infinity');
+  });
+
+  it('passes ANTHROPIC_API_KEY as env var', () => {
+    const args = buildRunArgs({
+      repoName: 'my-repo',
+      issueNumber: 42,
+      repoPath: '/tmp/my-repo',
+      imageTag: 'kova-sandbox-my-repo:latest',
+    });
+
+    const envIdx = args.indexOf('-e');
+    expect(envIdx).toBeGreaterThan(-1);
+    expect(args[envIdx + 1]).toMatch(/^ANTHROPIC_API_KEY=/);
+  });
+
+  it('mounts kova root at /app when kovaRoot is provided', () => {
+    const args = buildRunArgs({
+      repoName: 'my-repo',
+      issueNumber: 42,
+      repoPath: '/tmp/my-repo',
+      imageTag: 'kova-sandbox-my-repo:latest',
+      kovaRoot: '/opt/kova',
+    });
+
+    const volumes = args.filter((_, i) => i > 0 && args[i - 1] === '-v');
+    expect(volumes).toContain('/opt/kova:/app:ro');
   });
 });

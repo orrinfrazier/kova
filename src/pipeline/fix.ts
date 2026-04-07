@@ -19,9 +19,11 @@ import { detectTooling } from '../services/language-detect.js';
 import { formatPRContext, type OpenPR } from '../services/pr-context.js';
 import {
   DEFAULT_SANDBOX_LIMITS,
+  execWaveInContainer,
   getContainerStats,
   killContainer,
   parseTimeout,
+  type SandboxWaveInput,
   startSandboxContainer,
 } from '../services/sandbox.js';
 import { shutdownRequested } from '../services/shutdown.js';
@@ -109,20 +111,37 @@ function waveFallbackModel(waveConfig: WaveModelConfig, modelString: string): st
   return getApiFallbackModelString('medium');
 }
 
-/** Spawn a wave agent with automatic local-to-API fallback. */
+/** Spawn a wave agent — delegates to Docker sandbox when sandbox context is provided. */
 async function spawnWave<T>(
   wave: FixAIWaveName,
   workDir: string,
   config: RepoConfig,
   userMessage: string,
   outputFormat?: OutputFormat,
+  sandboxCtx?: { containerName: string; repoPath: string },
 ): Promise<WaveHandoff<T>> {
   const model = resolveWaveModel(config.model[wave]);
-  const tools = getWaveTools(wave, workDir);
   const systemPrompt = await loadPrompt(wave);
   const thinkingLevel = resolveThinkingLevel(config, wave);
   const modelString = model.id;
   const fallbackModel = waveFallbackModel(config.model[wave], modelString);
+
+  // Docker sandbox: execute wave inside the container
+  if (sandboxCtx) {
+    const input: SandboxWaveInput = {
+      wave,
+      model: modelString,
+      systemPrompt,
+      userMessage,
+      cwd: '/workspace',
+      ...(thinkingLevel != null && { thinkingLevel }),
+      ...(fallbackModel != null && { fallbackModel }),
+      ...(outputFormat != null && { outputSchemaName: wave === 'assess' || wave === 'spec' ? wave : undefined }),
+    };
+    return execWaveInContainer(sandboxCtx.containerName, input, sandboxCtx.repoPath) as Promise<WaveHandoff<T>>;
+  }
+
+  const tools = getWaveTools(wave, workDir);
   return spawnWaveAgentWithFallback<T>({
     wave,
     model: modelString,
@@ -209,6 +228,9 @@ export async function fix(options: FixOptions): Promise<FixResult> {
     }, timeoutMs);
   }
 
+  // Context for routing wave execution through Docker sandbox
+  const sandboxCtx = sandboxContainerName ? { containerName: sandboxContainerName, repoPath: workDir } : undefined;
+
   if (fresh) {
     await clearCheckpoint(workDir);
     log.info(`[fresh] Cleared checkpoint — starting from scratch`);
@@ -272,6 +294,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           },
         ),
         toOutputFormat(AssessResultSchema),
+        sandboxCtx,
       );
       await saveHandoff(workDir, handoff);
       state.waveResults.assess = handoffToResult(handoff, waveProvider(config, 'assess'));
@@ -317,6 +340,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           ...(codebaseContext != null && { codebaseContext }),
         }),
         toOutputFormat(SpecResultSchema),
+        sandboxCtx,
       );
       await saveHandoff(workDir, handoff);
       state.waveResults.spec = handoffToResult(handoff, waveProvider(config, 'spec'));
@@ -384,6 +408,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
             ...(codebaseContext != null && { codebaseContext }),
           }),
           toOutputFormat(SpecResultSchema),
+          sandboxCtx,
         );
         await saveHandoff(workDir, specHandoff);
         state.waveResults.spec = handoffToResult(specHandoff, waveProvider(config, 'spec'));
@@ -421,6 +446,8 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         buildWaveContext('quality', issue, state.waveResults, {
           coverageThreshold: config.rules.coverage,
         }),
+        undefined,
+        sandboxCtx,
       );
       await saveHandoff(workDir, handoff);
       state.waveResults.quality = handoffToResult(handoff, waveProvider(config, 'quality'));
