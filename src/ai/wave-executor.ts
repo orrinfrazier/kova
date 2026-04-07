@@ -20,6 +20,17 @@ export interface OutputFormat {
 // biome-ignore lint/suspicious/noExplicitAny: pi-mono AgentTool uses any for tool parameter schemas
 type AnyTool = AgentTool<any>;
 
+/** Default wall-clock timeouts per wave type (ms). `undefined` means no timeout. */
+export const DEFAULT_WAVE_TIMEOUTS: Record<WaveName, number | undefined> = {
+  assess: 5 * 60 * 1000,
+  spec: 5 * 60 * 1000,
+  review: 5 * 60 * 1000,
+  test: 15 * 60 * 1000,
+  impl: 15 * 60 * 1000,
+  quality: 10 * 60 * 1000,
+  ship: undefined,
+};
+
 export interface SpawnWaveAgentConfig {
   wave: WaveName;
   model: string;
@@ -30,6 +41,7 @@ export interface SpawnWaveAgentConfig {
   cwd: string;
   outputFormat?: OutputFormat;
   maxTurns?: number;
+  timeoutMs?: number;
 }
 
 export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig): Promise<WaveHandoff<T>> {
@@ -43,7 +55,10 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
     cwd,
     outputFormat,
     maxTurns = 5_000,
+    timeoutMs: explicitTimeout,
   } = config;
+
+  const timeoutMs = explicitTimeout ?? DEFAULT_WAVE_TIMEOUTS[wave];
 
   const model = resolveModelFromString(modelString);
   const startTime = Date.now();
@@ -99,8 +114,20 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
     }
   });
 
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
   try {
-    await agent.prompt(effectiveUserMessage);
+    if (timeoutMs != null) {
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timeoutId = setTimeout(() => {
+          agent.abort();
+          reject(new KovaError(`Wave ${wave} timed out after ${(timeoutMs / 1000).toFixed(0)}s`, 'agent', false));
+        }, timeoutMs);
+      });
+      await Promise.race([agent.prompt(effectiveUserMessage), timeoutPromise]);
+    } else {
+      await agent.prompt(effectiveUserMessage);
+    }
 
     // Extract cost from all assistant messages
     let cost = 0;
@@ -185,6 +212,7 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
     log.error(`[${wave}] Failed — ${err.message}`);
     throw new KovaError(`Wave ${wave} failed: ${err.message}`, 'agent', false);
   } finally {
+    if (timeoutId != null) clearTimeout(timeoutId);
     unsubscribe();
   }
 }
