@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { AssessResult, Issue, QualityResult, ReviewResult, SpecResult, WaveResult } from '../types/index.js';
-import { buildWaveContext, truncateToTokenBudget } from './context.js';
+import { buildWaveContext, estimateTokens, truncateToTokenBudget } from './context.js';
 
 function makeIssue(overrides?: Partial<Issue>): Issue {
   return {
@@ -281,6 +281,61 @@ describe('buildWaveContext', () => {
   });
 });
 
+describe('estimateTokens', () => {
+  it('estimates code content with ~3.5 chars/token ratio', () => {
+    const code = `function parseArgs(argv: string[]): Config {
+  const config: Config = { verbose: false };
+  for (const arg of argv) {
+    if (arg === '--verbose') {
+      config.verbose = true;
+    } else if (arg.startsWith('--output=')) {
+      config.output = arg.slice(9);
+    }
+  }
+  return config;
+}`;
+    const tokens = estimateTokens(code);
+    const oldEstimate = Math.ceil(code.length / 4);
+    expect(tokens).toBeGreaterThan(oldEstimate);
+  });
+
+  it('estimates prose content with ~4.5 chars/token ratio', () => {
+    const prose =
+      'The authentication system validates user credentials against the database. ' +
+      'When a token expires, the system should gracefully redirect the user to the login page. ' +
+      'This ensures a smooth user experience while maintaining security best practices.';
+    const tokens = estimateTokens(prose);
+    const oldEstimate = Math.ceil(prose.length / 4);
+    expect(tokens).toBeLessThan(oldEstimate);
+  });
+
+  it('returns 0 for empty string', () => {
+    expect(estimateTokens('')).toBe(0);
+  });
+
+  it('handles mixed content (code + prose)', () => {
+    const mixed = `## Overview
+This module handles token validation for the auth layer.
+
+\`\`\`typescript
+export function validateToken(token: string): boolean {
+  if (!token || token.length === 0) {
+    return false;
+  }
+  const decoded = decodeJwt(token);
+  return decoded.exp > Date.now() / 1000;
+}
+\`\`\`
+
+The function checks expiration before allowing access.`;
+    const tokens = estimateTokens(mixed);
+    expect(tokens).toBeGreaterThan(0);
+    const impliedRatio = mixed.length / tokens;
+    expect(impliedRatio).toBeGreaterThanOrEqual(3.5);
+    expect(impliedRatio).toBeLessThanOrEqual(4.5);
+  });
+});
+
 describe('truncateToTokenBudget', () => {
   it('returns text unchanged when under budget', () => {
     const text = 'Short text';
@@ -288,7 +343,6 @@ describe('truncateToTokenBudget', () => {
   });
 
   it('truncates text that exceeds budget', () => {
-    // ~4 chars per token, 100 token budget = ~400 chars
     const longText = 'x'.repeat(2000);
     const result = truncateToTokenBudget(longText, 100);
 
@@ -297,9 +351,28 @@ describe('truncateToTokenBudget', () => {
   });
 
   it('preserves beginning of text when truncating', () => {
-    const text = 'IMPORTANT_START ' + 'x'.repeat(2000);
+    const text = `IMPORTANT_START ${'x'.repeat(2000)}`;
     const result = truncateToTokenBudget(text, 100);
 
     expect(result).toContain('IMPORTANT_START');
+  });
+
+  it('uses content-aware estimation for code content', () => {
+    const code = 'const x = 1;\n'.repeat(200);
+    const result = truncateToTokenBudget(code, 100);
+    expect(result).toContain('[truncated');
+    const truncatedContent = result.split('\n\n[truncated')[0];
+    expect(truncatedContent).toBeDefined();
+    expect(truncatedContent?.length).toBeLessThan(400);
+  });
+
+  it('uses content-aware estimation for prose content', () => {
+    const word = 'authentication ';
+    const prose = word.repeat(200);
+    const result = truncateToTokenBudget(prose, 100);
+    expect(result).toContain('[truncated');
+    const truncatedContent = result.split('\n\n[truncated')[0];
+    expect(truncatedContent).toBeDefined();
+    expect(truncatedContent?.length).toBeGreaterThan(400);
   });
 });

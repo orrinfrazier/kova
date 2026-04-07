@@ -11,8 +11,12 @@ import type {
   WaveResult,
 } from '../types/index.js';
 
-/** Approximate tokens from character count (~4 chars/token). */
-const CHARS_PER_TOKEN = 4;
+/** Chars-per-token ratio for code-heavy content (operators, short identifiers). */
+const CODE_CHARS_PER_TOKEN = 3.5;
+/** Chars-per-token ratio for prose/natural language. */
+const PROSE_CHARS_PER_TOKEN = 4.5;
+/** Regex matching common code indicators: braces, semicolons, arrows, etc. */
+const CODE_PATTERN = /[{}();=<>[\]|&!]|=>|->|\bfunction\b|\bconst\b|\blet\b|\bvar\b|\breturn\b|\bimport\b|\bexport\b/g;
 const DEFAULT_TOKEN_BUDGET = 8_000;
 
 export interface ContextOptions {
@@ -59,11 +63,37 @@ export function buildWaveContext(
 }
 
 /**
+ * Estimate the code-likeness of text as a ratio between 0 (pure prose) and 1 (pure code).
+ * Counts lines containing code indicators vs total non-empty lines.
+ */
+function codeRatio(text: string): number {
+  const lines = text.split('\n').filter((l) => l.trim().length > 0);
+  if (lines.length === 0) return 0;
+  const codeLines = lines.filter((l) => CODE_PATTERN.test(l)).length;
+  CODE_PATTERN.lastIndex = 0;
+  return codeLines / lines.length;
+}
+
+/**
+ * Estimate token count using a content-aware chars-per-token ratio.
+ * Code content uses ~3.5 chars/token, prose uses ~4.5 chars/token,
+ * with a linear blend for mixed content.
+ */
+export function estimateTokens(text: string): number {
+  if (text.length === 0) return 0;
+  const ratio = codeRatio(text);
+  const charsPerToken = PROSE_CHARS_PER_TOKEN - ratio * (PROSE_CHARS_PER_TOKEN - CODE_CHARS_PER_TOKEN);
+  return Math.ceil(text.length / charsPerToken);
+}
+
+/**
  * Truncate text to fit within a token budget.
- * Uses a rough 4-chars-per-token heuristic.
+ * Uses content-aware chars-per-token estimation (code ~3.5, prose ~4.5).
  */
 export function truncateToTokenBudget(text: string, tokenBudget: number): string {
-  const charBudget = tokenBudget * CHARS_PER_TOKEN;
+  const ratio = codeRatio(text);
+  const charsPerToken = PROSE_CHARS_PER_TOKEN - ratio * (PROSE_CHARS_PER_TOKEN - CODE_CHARS_PER_TOKEN);
+  const charBudget = Math.floor(tokenBudget * charsPerToken);
   if (text.length <= charBudget) {
     return text;
   }
