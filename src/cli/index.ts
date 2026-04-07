@@ -32,6 +32,7 @@ import {
 } from '../services/config.js';
 import { createIssue, fetchIssue, hasExistingWork } from '../services/github.js';
 import { computeStats, formatHistoryTable, formatStatsTable, readHistory } from '../services/history.js';
+import { initMetrics, shutdownMetrics } from '../services/metrics.js';
 import { collectChangedFiles, reindexFiles } from '../services/reindex.js';
 import { buildSandboxImage } from '../services/sandbox.js';
 import {
@@ -124,6 +125,7 @@ program
     ) => {
       const kovaConfig = await tryLoadConfig(program.opts().config);
       const { repoPath, repoName, config } = resolveRepo(opts.repo ?? '.', kovaConfig);
+      initMetrics(config.metrics);
 
       if (opts.all) {
         // Loop mode: fix all open issues
@@ -138,6 +140,7 @@ program
           budgetUsd: opts.budget ? Number.parseFloat(opts.budget) : undefined,
           force: opts.force,
         });
+        shutdownMetrics();
         removeSignalHandlers();
 
         log.info(`\nResults: ${result.succeeded}/${result.total} succeeded`);
@@ -182,6 +185,7 @@ program
         noComment: opts.comment === false,
       });
 
+      shutdownMetrics();
       if (result.success) {
         log.info(`Done! PR: ${result.prUrl}`);
       } else {
@@ -216,6 +220,7 @@ program
       // If --repo specified or no config, run single-repo mode
       if (opts.repo || !kovaConfig) {
         const { repoPath, repoName, config } = resolveRepo(opts.repo ?? '.', kovaConfig);
+        initMetrics(config.metrics);
         const result = await runAuto({
           repoPath,
           repoName,
@@ -224,6 +229,7 @@ program
           max: opts.max ? Number.parseInt(opts.max, 10) : undefined,
           force: opts.force,
         });
+        shutdownMetrics();
         removeSignalHandlers();
 
         if (shutdownRequested()) {
@@ -231,6 +237,10 @@ program
         }
         process.exit(result.exitCode);
       }
+
+      // Multi-repo mode: init metrics from first repo with metrics enabled
+      const firstRepoConfig = Object.values(kovaConfig.repos).find((r) => r.metrics?.enabled);
+      initMetrics(firstRepoConfig?.metrics);
 
       // Multi-repo mode: parallel or sequential
       if (opts.parallelRepos) {
@@ -241,6 +251,7 @@ program
           force: opts.force,
           budgetUsd: opts.budget ? Number.parseFloat(opts.budget) : undefined,
         });
+        shutdownMetrics();
         removeSignalHandlers();
 
         if (shutdownRequested()) {
@@ -256,6 +267,7 @@ program
         max: opts.max ? Number.parseInt(opts.max, 10) : undefined,
         force: opts.force,
       });
+      shutdownMetrics();
       removeSignalHandlers();
 
       if (shutdownRequested()) {
@@ -339,6 +351,7 @@ program
       const repoPath = resolve(opts.repo ?? '.');
       const repoName = detectRepoName(repoPath);
       const config = resolveRepoConfig(repoPath);
+      initMetrics(config.metrics);
 
       const threshold = opts.threshold ? Number.parseFloat(opts.threshold) : undefined;
       const focus = opts.focus ? opts.focus.split(',').map((s) => s.trim()) : undefined;
@@ -362,6 +375,7 @@ program
         const message = error instanceof Error ? error.message : String(error);
         log.error(`Supervised mode failed: ${message}`);
       }
+      shutdownMetrics();
       removeSignalHandlers();
 
       if (shutdownRequested()) {
@@ -462,6 +476,7 @@ program
   .action(async (opts: { port?: string; repo?: string }) => {
     const kovaConfig = await tryLoadConfig(program.opts().config);
     const { repoPath, repoName, config } = resolveRepo(opts.repo ?? '.', kovaConfig);
+    initMetrics(config.metrics);
 
     const secret = process.env.GITHUB_WEBHOOK_SECRET;
     if (!secret) {
@@ -531,6 +546,7 @@ program
     queue.shutdown();
     await queue.drain();
     await server.stop();
+    shutdownMetrics();
     removeSignalHandlers();
 
     log.info('Webhook server stopped.');
