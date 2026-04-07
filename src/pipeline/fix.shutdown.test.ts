@@ -4,23 +4,30 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Issue, RepoConfig } from '../types/index.js';
 
-// Mock the AI layer
+// Mock the AI layer — returns wave-appropriate structured output
+function waveStructuredOutput(wave?: string): unknown {
+  if (wave === 'review') {
+    return { verdict: 'pass', findings: [], summary: 'all good' };
+  }
+  return {
+    grade: 'A',
+    surface_area: { files: [], estimated_lines: 10, modules_affected: [] },
+    risk: 'low',
+    reasoning: 'simple',
+    should_proceed: true,
+  };
+}
+
 vi.mock('../ai/index.js', () => ({
-  executeWaveWithRetry: vi.fn().mockResolvedValue({
+  executeWaveWithRetry: vi.fn().mockImplementation((opts: { wave?: string }) => ({
     result: 'done',
     success: true,
     duration: 100,
     turns: 1,
     cost: 0.01,
     model: 'test-model',
-    structuredOutput: {
-      grade: 'A',
-      surface_area: { files: [], estimated_lines: 10, modules_affected: [] },
-      risk: 'low',
-      reasoning: 'simple',
-      should_proceed: true,
-    },
-  }),
+    structuredOutput: waveStructuredOutput(opts.wave),
+  })),
 }));
 
 // Mock github
@@ -34,6 +41,16 @@ vi.mock('../services/github.js', () => ({
 // Mock pr-context
 vi.mock('../services/pr-context.js', () => ({
   formatPRContext: vi.fn().mockReturnValue(''),
+}));
+
+// Mock language detection (needed by review loop's resolveTestCommand)
+vi.mock('../services/language-detect.js', () => ({
+  detectTooling: vi.fn().mockResolvedValue({ language: 'typescript', testRunner: 'vitest' }),
+}));
+
+// Mock prompt loading
+vi.mock('./prompts.js', () => ({
+  loadPrompt: vi.fn().mockResolvedValue('mock system prompt'),
 }));
 
 // Mock worktree
@@ -56,7 +73,9 @@ vi.mock('../services/worktree.js', async (importOriginal) => {
 
 const { fix } = await import('./fix.js');
 const { loadCheckpoint } = await import('../services/checkpoint.js');
+const { executeWaveWithRetry } = await import('../ai/index.js');
 const { installSignalHandlers, removeSignalHandlers, resetShutdown } = await import('../services/shutdown.js');
+const mockExecute = vi.mocked(executeWaveWithRetry);
 
 function makeIssue(n: number): Issue {
   return { number: n, title: `Test issue ${n}`, body: 'body', labels: [], url: `https://example.com/${n}` };
@@ -77,6 +96,17 @@ describe('fix — graceful shutdown', () => {
   beforeEach(async () => {
     workDir = await mkdtemp(join(tmpdir(), 'kova-shutdown-'));
     resetShutdown();
+    // Reset mock to default wave-appropriate implementation (prevents test leakage)
+    mockExecute.mockReset();
+    mockExecute.mockImplementation(async (opts: { wave?: string }) => ({
+      result: 'done',
+      success: true,
+      duration: 100,
+      turns: 1,
+      cost: 0.01,
+      model: 'test-model',
+      structuredOutput: waveStructuredOutput(opts.wave),
+    }));
   });
 
   afterEach(async () => {
@@ -86,13 +116,9 @@ describe('fix — graceful shutdown', () => {
   });
 
   it('returns interrupted result when shutdown requested between waves', async () => {
-    const { executeWaveWithRetry } = await import('../ai/index.js');
-    const mockExecute = vi.mocked(executeWaveWithRetry);
-    mockExecute.mockClear();
-
     // Trigger shutdown after the first wave (assess) completes
     let callCount = 0;
-    mockExecute.mockImplementation(async () => {
+    mockExecute.mockImplementation(async (opts: { wave?: string }) => {
       callCount++;
       if (callCount === 1) {
         // After assess completes, request shutdown
@@ -106,13 +132,7 @@ describe('fix — graceful shutdown', () => {
         turns: 1,
         cost: 0.01,
         model: 'test-model',
-        structuredOutput: {
-          grade: 'A',
-          surface_area: { files: [], estimated_lines: 10, modules_affected: [] },
-          risk: 'low',
-          reasoning: 'simple',
-          should_proceed: true,
-        },
+        structuredOutput: waveStructuredOutput(opts.wave),
       };
     });
 
@@ -131,12 +151,8 @@ describe('fix — graceful shutdown', () => {
   });
 
   it('saves checkpoint with interrupted status', async () => {
-    const { executeWaveWithRetry } = await import('../ai/index.js');
-    const mockExecute = vi.mocked(executeWaveWithRetry);
-    mockExecute.mockClear();
-
     let callCount = 0;
-    mockExecute.mockImplementation(async () => {
+    mockExecute.mockImplementation(async (opts: { wave?: string }) => {
       callCount++;
       if (callCount === 2) {
         // After spec wave, trigger shutdown
@@ -150,13 +166,7 @@ describe('fix — graceful shutdown', () => {
         turns: 1,
         cost: 0.01,
         model: 'test-model',
-        structuredOutput: {
-          grade: 'A',
-          surface_area: { files: [], estimated_lines: 10, modules_affected: [] },
-          risk: 'low',
-          reasoning: 'simple',
-          should_proceed: true,
-        },
+        structuredOutput: waveStructuredOutput(opts.wave),
       };
     });
 
@@ -177,10 +187,6 @@ describe('fix — graceful shutdown', () => {
   });
 
   it('completes all waves when no shutdown requested', async () => {
-    const { executeWaveWithRetry } = await import('../ai/index.js');
-    const mockExecute = vi.mocked(executeWaveWithRetry);
-    mockExecute.mockClear();
-
     const result = await fix({
       issue: makeIssue(42),
       repoPath: workDir,

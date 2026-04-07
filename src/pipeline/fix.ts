@@ -25,16 +25,11 @@ import type {
   WaveName,
   WaveResult,
 } from '../types/index.js';
-import {
-  type AssessResult,
-  AssessResultSchema,
-  ImplResultSchema,
-  ReviewResultSchema,
-  SpecResultSchema,
-} from '../types/index.js';
+import { type AssessResult, AssessResultSchema, ImplResultSchema, SpecResultSchema } from '../types/index.js';
 import { log } from '../utils/logger.js';
 import { buildWaveContext } from './context.js';
 import { buildCostReport, printRunSummary, writeCostReport } from './cost-report.js';
+import { runReviewLoop } from './loops.js';
 import { loadPrompt } from './prompts.js';
 
 function toOutputFormat(schema: z.ZodType): OutputFormat {
@@ -174,32 +169,33 @@ export async function fix(options: FixOptions): Promise<FixResult> {
     }
 
     if (!shouldSkip('review')) {
-      const result = await runWave('review', workDir, config, {
-        userMessage: buildWaveContext('review', issue, state.waveResults),
-        outputFormat: toOutputFormat(ReviewResultSchema),
+      const reviewLoopResult = await runReviewLoop({
+        issue,
+        workDir,
+        repoConfig: config,
+        waveResults: state.waveResults,
+        prContext,
       });
-      state.waveResults.review = toWaveResult('review', result);
+
+      state.waveResults.review = reviewLoopResult.reviewWaveResult;
+      if (reviewLoopResult.qualityWaveResult) {
+        state.waveResults.quality = reviewLoopResult.qualityWaveResult;
+      }
       state.completedWaves.push('review');
       await saveCheckpoint(workDir, state);
 
-      const review = result.structuredOutput as { verdict: string } | undefined;
-      if (review?.verdict === 'needs_fixes') {
-        log.info('[review] Findings detected — re-running impl + quality');
-        state.waveResults.review = toWaveResult('review', result);
-        const reimpl = await runWave('impl', workDir, config, {
-          userMessage: buildWaveContext('impl', issue, state.waveResults, { isReimpl: true, prContext }),
-        });
-        state.waveResults.impl = toWaveResult('impl', reimpl);
-        const requality = await runWave('quality', workDir, config, {
-          userMessage: buildWaveContext('quality', issue, state.waveResults, {
-            coverageThreshold: config.rules.coverage,
-          }),
-        });
-        state.waveResults.quality = toWaveResult('quality', requality);
-      }
-
       const interrupted = await interruptIfShutdown();
       if (interrupted) return interrupted;
+
+      // Thread known issues to PR body
+      if (reviewLoopResult.knownIssues.length > 0) {
+        state.reviewKnownIssues = reviewLoopResult.knownIssues.map((f) => ({
+          category: f.category,
+          file: f.file,
+          description: f.description,
+          severity: f.severity,
+        }));
+      }
     }
 
     if (!shouldSkip('ship')) {
@@ -223,7 +219,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
 
       const openPRs = await listOpenPRs(repoPath);
       const prTitle = `fix: ${issue.title} (#${issue.number})`;
-      const prBody = [
+      const prSections = [
         `## Summary`,
         `Fixes #${issue.number}`,
         ``,
@@ -232,7 +228,19 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         ``,
         `## Open PRs (for merge ordering)`,
         ...openPRs.map((pr) => `- ${pr}`),
-      ].join('\n');
+      ];
+
+      if (state.reviewKnownIssues && state.reviewKnownIssues.length > 0) {
+        prSections.push(
+          ``,
+          `## Known Issues`,
+          `The following issues were identified during review but could not be resolved within the iteration limit:`,
+          ``,
+          ...state.reviewKnownIssues.map((i) => `- [${i.severity}] \`${i.file}\`: ${i.description}`),
+        );
+      }
+
+      const prBody = prSections.join('\n');
       const prUrl = await createPR(workDir, branch, prTitle, prBody);
 
       state.waveResults.ship = {

@@ -1,12 +1,17 @@
 // T↔I loop controller — orchestrator-driven test/impl retry loop.
+// R→I→T review loop controller — review/impl/test retry loop.
 // Test agent runs once (writes tests). Impl agent spawns fresh per attempt.
 // Tests run via bash (orchestrator), NOT via the agent.
 
 import { exec as execCb } from 'node:child_process';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import { promisify } from 'node:util';
-import { executeWaveWithRetry } from '../ai/index.js';
+import { z } from 'zod';
+import { executeWaveWithRetry, type OutputFormat } from '../ai/index.js';
 import { detectTooling } from '../services/language-detect.js';
-import type { Issue, RepoConfig, WaveName, WaveResult } from '../types/index.js';
+import type { Issue, RepoConfig, ReviewFinding, ReviewResult, WaveName, WaveResult } from '../types/index.js';
+import { ReviewResultSchema } from '../types/index.js';
 import { log } from '../utils/logger.js';
 import { buildWaveContext } from './context.js';
 import { loadPrompt } from './prompts.js';
@@ -43,6 +48,28 @@ export interface TILoopResult {
   totalCost: number;
   attempts: number;
   diagnosis?: TILoopDiagnosis;
+}
+
+export type FileWriter = (filePath: string, content: string) => Promise<void>;
+
+export interface ReviewLoopConfig {
+  issue: Issue;
+  workDir: string;
+  repoConfig: RepoConfig;
+  waveResults: Partial<Record<WaveName, WaveResult>>;
+  maxIterations?: number;
+  testCommand?: string;
+  testRunner?: TestRunner;
+  fileWriter?: FileWriter;
+  prContext?: string;
+}
+
+export interface ReviewLoopResult {
+  reviewWaveResult: WaveResult;
+  qualityWaveResult?: WaveResult | undefined;
+  totalCost: number;
+  iterations: number;
+  knownIssues: ReviewFinding[];
 }
 
 // --- Test command resolution ---
@@ -219,4 +246,248 @@ export async function runTILoop(config: TILoopConfig): Promise<TILoopResult> {
     attempts,
     ...(diagnosis != null && { diagnosis }),
   };
+}
+
+// --- Default file writer ---
+
+const defaultFileWriter: FileWriter = async (filePath, content) => {
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.writeFile(filePath, content, 'utf-8');
+};
+
+// --- Review test file writing ---
+
+async function writeReviewTests(findings: ReviewFinding[], workDir: string, writer: FileWriter): Promise<string[]> {
+  const filesWritten: string[] = [];
+
+  for (const finding of findings) {
+    if (!finding.test_code) continue;
+
+    const ext = path.extname(finding.file);
+    const base = finding.file.replace(ext, '');
+    const testFile = `${base}.review.test${ext}`;
+    const fullPath = path.join(workDir, testFile);
+
+    await writer(fullPath, finding.test_code);
+    filesWritten.push(testFile);
+  }
+
+  return filesWritten;
+}
+
+// --- Review output format ---
+
+function reviewOutputFormat(): OutputFormat {
+  return {
+    type: 'json_schema',
+    schema: z.toJSONSchema(ReviewResultSchema, { target: 'draft-07' }) as Record<string, unknown>,
+  };
+}
+
+// --- Review Loop Controller ---
+
+export async function runReviewLoop(config: ReviewLoopConfig): Promise<ReviewLoopResult> {
+  const {
+    issue,
+    workDir,
+    repoConfig,
+    waveResults,
+    maxIterations = 2,
+    prContext,
+    testRunner = defaultTestRunner,
+    fileWriter = defaultFileWriter,
+  } = config;
+
+  if (maxIterations < 1) {
+    throw new Error('maxIterations must be at least 1');
+  }
+
+  const testCmd = await resolveTestCommand(workDir, config.testCommand);
+  let totalCost = 0;
+  let reviewWaveResult: WaveResult | undefined;
+  let qualityWaveResult: WaveResult | undefined;
+  let lastReview: ReviewResult | undefined;
+
+  for (let iteration = 0; iteration < maxIterations; iteration++) {
+    log.info(`[review-loop] Iteration ${iteration + 1}/${maxIterations}`);
+
+    // Step 1: Fresh review agent — no prior review bias
+    const reviewSystemPrompt = await loadPrompt('review');
+    const reviewExecResult = await executeWaveWithRetry({
+      wave: 'review',
+      systemPrompt: reviewSystemPrompt,
+      userMessage: buildWaveContext('review', issue, waveResults),
+      cwd: workDir,
+      modelTier: repoConfig.model.review,
+      outputFormat: reviewOutputFormat(),
+    });
+
+    reviewWaveResult = toWaveResult('review', reviewExecResult);
+    totalCost += reviewExecResult.cost;
+    waveResults.review = reviewWaveResult;
+
+    lastReview = reviewExecResult.structuredOutput as ReviewResult | undefined;
+
+    // If review passes, we're done
+    if (!lastReview || lastReview.verdict === 'pass') {
+      log.info('[review-loop] Review passed');
+      return {
+        reviewWaveResult,
+        qualityWaveResult,
+        totalCost,
+        iterations: iteration + 1,
+        knownIssues: [],
+      };
+    }
+
+    log.info(`[review-loop] Review found ${lastReview.findings.length} finding(s) — applying fixes`);
+
+    // Step 2: Categorize findings
+    const needsNewTests = lastReview.findings.filter((f) => f.category === 'needs_new_tests');
+    const mechanicalFixes = lastReview.findings.filter((f) => f.category === 'mechanical_fix');
+
+    // Step 3: Path 1 — NEEDS_NEW_TESTS (ratcheting eval)
+    if (needsNewTests.length > 0) {
+      const testFilesWritten = await writeReviewTests(needsNewTests, workDir, fileWriter);
+
+      if (testFilesWritten.length > 0) {
+        // Ratchet: verify new tests fail (proving they catch the gap)
+        const ratchetRun = await testRunner(testCmd, workDir);
+        if (ratchetRun.passed) {
+          log.warn('[review-loop] Ratchet: new tests already pass — skipping impl for needs_new_tests');
+        } else {
+          log.info('[review-loop] Ratchet confirmed — new tests fail, spawning impl agent');
+          const implContext = buildNeedsNewTestsImplContext(needsNewTests, testFilesWritten, waveResults, prContext);
+          const implSystemPrompt = await loadPrompt('impl');
+          const implExecResult = await executeWaveWithRetry({
+            wave: 'impl',
+            systemPrompt: implSystemPrompt,
+            userMessage: implContext,
+            cwd: workDir,
+            modelTier: repoConfig.model.impl,
+          });
+          totalCost += implExecResult.cost;
+          waveResults.impl = toWaveResult('impl', implExecResult);
+
+          // Verify ALL tests pass (old + new)
+          const verifyRun = await testRunner(testCmd, workDir);
+          if (!verifyRun.passed) {
+            log.warn('[review-loop] Tests still failing after NEEDS_NEW_TESTS impl');
+          }
+        }
+      }
+    }
+
+    // Step 4: Path 2 — MECHANICAL_FIX (refactoring)
+    if (mechanicalFixes.length > 0) {
+      log.info(`[review-loop] Applying ${mechanicalFixes.length} mechanical fix(es)`);
+      const implContext = buildMechanicalFixImplContext(mechanicalFixes, waveResults, prContext);
+      const implSystemPrompt = await loadPrompt('impl');
+      const implExecResult = await executeWaveWithRetry({
+        wave: 'impl',
+        systemPrompt: implSystemPrompt,
+        userMessage: implContext,
+        cwd: workDir,
+        modelTier: repoConfig.model.impl,
+      });
+      totalCost += implExecResult.cost;
+      waveResults.impl = toWaveResult('impl', implExecResult);
+
+      // Verify tests still pass (safety net)
+      const verifyRun = await testRunner(testCmd, workDir);
+      if (!verifyRun.passed) {
+        log.warn('[review-loop] Tests broke during MECHANICAL_FIX impl');
+      }
+    }
+
+    // Step 5: Re-run quality gates
+    const qualitySystemPrompt = await loadPrompt('quality');
+    const qualityExecResult = await executeWaveWithRetry({
+      wave: 'quality',
+      systemPrompt: qualitySystemPrompt,
+      userMessage: buildWaveContext('quality', issue, waveResults, {
+        coverageThreshold: repoConfig.rules.coverage,
+      }),
+      cwd: workDir,
+      modelTier: repoConfig.model.quality,
+    });
+    qualityWaveResult = toWaveResult('quality', qualityExecResult);
+    totalCost += qualityExecResult.cost;
+    waveResults.quality = qualityWaveResult;
+  }
+
+  // Max iterations reached — collect remaining findings as known issues
+  const knownIssues = lastReview?.findings ?? [];
+  log.warn(`[review-loop] Max iterations (${maxIterations}) reached — ${knownIssues.length} known issue(s) remain`);
+
+  return {
+    reviewWaveResult: reviewWaveResult as WaveResult,
+    qualityWaveResult,
+    totalCost,
+    iterations: maxIterations,
+    knownIssues,
+  };
+}
+
+// --- Review loop context builders ---
+
+function buildNeedsNewTestsImplContext(
+  findings: ReviewFinding[],
+  testFiles: string[],
+  waveResults: Partial<Record<WaveName, WaveResult>>,
+  prContext?: string,
+): string {
+  const sections: string[] = [];
+
+  sections.push('## Review Findings — NEEDS_NEW_TESTS\n');
+  sections.push('Fix the code so that the following new tests pass:\n');
+  for (const f of findings) {
+    const loc = f.line != null ? `${f.file} line ${f.line}` : f.file;
+    sections.push(`- [${f.severity}] ${loc}: ${f.description}`);
+  }
+
+  if (testFiles.length > 0) {
+    sections.push(`\n## New Test Files Written\n`);
+    for (const tf of testFiles) {
+      sections.push(`- ${tf}`);
+    }
+  }
+
+  // Include spec context if available
+  const spec = waveResults.spec?.artifact;
+  if (spec != null && typeof spec === 'object' && 'summary' in spec) {
+    sections.push(`\n## Spec\n\n${(spec as { summary: string }).summary}`);
+  }
+
+  if (prContext) {
+    sections.push(`\n${prContext}`);
+  }
+
+  return sections.join('\n');
+}
+
+function buildMechanicalFixImplContext(
+  findings: ReviewFinding[],
+  waveResults: Partial<Record<WaveName, WaveResult>>,
+  prContext?: string,
+): string {
+  const sections: string[] = [];
+
+  sections.push('## Review Findings — MECHANICAL_FIX\n');
+  sections.push('Apply the following mechanical fixes. Existing tests are the safety net — do not break them.\n');
+  for (const f of findings) {
+    const loc = f.line != null ? `${f.file} line ${f.line}` : f.file;
+    sections.push(`- [${f.severity}] ${loc}: ${f.description}`);
+  }
+
+  const spec = waveResults.spec?.artifact;
+  if (spec != null && typeof spec === 'object' && 'summary' in spec) {
+    sections.push(`\n## Spec\n\n${(spec as { summary: string }).summary}`);
+  }
+
+  if (prContext) {
+    sections.push(`\n${prContext}`);
+  }
+
+  return sections.join('\n');
 }
