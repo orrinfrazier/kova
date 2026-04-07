@@ -18,6 +18,7 @@ import { brainstorm, printBrainstormPreview } from '../pipeline/brainstorm.js';
 import { fix } from '../pipeline/fix.js';
 import { indexCodebase } from '../pipeline/index-codebase.js';
 import { fixLoop } from '../pipeline/loop.js';
+import { runMerge } from '../pipeline/merge.js';
 import { gatherStatus, printStatusDashboard } from '../pipeline/status.js';
 import { runSupervised } from '../pipeline/supervised.js';
 import { approveIssues } from '../services/approval.js';
@@ -500,6 +501,55 @@ program
 
     log.info('Webhook server stopped.');
     process.exit(exitCodeForSignal(getShutdownSignal()));
+  });
+
+program
+  .command('merge')
+  .description('Merge kova PRs in dependency order')
+  .option('--pr <number>', 'Merge a specific PR')
+  .option('--dry-run', 'Preview merge order without merging')
+  .option('--ci <policy>', 'CI check policy: require or warn (overrides config)')
+  .option('--repo <name-or-path>', 'Repository name (from config) or path', '.')
+  .action(async (opts: { pr?: string; dryRun?: boolean; ci?: string; repo?: string }) => {
+    const kovaConfig = await tryLoadConfig(program.opts().config);
+    const { repoPath, repoName, config } = resolveRepo(opts.repo ?? '.', kovaConfig);
+
+    const prNumber = opts.pr ? Number.parseInt(opts.pr, 10) : undefined;
+    if (opts.pr && (prNumber === undefined || Number.isNaN(prNumber))) {
+      console.error(`Invalid PR number: ${opts.pr}`);
+      process.exit(1);
+    }
+
+    const ciOverride = opts.ci === 'require' || opts.ci === 'warn' ? opts.ci : undefined;
+    if (opts.ci && !ciOverride) {
+      console.error(`Invalid CI policy: ${opts.ci}. Must be 'require' or 'warn'.`);
+      process.exit(1);
+    }
+
+    log.info(`Merging PRs for ${repoName}${opts.dryRun ? ' (dry run)' : ''}`);
+
+    const result = await runMerge({
+      repoPath,
+      repoName,
+      config,
+      prNumber,
+      dryRun: opts.dryRun,
+      ciOverride,
+    });
+
+    if (result.merged.length > 0) {
+      log.info(`Merged: ${result.merged.map((n) => `#${n}`).join(', ')}`);
+    }
+    if (result.failed.length > 0) {
+      for (const f of result.failed) {
+        log.error(`Failed #${f.number}: ${f.reason}`);
+      }
+    }
+    if (result.merged.length === 0 && result.failed.length === 0) {
+      log.info('No kova PRs to merge.');
+    }
+
+    process.exit(result.failed.length > 0 ? 1 : 0);
   });
 
 const sandbox = program.command('sandbox').description('Manage sandbox Docker images');

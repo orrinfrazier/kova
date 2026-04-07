@@ -50,7 +50,7 @@ export async function loadMCPServersFromSettings(
   try {
     const raw = await readFile(settingsPath, 'utf-8');
     const settings = JSON.parse(raw) as Record<string, unknown>;
-    const mcpServers = settings['mcpServers'];
+    const mcpServers = settings.mcpServers;
     if (mcpServers == null || typeof mcpServers !== 'object') return {};
     // Validate each entry has at minimum a command string
     const result: Record<string, MCPServerConfig> = {};

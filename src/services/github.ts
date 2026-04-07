@@ -150,6 +150,68 @@ export async function editIssueComment(ownerRepo: string, commentId: number, bod
   log.info(`Updated progress comment (id: ${commentId})`);
 }
 
+export interface KovaPRWithStatus extends KovaPR {
+  ciStatus: 'success' | 'failure' | 'pending' | 'unknown';
+}
+
+export async function fetchKovaPRsWithStatus(repoPath: string): Promise<KovaPRWithStatus[]> {
+  const result = await $({ cwd: repoPath })`gh pr list --state open --json number,title,headRefName,url --limit 50`;
+  const prs = JSON.parse(result.stdout) as Array<{
+    number: number;
+    title: string;
+    headRefName: string;
+    url: string;
+  }>;
+
+  const kovaPRs = prs.filter((pr) => pr.headRefName.startsWith('kova/') || pr.headRefName.startsWith('fix/issue-'));
+
+  return Promise.all(
+    kovaPRs.map(async (pr) => {
+      const viewResult = await $({ cwd: repoPath })`gh pr view ${pr.number} --json statusCheckRollup`;
+      const viewData = JSON.parse(viewResult.stdout) as {
+        statusCheckRollup: Array<{ state: string }>;
+      };
+
+      const rollup = viewData.statusCheckRollup ?? [];
+      let ciStatus: 'success' | 'failure' | 'pending' | 'unknown';
+      if (rollup.length === 0) {
+        ciStatus = 'unknown';
+      } else if (rollup.some((c) => c.state === 'FAILURE')) {
+        ciStatus = 'failure';
+      } else if (rollup.some((c) => c.state === 'PENDING')) {
+        ciStatus = 'pending';
+      } else {
+        ciStatus = 'success';
+      }
+
+      return {
+        number: pr.number,
+        title: pr.title,
+        branch: pr.headRefName,
+        url: pr.url,
+        ciStatus,
+      };
+    }),
+  );
+}
+
+export async function mergePR(repoPath: string, prNumber: number): Promise<{ merged: boolean; sha: string }> {
+  const result = await $({ cwd: repoPath })`gh pr merge ${prNumber} --squash --delete-branch`;
+  const sha = result.stdout.trim();
+  return { merged: true, sha };
+}
+
+export async function rebasePROnDefault(repoPath: string, prNumber: number): Promise<void> {
+  await $({ cwd: repoPath })`gh pr update-branch ${prNumber}`;
+}
+
+export function fetchPRDependencies(body: string): number[] {
+  const pattern = /(?:depends on|closes)\s+#(\d+)/gi;
+  const matches = [...body.matchAll(pattern)];
+  const numbers = matches.map((m) => Number(m[1]));
+  return [...new Set(numbers)];
+}
+
 export async function hasExistingWork(repoPath: string, issueNumber: number): Promise<ExistingWork | undefined> {
   const branch = `kova/fix-${issueNumber}`;
   const [branchExists, prUrl] = await Promise.all([

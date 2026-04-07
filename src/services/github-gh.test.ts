@@ -136,6 +136,10 @@ const {
   listOpenPRs,
   findOpenPR,
   hasExistingWork,
+  fetchKovaPRsWithStatus,
+  mergePR,
+  rebasePROnDefault,
+  fetchPRDependencies,
 } = await import('./github.js');
 
 /* ------------------------------------------------------------------ */
@@ -481,5 +485,293 @@ describe('editIssueComment', () => {
   it('throws on API error', async () => {
     setResponse('gh api', new Error('Forbidden'));
     await expect(editIssueComment('owner/repo', 12345, 'test')).rejects.toThrow('Forbidden');
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/*  New fixtures for PR status tests                                   */
+/* ------------------------------------------------------------------ */
+
+const KOVA_PR_LIST_FIXTURE = [
+  { number: 10, title: 'fix: Login crash', headRefName: 'kova/fix-42', url: 'https://github.com/owner/repo/pull/10' },
+  { number: 11, title: 'feat: Dark mode', headRefName: 'kova/fix-99', url: 'https://github.com/owner/repo/pull/11' },
+  { number: 12, title: 'chore: cleanup', headRefName: 'main', url: 'https://github.com/owner/repo/pull/12' }, // should be filtered
+];
+
+const PR_VIEW_SUCCESS_FIXTURE = {
+  number: 10,
+  statusCheckRollup: [{ state: 'SUCCESS' }, { state: 'SUCCESS' }],
+};
+
+const PR_VIEW_FAILURE_FIXTURE = {
+  number: 11,
+  statusCheckRollup: [{ state: 'SUCCESS' }, { state: 'FAILURE' }],
+};
+
+const PR_VIEW_PENDING_FIXTURE = {
+  number: 10,
+  statusCheckRollup: [{ state: 'PENDING' }],
+};
+
+const PR_VIEW_EMPTY_FIXTURE = {
+  number: 10,
+  statusCheckRollup: [],
+};
+
+/* ---------- fetchKovaPRsWithStatus --------------------------------- */
+
+describe('fetchKovaPRsWithStatus', () => {
+  it('fetches kova PRs and enriches with CI status', async () => {
+    setResponse('gh pr list', { stdout: JSON.stringify(KOVA_PR_LIST_FIXTURE) });
+    setResponse(/gh pr view 10/, { stdout: JSON.stringify(PR_VIEW_SUCCESS_FIXTURE) });
+    setResponse(/gh pr view 11/, { stdout: JSON.stringify(PR_VIEW_SUCCESS_FIXTURE) });
+
+    const prs = await fetchKovaPRsWithStatus('/repo');
+
+    expect(prs).toHaveLength(2); // PR #12 on 'main' filtered out
+    for (const pr of prs) {
+      expect(pr).toHaveProperty('ciStatus');
+    }
+  });
+
+  it('returns ciStatus "success" when all checks pass', async () => {
+    setResponse('gh pr list', {
+      stdout: JSON.stringify([
+        {
+          number: 10,
+          title: 'fix: Login crash',
+          headRefName: 'kova/fix-42',
+          url: 'https://github.com/owner/repo/pull/10',
+        },
+      ]),
+    });
+    setResponse(/gh pr view 10/, { stdout: JSON.stringify(PR_VIEW_SUCCESS_FIXTURE) });
+
+    const prs = await fetchKovaPRsWithStatus('/repo');
+
+    expect(prs[0]?.ciStatus).toBe('success');
+  });
+
+  it('returns ciStatus "failure" when any check fails', async () => {
+    setResponse('gh pr list', {
+      stdout: JSON.stringify([
+        {
+          number: 11,
+          title: 'feat: Dark mode',
+          headRefName: 'kova/fix-99',
+          url: 'https://github.com/owner/repo/pull/11',
+        },
+      ]),
+    });
+    setResponse(/gh pr view 11/, { stdout: JSON.stringify(PR_VIEW_FAILURE_FIXTURE) });
+
+    const prs = await fetchKovaPRsWithStatus('/repo');
+
+    expect(prs[0]?.ciStatus).toBe('failure');
+  });
+
+  it('returns ciStatus "pending" when checks are running', async () => {
+    setResponse('gh pr list', {
+      stdout: JSON.stringify([
+        {
+          number: 10,
+          title: 'fix: Login crash',
+          headRefName: 'kova/fix-42',
+          url: 'https://github.com/owner/repo/pull/10',
+        },
+      ]),
+    });
+    setResponse(/gh pr view 10/, { stdout: JSON.stringify(PR_VIEW_PENDING_FIXTURE) });
+
+    const prs = await fetchKovaPRsWithStatus('/repo');
+
+    expect(prs[0]?.ciStatus).toBe('pending');
+  });
+
+  it('returns ciStatus "unknown" when no statusCheckRollup data', async () => {
+    setResponse('gh pr list', {
+      stdout: JSON.stringify([
+        {
+          number: 10,
+          title: 'fix: Login crash',
+          headRefName: 'kova/fix-42',
+          url: 'https://github.com/owner/repo/pull/10',
+        },
+      ]),
+    });
+    setResponse(/gh pr view 10/, { stdout: JSON.stringify(PR_VIEW_EMPTY_FIXTURE) });
+
+    const prs = await fetchKovaPRsWithStatus('/repo');
+
+    expect(prs[0]?.ciStatus).toBe('unknown');
+  });
+
+  it('filters to only kova/ and fix/issue- branches', async () => {
+    setResponse('gh pr list', {
+      stdout: JSON.stringify([
+        {
+          number: 10,
+          title: 'fix: Login crash',
+          headRefName: 'kova/fix-42',
+          url: 'https://github.com/owner/repo/pull/10',
+        },
+        {
+          number: 11,
+          title: 'feat: Dark mode',
+          headRefName: 'fix/issue-99',
+          url: 'https://github.com/owner/repo/pull/11',
+        },
+        { number: 12, title: 'chore: cleanup', headRefName: 'main', url: 'https://github.com/owner/repo/pull/12' },
+        {
+          number: 13,
+          title: 'docs: update',
+          headRefName: 'feature/new-ui',
+          url: 'https://github.com/owner/repo/pull/13',
+        },
+      ]),
+    });
+    setResponse(/gh pr view 10/, { stdout: JSON.stringify(PR_VIEW_SUCCESS_FIXTURE) });
+    setResponse(/gh pr view 11/, { stdout: JSON.stringify(PR_VIEW_SUCCESS_FIXTURE) });
+
+    const prs = await fetchKovaPRsWithStatus('/repo');
+
+    expect(prs).toHaveLength(2);
+    const branches = prs.map((pr) => pr.branch);
+    expect(branches).toContain('kova/fix-42');
+    expect(branches).toContain('fix/issue-99');
+  });
+});
+
+/* ---------- mergePR ------------------------------------------------ */
+
+describe('mergePR', () => {
+  it('calls gh pr merge with --squash --delete-branch', async () => {
+    setResponse(/gh pr merge/, { stdout: '' });
+
+    await mergePR('/repo', 10);
+
+    const mergeCall = calls.find((c) => c.command.includes('gh pr merge'));
+    expect(mergeCall).toBeDefined();
+    expect(mergeCall?.command).toContain('--squash');
+    expect(mergeCall?.command).toContain('--delete-branch');
+  });
+
+  it('uses correct prNumber in command', async () => {
+    setResponse(/gh pr merge/, { stdout: '' });
+
+    await mergePR('/repo', 42);
+
+    const mergeCall = calls.find((c) => c.command.includes('gh pr merge'));
+    expect(mergeCall?.command).toContain('42');
+  });
+
+  it('uses correct cwd', async () => {
+    setResponse(/gh pr merge/, { stdout: '' });
+
+    await mergePR('/my/repo/path', 10);
+
+    const mergeCall = calls.find((c) => c.command.includes('gh pr merge'));
+    expect(mergeCall?.cwd).toBe('/my/repo/path');
+  });
+
+  it('returns { merged: true, sha } on success', async () => {
+    setResponse(/gh pr merge/, { stdout: '' });
+
+    const result = await mergePR('/repo', 10);
+
+    expect(result.merged).toBe(true);
+    expect(typeof result.sha).toBe('string');
+  });
+
+  it('throws on gh error (e.g., PR has conflicts)', async () => {
+    setResponse(/gh pr merge/, new Error('Pull request is not mergeable'));
+
+    await expect(mergePR('/repo', 10)).rejects.toThrow('Pull request is not mergeable');
+  });
+});
+
+/* ---------- rebasePROnDefault -------------------------------------- */
+
+describe('rebasePROnDefault', () => {
+  it('calls gh pr update-branch with correct prNumber', async () => {
+    setResponse(/gh pr update-branch/, { stdout: '' });
+
+    await rebasePROnDefault('/repo', 10);
+
+    const rebaseCall = calls.find((c) => c.command.includes('gh pr update-branch'));
+    expect(rebaseCall).toBeDefined();
+    expect(rebaseCall?.command).toContain('10');
+  });
+
+  it('uses correct cwd', async () => {
+    setResponse(/gh pr update-branch/, { stdout: '' });
+
+    await rebasePROnDefault('/my/repo/path', 10);
+
+    const rebaseCall = calls.find((c) => c.command.includes('gh pr update-branch'));
+    expect(rebaseCall?.cwd).toBe('/my/repo/path');
+  });
+
+  it('does not throw when branch is already up to date', async () => {
+    setResponse(/gh pr update-branch/, { stdout: 'Already up to date' });
+
+    await expect(rebasePROnDefault('/repo', 10)).resolves.not.toThrow();
+  });
+
+  it('throws on git error', async () => {
+    setResponse(/gh pr update-branch/, new Error('merge conflict'));
+
+    await expect(rebasePROnDefault('/repo', 10)).rejects.toThrow('merge conflict');
+  });
+});
+
+/* ---------- fetchPRDependencies ------------------------------------ */
+
+describe('fetchPRDependencies', () => {
+  it('parses "Depends on #5" from body', () => {
+    const deps = fetchPRDependencies('This PR depends on work from another branch.\n\nDepends on #5\n\nPlease review.');
+    expect(deps).toContain(5);
+  });
+
+  it('parses "Closes #3" from body', () => {
+    const deps = fetchPRDependencies('This PR closes another issue.\n\nCloses #3\n');
+    expect(deps).toContain(3);
+  });
+
+  it('parses multiple dependencies: "Depends on #5, Depends on #7"', () => {
+    const deps = fetchPRDependencies('Depends on #5\nDepends on #7\n');
+    expect(deps).toContain(5);
+    expect(deps).toContain(7);
+    expect(deps).toHaveLength(2);
+  });
+
+  it('returns empty array for body with no dependency markers', () => {
+    const deps = fetchPRDependencies('This is a standalone PR with no dependencies.');
+    expect(deps).toEqual([]);
+  });
+
+  it('handles case-insensitive matching ("depends on #5")', () => {
+    const deps = fetchPRDependencies('depends on #5');
+    expect(deps).toContain(5);
+  });
+
+  it('handles case-insensitive matching ("DEPENDS ON #5")', () => {
+    const deps = fetchPRDependencies('DEPENDS ON #5');
+    expect(deps).toContain(5);
+  });
+
+  it('handles mixed formats in same body', () => {
+    const body = 'Depends on #5\nCloses #3\nSome other text\nDepends on #7';
+    const deps = fetchPRDependencies(body);
+    expect(deps).toContain(5);
+    expect(deps).toContain(3);
+    expect(deps).toContain(7);
+  });
+
+  it('returns unique numbers (no duplicates)', () => {
+    const body = 'Depends on #5\nDepends on #5\nCloses #5';
+    const deps = fetchPRDependencies(body);
+    const fivesCount = deps.filter((n) => n === 5).length;
+    expect(fivesCount).toBe(1);
   });
 });
