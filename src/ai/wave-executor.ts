@@ -107,8 +107,7 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
     },
     streamFn: streamSimple,
     convertToLlm,
-    getApiKey: (provider: string) =>
-      isOllamaProvider(provider) ? resolveOllamaApiKey() : process.env.ANTHROPIC_API_KEY,
+    getApiKey: resolveApiKey,
   });
 
   let turnCount = 0;
@@ -465,6 +464,23 @@ export async function executeWaveWithRetry(options: WaveOptions, maxRetries = 2)
   }
 
   throw new KovaError(`Wave ${options.wave} failed after ${maxRetries + 1} attempts`, 'agent', false);
+}
+
+// --- API key resolution ---
+
+/** Resolve the API key for a given provider. Provider-specific env vars take priority. */
+export function resolveApiKey(provider: string): string | undefined {
+  if (isOllamaProvider(provider)) return resolveOllamaApiKey();
+  switch (provider) {
+    case 'google':
+      return process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY;
+    case 'openai':
+      return process.env.OPENAI_API_KEY;
+    case 'anthropic':
+      return process.env.ANTHROPIC_API_KEY;
+    default:
+      return process.env.ANTHROPIC_API_KEY;
+  }
 }
 
 // --- Helpers ---
