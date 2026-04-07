@@ -4,9 +4,9 @@
 
 import { type JsonSchemaOutputFormat, query } from '@anthropic-ai/claude-agent-sdk';
 import type { ModelTier, WaveName } from '../types/index.js';
-import { KovaError, isSpendingCapBehavior } from './errors.js';
-import { resolveModel } from './models.js';
 import { log } from '../utils/logger.js';
+import { isSpendingCapBehavior, KovaError } from './errors.js';
+import { resolveModel } from './models.js';
 
 export interface WaveOptions {
   wave: WaveName;
@@ -29,15 +29,7 @@ export interface WaveExecutionResult {
 }
 
 export async function executeWave(options: WaveOptions): Promise<WaveExecutionResult> {
-  const {
-    wave,
-    systemPrompt,
-    userMessage,
-    cwd,
-    modelTier,
-    outputFormat,
-    maxTurns = 5_000,
-  } = options;
+  const { wave, systemPrompt, userMessage, cwd, modelTier, outputFormat, maxTurns = 5_000 } = options;
 
   const model = resolveModel(modelTier);
   const startTime = Date.now();
@@ -110,15 +102,13 @@ export async function executeWave(options: WaveOptions): Promise<WaveExecutionRe
 
     // Defense-in-depth: detect spending cap that slipped through
     if (isSpendingCapBehavior(turnCount, cost, result ?? '')) {
-      throw new KovaError(
-        `Spending cap likely reached (turns=${turnCount}, cost=$0)`,
-        'billing',
-        true,
-      );
+      throw new KovaError(`Spending cap likely reached (turns=${turnCount}, cost=$0)`, 'billing', true);
     }
 
     const duration = Date.now() - startTime;
-    log.info(`[${wave}] Completed — turns=${turnCount}, cost=$${cost.toFixed(4)}, duration=${(duration / 1000).toFixed(1)}s`);
+    log.info(
+      `[${wave}] Completed — turns=${turnCount}, cost=$${cost.toFixed(4)}, duration=${(duration / 1000).toFixed(1)}s`,
+    );
 
     return {
       result,
@@ -146,10 +136,7 @@ export async function executeWave(options: WaveOptions): Promise<WaveExecutionRe
   }
 }
 
-export async function executeWaveWithRetry(
-  options: WaveOptions,
-  maxRetries: number = 2,
-): Promise<WaveExecutionResult> {
+export async function executeWaveWithRetry(options: WaveOptions, maxRetries: number = 2): Promise<WaveExecutionResult> {
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     const result = await executeWave(options);
 

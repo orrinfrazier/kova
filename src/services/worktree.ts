@@ -1,6 +1,6 @@
 // Git worktree management — create isolated working directories for each fix.
 
-import { $, path } from 'zx';
+import { $, fs, path } from 'zx';
 import { log } from '../utils/logger.js';
 
 $.verbose = false;
@@ -10,13 +10,27 @@ export interface Worktree {
   branch: string;
 }
 
+export async function detectDefaultBranch(repoPath: string): Promise<string> {
+  try {
+    const result = await $`git -C ${repoPath} symbolic-ref refs/remotes/origin/HEAD`;
+    // Returns e.g. "refs/remotes/origin/main" — extract the branch name
+    const ref = result.stdout.trim();
+    const branch = ref.replace('refs/remotes/origin/', '');
+    if (branch) return branch;
+  } catch {
+    log.debug('Could not detect default branch from origin/HEAD, falling back to main');
+  }
+  return 'main';
+}
+
 export async function createWorktree(repoPath: string, issueNumber: number): Promise<Worktree> {
   const branch = `kova/fix-${issueNumber}`;
-  const worktreePath = path.join(repoPath, '..', `.kova-worktrees`, `fix-${issueNumber}`);
+  const wtPath = worktreePath(repoPath, issueNumber);
+  const defaultBranch = await detectDefaultBranch(repoPath);
 
-  // Create branch from current HEAD if it doesn't exist
+  // Create branch from default branch if it doesn't exist
   try {
-    await $`git -C ${repoPath} branch ${branch}`;
+    await $`git -C ${repoPath} branch ${branch} ${defaultBranch}`;
   } catch {
     // Branch may already exist (resume case)
     log.debug(`Branch ${branch} already exists`);
@@ -24,14 +38,14 @@ export async function createWorktree(repoPath: string, issueNumber: number): Pro
 
   // Create worktree
   try {
-    await $`git -C ${repoPath} worktree add ${worktreePath} ${branch}`;
-    log.info(`Worktree created: ${worktreePath} (${branch})`);
+    await $`git -C ${repoPath} worktree add ${wtPath} ${branch}`;
+    log.info(`Worktree created: ${wtPath} (${branch})`);
   } catch {
     // Worktree may already exist (resume case)
-    log.debug(`Worktree already exists at ${worktreePath}`);
+    log.debug(`Worktree already exists at ${wtPath}`);
   }
 
-  return { path: worktreePath, branch };
+  return { path: wtPath, branch };
 }
 
 export async function removeWorktree(repoPath: string, worktreePath: string): Promise<void> {
@@ -41,6 +55,57 @@ export async function removeWorktree(repoPath: string, worktreePath: string): Pr
   } catch (error) {
     log.warn(`Failed to remove worktree: ${error instanceof Error ? error.message : String(error)}`);
   }
+}
+
+export function worktreePath(repoPath: string, issueNumber: number): string {
+  return path.join(repoPath, '..', '.kova-worktrees', `fix-${issueNumber}`);
+}
+
+export async function worktreeExists(repoPath: string, issueNumber: number): Promise<boolean> {
+  try {
+    const stat = await fs.stat(worktreePath(repoPath, issueNumber));
+    return stat.isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+export interface CommitAndPushResult {
+  committed: boolean;
+  filesStaged: string[];
+  commitMessage?: string;
+}
+
+export async function commitAndPush(
+  workDir: string,
+  branch: string,
+  issue: { number: number; title: string },
+): Promise<CommitAndPushResult> {
+  // Detect changed files (modified + untracked, with full paths for subdirs)
+  const status = await $`git -C ${workDir} status --porcelain --untracked-files=all`;
+  const lines = status.stdout.trim().split('\n').filter(Boolean);
+
+  if (lines.length === 0) {
+    log.info('[ship] No changed files — skipping commit');
+    return { committed: false, filesStaged: [] };
+  }
+
+  // Parse file paths from porcelain output (format: "XY path" or "XY path -> path")
+  const files = lines.map((line) => line.slice(3).split(' -> ').pop()!.trim());
+
+  // Stage specific files (not -A)
+  await $`git -C ${workDir} add ${files}`;
+
+  // Commit with conventional message
+  const commitMessage = `fix: ${issue.title} (#${issue.number})`;
+  await $`git -C ${workDir} commit -m ${commitMessage}`;
+  log.info(`[ship] Committed ${files.length} file(s): ${commitMessage}`);
+
+  // Push branch to origin
+  await $`git -C ${workDir} push -u origin ${branch}`;
+  log.info(`[ship] Pushed ${branch} to origin`);
+
+  return { committed: true, filesStaged: files, commitMessage };
 }
 
 export async function cleanupWorktrees(repoPath: string): Promise<void> {

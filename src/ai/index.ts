@@ -1,3 +1,3 @@
-export { executeWave, executeWaveWithRetry, type WaveOptions, type WaveExecutionResult } from './wave-executor.js';
+export { isRetryable, isSpendingCapBehavior, KovaError } from './errors.js';
 export { resolveModel } from './models.js';
-export { KovaError, isRetryable, isSpendingCapBehavior } from './errors.js';
+export { executeWave, executeWaveWithRetry, type WaveExecutionResult, type WaveOptions } from './wave-executor.js';

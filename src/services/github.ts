@@ -50,12 +50,7 @@ export async function fetchIssue(repoPath: string, issueNumber: number): Promise
   };
 }
 
-export async function createPR(
-  repoPath: string,
-  branch: string,
-  title: string,
-  body: string,
-): Promise<string> {
+export async function createPR(repoPath: string, branch: string, title: string, body: string): Promise<string> {
   const result = await $({ cwd: repoPath })`gh pr create --title ${title} --body ${body} --head ${branch}`;
   const prUrl = result.stdout.trim();
   log.info(`PR created: ${prUrl}`);
