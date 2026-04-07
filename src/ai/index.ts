@@ -1,4 +1,4 @@
-export { isRetryable, isSpendingCapBehavior, KovaError } from './errors.js';
+export { classifyError, type ErrorClassification, isRetryable, isSpendingCapBehavior, KovaError } from './errors.js';
 export { type ModelSpec, parseModelSpec, resolveModel, resolveModelFromString } from './models.js';
 export {
   executeWave,
