@@ -1,5 +1,5 @@
 export { isRetryable, isSpendingCapBehavior, KovaError } from './errors.js';
-export { resolveModel } from './models.js';
+export { type ModelSpec, parseModelSpec, resolveModel, resolveModelFromString } from './models.js';
 export {
   executeWave,
   executeWaveWithRetry,
