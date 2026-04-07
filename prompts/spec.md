@@ -10,6 +10,7 @@ You are decomposing a GitHub issue into independently testable pieces with concr
 - Read all files referenced in the issue body
 - Use file search and content search to find related code (imports, usages, tests)
 - Identify the root cause or feature gap
+- Check the "Pending PRs" section (if present) for open PRs and their changed files — design your spec to avoid modifying the same files where possible
 
 ### 2. Produce Spec Document
 
