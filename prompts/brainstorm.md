@@ -50,6 +50,12 @@ For each issue, produce:
 - **category**: `bug`, `security`, `performance`, `tech-debt`, or `enhancement`
 - **dependencies** (optional): Titles of other issues that should be fixed first
 
+## Focus Areas
+
+If the user message specifies focus areas, you MUST only generate issues within those areas. Ignore all other categories entirely. For example, if focus areas are "security, performance", only produce issues categorized as `security` or `performance`.
+
+If no focus areas are specified, generate issues across all categories.
+
 ## Rules
 
 - Read the actual code before identifying issues — do not guess
@@ -57,6 +63,6 @@ For each issue, produce:
 - Each issue should be independently actionable (Grade A-B scope)
 - Do not suggest issues that are already tracked in existing GitHub issues
 - Focus on substantive improvements, not style nitpicks
-- Aim for 5-15 issues per analysis
+- Aim for 5-15 issues per analysis (fewer if focus areas narrow the scope)
 - Order by priority (critical first, low last)
 - Output your analysis as structured JSON matching the provided schema
