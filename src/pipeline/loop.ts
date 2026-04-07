@@ -1,9 +1,9 @@
 // Fix loop — iterate through issues in priority order, fixing each one.
 
-import type { Issue, RepoConfig } from '../types/index.js';
-import { fix, type FixResult } from './fix.js';
 import { fetchIssues } from '../services/github.js';
+import type { Issue, RepoConfig } from '../types/index.js';
 import { log } from '../utils/logger.js';
+import { type FixResult, fix } from './fix.js';
 
 export interface LoopOptions {
   repoPath: string;
@@ -43,7 +43,7 @@ export async function fixLoop(options: LoopOptions): Promise<LoopResult> {
   const results: Array<{ issue: Issue; result: FixResult }> = [];
   let succeeded = 0;
   let failed = 0;
-  let skipped = 0;
+  const skipped = 0;
 
   for (const issue of toFix) {
     log.info(`\n${'='.repeat(60)}`);
@@ -64,7 +64,9 @@ export async function fixLoop(options: LoopOptions): Promise<LoopResult> {
 
   // 4. Summary
   log.info(`\n${'='.repeat(60)}`);
-  log.info(`Loop complete: ${succeeded} succeeded, ${failed} failed, ${skipped} skipped (${results.length}/${issues.length} total)`);
+  log.info(
+    `Loop complete: ${succeeded} succeeded, ${failed} failed, ${skipped} skipped (${results.length}/${issues.length} total)`,
+  );
 
   return { total: results.length, succeeded, failed, skipped, results };
 }
