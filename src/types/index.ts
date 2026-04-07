@@ -28,6 +28,7 @@ export type {
   QualityResult,
   ReviewFinding,
   ReviewResult,
+  SpecPiece,
   SpecResult,
   TestResult,
 } from './waves.js';
