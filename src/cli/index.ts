@@ -25,7 +25,7 @@ import { log } from '../utils/logger.js';
 
 const program = new Command();
 
-program.name('kova').description('Autonomous code agent — brainstorm issues, fix them, ship PRs').version('0.1.0');
+program.name('kova').description('Autonomous code agent — brainstorm issues, fix them, ship PRs').version('0.2.75');
 
 program
   .command('fix')
