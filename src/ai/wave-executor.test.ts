@@ -13,6 +13,7 @@ function fakeTool(name: string): AnyTool {
 // Mock pi-mono modules
 const mockPrompt = vi.fn();
 const mockAbort = vi.fn();
+const mockSteer = vi.fn();
 const mockSubscribe = vi.fn().mockReturnValue(vi.fn());
 
 let mockAgentState = {
@@ -27,7 +28,9 @@ vi.mock('@mariozechner/pi-agent-core', () => {
     Object.assign(this, {
       prompt: mockPrompt,
       abort: mockAbort,
+      steer: mockSteer,
       subscribe: mockSubscribe,
+      transformContext: undefined,
       get state() {
         return mockAgentState;
       },
@@ -704,30 +707,25 @@ describe('context monitoring', () => {
     delete process.env.ANTHROPIC_API_KEY;
   });
 
-  it('aborts and throws context KovaError when usage exceeds threshold', async () => {
+  it('aborts and throws context KovaError when usage exceeds abort threshold (90%)', async () => {
     const { spawnWaveAgent } = await import('./wave-executor.js');
     const { KovaError } = await import('./errors.js');
 
-    // Simulate subscribe callback capturing turn_end events
-    // The mock subscribe captures the callback, we invoke it with high-usage messages
     let subscribeCb: ((event: unknown) => void) | undefined;
     mockSubscribe.mockImplementation((cb: (event: unknown) => void) => {
       subscribeCb = cb;
       return vi.fn();
     });
 
-    // Mock prompt to simulate turns with high context usage
     mockPrompt.mockImplementation(async () => {
-      // Simulate turn_end events with usage exceeding 80% of context window
-      // claude-sonnet-4-6 has contextWindow = 200000
-      // 80% threshold = 160000 tokens
+      // 95% of 200000 = 190000 — above 90% abort threshold
       if (subscribeCb) {
         subscribeCb({
           type: 'turn_end',
           message: {
             role: 'assistant',
             content: [{ type: 'text', text: 'working...' }],
-            usage: { input: 170000, output: 1000, totalTokens: 171000, cost: { total: 0.01 } },
+            usage: { input: 190000, output: 1000, totalTokens: 191000, cost: { total: 0.01 } },
             stopReason: 'toolUse',
           },
           toolResults: [],
@@ -744,7 +742,7 @@ describe('context monitoring', () => {
         handoffContext: '',
         userMessage: 'Message.',
         cwd: '/tmp/test',
-        contextThreshold: 0.8,
+        contextThreshold: 0.9,
       }),
     ).rejects.toThrow(KovaError);
 
@@ -790,7 +788,7 @@ describe('context monitoring', () => {
     expect(mockAbort).not.toHaveBeenCalled();
   });
 
-  it('uses default threshold of 0.8 when not specified', async () => {
+  it('uses default threshold of 0.9 when not specified', async () => {
     const { spawnWaveAgent } = await import('./wave-executor.js');
     const { KovaError } = await import('./errors.js');
 
@@ -802,13 +800,13 @@ describe('context monitoring', () => {
 
     mockPrompt.mockImplementation(async () => {
       if (subscribeCb) {
-        // 85% of 200000 = 170000 — above default 0.8 threshold (160000)
+        // 92% of 200000 = 184000 — above default 0.9 threshold (180000)
         subscribeCb({
           type: 'turn_end',
           message: {
             role: 'assistant',
             content: [{ type: 'text', text: 'working...' }],
-            usage: { input: 170000, output: 1000, totalTokens: 171000, cost: { total: 0.01 } },
+            usage: { input: 184000, output: 1000, totalTokens: 185000, cost: { total: 0.01 } },
             stopReason: 'toolUse',
           },
           toolResults: [],
@@ -825,7 +823,7 @@ describe('context monitoring', () => {
         handoffContext: '',
         userMessage: 'Message.',
         cwd: '/tmp/test',
-        // no contextThreshold — should default to 0.8
+        // no contextThreshold — should default to 0.9
       }),
     ).rejects.toThrow(KovaError);
   });
@@ -865,6 +863,211 @@ describe('context monitoring', () => {
       userMessage: 'Message.',
       cwd: '/tmp/test',
       contextThreshold: 0.9,
+    });
+
+    expect(result.wave).toBe('impl');
+    expect(mockAbort).not.toHaveBeenCalled();
+  });
+
+  it('steers agent with warning at 70% context usage', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+
+    let subscribeCb: ((event: unknown) => void) | undefined;
+    mockSubscribe.mockImplementation((cb: (event: unknown) => void) => {
+      subscribeCb = cb;
+      return vi.fn();
+    });
+
+    mockPrompt.mockImplementation(async () => {
+      if (subscribeCb) {
+        // 75% of 200000 = 150000 — above 70% steer threshold, below 80% trim
+        subscribeCb({
+          type: 'turn_end',
+          message: {
+            role: 'assistant',
+            content: [{ type: 'text', text: 'working...' }],
+            usage: { input: 150000, output: 1000, totalTokens: 151000, cost: { total: 0.01 } },
+            stopReason: 'toolUse',
+          },
+          toolResults: [],
+        });
+      }
+    });
+
+    const result = await spawnWaveAgent({
+      wave: 'impl',
+      model: 'claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Message.',
+      cwd: '/tmp/test',
+    });
+
+    expect(result.wave).toBe('impl');
+    expect(mockSteer).toHaveBeenCalledOnce();
+    expect(mockSteer).toHaveBeenCalledWith(
+      expect.objectContaining({
+        role: 'user',
+        content: expect.stringContaining('Focus on completing the current task'),
+      }),
+    );
+    expect(mockAbort).not.toHaveBeenCalled();
+  });
+
+  it('sets transformContext at 80% context usage without aborting', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+
+    let subscribeCb: ((event: unknown) => void) | undefined;
+    let agentInstance: Record<string, unknown> | undefined;
+
+    mockSubscribe.mockImplementation((cb: (event: unknown) => void) => {
+      subscribeCb = cb;
+      return vi.fn();
+    });
+
+    // Capture the agent instance to check transformContext assignment
+    const { Agent: MockAgent } = await import('@mariozechner/pi-agent-core');
+    (MockAgent as unknown as ReturnType<typeof vi.fn>).mockImplementation(function (this: Record<string, unknown>) {
+      Object.assign(this, {
+        prompt: mockPrompt,
+        abort: mockAbort,
+        steer: mockSteer,
+        subscribe: mockSubscribe,
+        transformContext: undefined,
+        get state() {
+          return mockAgentState;
+        },
+      });
+      agentInstance = this;
+    });
+
+    mockPrompt.mockImplementation(async () => {
+      if (subscribeCb) {
+        // 82% of 200000 = 164000 — above 80% trim threshold, below 90% abort
+        subscribeCb({
+          type: 'turn_end',
+          message: {
+            role: 'assistant',
+            content: [{ type: 'text', text: 'working...' }],
+            usage: { input: 164000, output: 1000, totalTokens: 165000, cost: { total: 0.01 } },
+            stopReason: 'toolUse',
+          },
+          toolResults: [],
+        });
+      }
+    });
+
+    const result = await spawnWaveAgent({
+      wave: 'impl',
+      model: 'claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Message.',
+      cwd: '/tmp/test',
+    });
+
+    expect(result.wave).toBe('impl');
+    expect(mockAbort).not.toHaveBeenCalled();
+    // transformContext should have been set on the agent
+    expect(agentInstance?.transformContext).toBeTypeOf('function');
+    // steer should also have been called (70% < 82%)
+    expect(mockSteer).toHaveBeenCalled();
+  });
+
+  it('does not steer or trim below 70% usage', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+
+    let subscribeCb: ((event: unknown) => void) | undefined;
+    let agentInstance: Record<string, unknown> | undefined;
+
+    mockSubscribe.mockImplementation((cb: (event: unknown) => void) => {
+      subscribeCb = cb;
+      return vi.fn();
+    });
+
+    const { Agent: MockAgent } = await import('@mariozechner/pi-agent-core');
+    (MockAgent as unknown as ReturnType<typeof vi.fn>).mockImplementation(function (this: Record<string, unknown>) {
+      Object.assign(this, {
+        prompt: mockPrompt,
+        abort: mockAbort,
+        steer: mockSteer,
+        subscribe: mockSubscribe,
+        transformContext: undefined,
+        get state() {
+          return mockAgentState;
+        },
+      });
+      agentInstance = this;
+    });
+
+    mockPrompt.mockImplementation(async () => {
+      if (subscribeCb) {
+        // 60% of 200000 = 120000 — below all thresholds
+        subscribeCb({
+          type: 'turn_end',
+          message: {
+            role: 'assistant',
+            content: [{ type: 'text', text: 'done' }],
+            usage: { input: 120000, output: 1000, totalTokens: 121000, cost: { total: 0.01 } },
+            stopReason: 'stop',
+          },
+          toolResults: [],
+        });
+      }
+    });
+
+    const result = await spawnWaveAgent({
+      wave: 'impl',
+      model: 'claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Message.',
+      cwd: '/tmp/test',
+    });
+
+    expect(result.wave).toBe('impl');
+    expect(mockSteer).not.toHaveBeenCalled();
+    expect(mockAbort).not.toHaveBeenCalled();
+    expect(agentInstance?.transformContext).toBeUndefined();
+  });
+
+  it('does not abort at 80% — only trims', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+
+    let subscribeCb: ((event: unknown) => void) | undefined;
+    mockSubscribe.mockImplementation((cb: (event: unknown) => void) => {
+      subscribeCb = cb;
+      return vi.fn();
+    });
+
+    mockPrompt.mockImplementation(async () => {
+      if (subscribeCb) {
+        // 85% of 200000 = 170000 — above 80% trim, below 90% abort
+        subscribeCb({
+          type: 'turn_end',
+          message: {
+            role: 'assistant',
+            content: [{ type: 'text', text: 'working...' }],
+            usage: { input: 170000, output: 1000, totalTokens: 171000, cost: { total: 0.01 } },
+            stopReason: 'toolUse',
+          },
+          toolResults: [],
+        });
+      }
+    });
+
+    // Should NOT throw — 85% is in the trim zone, not the abort zone
+    const result = await spawnWaveAgent({
+      wave: 'impl',
+      model: 'claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Message.',
+      cwd: '/tmp/test',
     });
 
     expect(result.wave).toBe('impl');
