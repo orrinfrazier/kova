@@ -311,6 +311,42 @@ describe('buildEpisodeRecord', () => {
     expect(buildEpisodeRecord(makeFixState()).failed_wave_output).toBeUndefined();
   });
 
+  it('includes diagnosis when present in state', () => {
+    const record = buildEpisodeRecord(
+      makeFixState({
+        status: 'failed',
+        completedWaves: ['assess', 'spec', 'test', 'impl'],
+        diagnosis: 'APPROACH_WRONG',
+      }),
+    );
+    expect(record.diagnosis).toBe('APPROACH_WRONG');
+  });
+
+  it('includes thrashing_signal when present in state', () => {
+    const record = buildEpisodeRecord(
+      makeFixState({
+        thrashingSignal: 'SAME_FILES',
+      }),
+    );
+    expect(record.thrashing_signal).toBe('SAME_FILES');
+  });
+
+  it('includes retry_attempts when present in state', () => {
+    const record = buildEpisodeRecord(
+      makeFixState({
+        retryAttempts: 3,
+      }),
+    );
+    expect(record.retry_attempts).toBe(3);
+  });
+
+  it('diagnosis fields are undefined when not present in state', () => {
+    const record = buildEpisodeRecord(makeFixState());
+    expect(record.diagnosis).toBeUndefined();
+    expect(record.thrashing_signal).toBeUndefined();
+    expect(record.retry_attempts).toBeUndefined();
+  });
+
   it('failed_at_wave points to wave after last completed on failure', () => {
     const baseWaveResults = makeFixState().waveResults;
     const waveResults: Partial<Record<WaveName, WaveResult>> = {};

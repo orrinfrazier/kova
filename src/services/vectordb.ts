@@ -262,6 +262,9 @@ export interface EpisodeRecord {
   learnings?: string | undefined;
   failed_wave_output?: string | undefined;
   failed_at_wave: string | null;
+  diagnosis?: 'SPEC_WRONG' | 'APPROACH_WRONG' | 'MISSING_CONTEXT' | 'STUCK' | undefined;
+  thrashing_signal?: 'SAME_FILES' | 'DIFFERENT_FILES' | 'NORMAL' | 'INSUFFICIENT_DATA' | undefined;
+  retry_attempts?: number | undefined;
   total_cost: number;
   total_duration: number;
   total_turns: number;
@@ -347,6 +350,9 @@ export function buildEpisodeRecord(state: FixState): EpisodeRecord {
     ...(learnings != null && { learnings }),
     ...(failedWaveOutput != null && { failed_wave_output: failedWaveOutput }),
     failed_at_wave: failedAtWave,
+    ...(state.diagnosis != null && { diagnosis: state.diagnosis }),
+    ...(state.thrashingSignal != null && { thrashing_signal: state.thrashingSignal }),
+    ...(state.retryAttempts != null && { retry_attempts: state.retryAttempts }),
     total_cost: totalCost,
     total_duration: totalDuration,
     total_turns: totalTurns,
