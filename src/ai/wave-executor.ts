@@ -105,9 +105,7 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
   const effectiveUserMessage = handoffContext ? `${handoffContext}\n\n---\n\n${userMessage}` : userMessage;
 
   const afterToolCallHook =
-    toolResultTruncation === false
-      ? undefined
-      : createAfterToolCallHook(toolResultTruncation ?? undefined);
+    toolResultTruncation === false ? undefined : createAfterToolCallHook(toolResultTruncation ?? undefined);
 
   const agent = new Agent({
     initialState: {
