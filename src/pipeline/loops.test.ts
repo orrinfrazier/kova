@@ -94,6 +94,8 @@ describe('runTILoop', () => {
   beforeEach(() => {
     mockExecute.mockClear();
     mockTestRunner = vi.fn();
+    // Default: baseline call returns pass (no pre-existing failures), then per-test mocks follow
+    vi.mocked(mockTestRunner).mockResolvedValueOnce({ passed: true, output: 'ok', exitCode: 0 });
     // Default: test wave first, then impl for all subsequent calls
     mockExecute.mockResolvedValueOnce(testWaveExecResult()).mockResolvedValue(implWaveExecResult());
   });
@@ -1343,6 +1345,8 @@ describe('runTILoop — modified files tracking', () => {
     mockExecute.mockReset();
     mockTestRunner = vi.fn();
     mockDiffRunner = vi.fn();
+    // Default: baseline call returns pass (no pre-existing failures)
+    vi.mocked(mockTestRunner).mockResolvedValueOnce({ passed: true, output: 'ok', exitCode: 0 });
     mockExecute.mockResolvedValueOnce(testWaveExecResult()).mockResolvedValue(implWaveExecResult());
   });
 
@@ -1500,6 +1504,8 @@ describe('runPieceTILoop', () => {
   beforeEach(() => {
     mockExecute.mockClear();
     mockTestRunner = vi.fn();
+    // Default: baseline call returns pass (no pre-existing failures)
+    vi.mocked(mockTestRunner).mockResolvedValueOnce({ passed: true, output: 'ok', exitCode: 0 });
     mockExecute.mockResolvedValueOnce(testWaveExecResult()).mockResolvedValue(implWaveExecResult());
   });
 
@@ -1586,6 +1592,8 @@ describe('runParallelPieceTILoop', () => {
   beforeEach(() => {
     mockExecute.mockClear();
     mockTestRunner = vi.fn();
+    // Default: baseline call returns pass (no pre-existing failures)
+    vi.mocked(mockTestRunner).mockResolvedValueOnce({ passed: true, output: 'ok', exitCode: 0 });
   });
 
   it('1 piece — backward compatible, delegates to runTILoop (no sub-worktrees)', async () => {

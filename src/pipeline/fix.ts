@@ -137,9 +137,16 @@ function waveFallbackModel(
   configFallback?: string,
 ): string | undefined {
   // Configured fallback takes priority — only use if different from primary
-  if (configFallback && configFallback !== modelString) return configFallback;
-  // Default behavior: local models fall back to API tier defaults
+  if (configFallback && configFallback !== modelString) {
+    // Resolve tier names (small/medium/large) to actual model IDs
+    if (configFallback === 'small' || configFallback === 'medium' || configFallback === 'large') {
+      return getApiFallbackModelString(configFallback);
+    }
+    return configFallback;
+  }
+  // Default behavior: local models fall back to API tier defaults — but only if an API key is available
   if (!isLocalModel(modelString)) return undefined;
+  if (!process.env.ANTHROPIC_API_KEY) return undefined;
   if (typeof waveConfig === 'string') {
     if (waveConfig === 'small' || waveConfig === 'medium' || waveConfig === 'large') {
       return getApiFallbackModelString(waveConfig);
@@ -183,7 +190,8 @@ async function spawnWave<T>(
   }
   await recordPromptVersion(repoPath, wave, systemPrompt).catch(() => {});
   const thinkingLevel = resolveThinkingLevel(config, wave);
-  const modelString = model.id;
+  // Preserve provider prefix so spawnWaveAgent can re-resolve correctly
+  const modelString = model.provider !== 'anthropic' ? `${model.provider}:${model.id}` : model.id;
   const fallbackModel = waveFallbackModel(config.model[wave], modelString, config.model.fallback);
   const handoff = await spawnWaveAgentWithFallback<T>({
     wave,

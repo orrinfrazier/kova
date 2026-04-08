@@ -154,16 +154,60 @@ const TEST_COMMANDS: Record<string, string> = {
   pytest: 'pytest',
 };
 
-export async function resolveTestCommand(workDir: string, testCommand?: string): Promise<string> {
+export async function resolveTestCommand(
+  workDir: string,
+  testCommand?: string,
+  specFiles?: string[],
+): Promise<string> {
   if (testCommand) return testCommand;
 
   const tooling = await detectTooling(workDir);
   if (tooling.testRunner) {
     const cmd = TEST_COMMANDS[tooling.testRunner];
-    if (cmd) return cmd;
+    if (cmd) {
+      // Auto-scope cargo test to affected crates in Rust monorepos
+      if (tooling.testRunner === 'cargo-test' && specFiles && specFiles.length > 0) {
+        const scoped = await scopeCargoTestCommand(workDir, specFiles);
+        if (scoped) return scoped;
+      }
+      return cmd;
+    }
   }
 
   throw new Error('Cannot detect test command — provide testCommand in TILoopConfig');
+}
+
+/** Detect affected Cargo packages from spec file paths and return a scoped test command.
+ *  Walks up from each file to find the nearest Cargo.toml and extracts the package name. */
+export async function scopeCargoTestCommand(
+  workDir: string,
+  specFiles: string[],
+): Promise<string | undefined> {
+  const cratePackages = new Set<string>();
+
+  for (const file of specFiles) {
+    let dir = path.dirname(path.resolve(workDir, file));
+    while (dir.startsWith(workDir) || dir === workDir) {
+      try {
+        const content = await fs.readFile(path.join(dir, 'Cargo.toml'), 'utf-8');
+        const nameMatch = content.match(/^\s*name\s*=\s*"([^"]+)"/m);
+        if (nameMatch?.[1]) {
+          cratePackages.add(nameMatch[1]);
+          break;
+        }
+      } catch {
+        // No Cargo.toml here, try parent
+      }
+      const parent = path.dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+  }
+
+  if (cratePackages.size === 0) return undefined;
+
+  const pkgArgs = [...cratePackages].map((p) => `-p ${p}`).join(' ');
+  return `cargo test ${pkgArgs}`;
 }
 
 // --- Default test runner (bash execution) ---
@@ -200,6 +244,63 @@ export const defaultDiffRunner: DiffRunner = async (workDir) => {
     return [];
   }
 };
+
+// --- Baseline test failure extraction ---
+
+/** Extract failed test names from test runner output to identify pre-existing failures.
+ *  Supports Rust (cargo test), JS (vitest/jest), Go, and Python (pytest) output formats. */
+export function extractFailedTestNames(output: string): Set<string> {
+  const failures = new Set<string>();
+  for (const line of output.split('\n')) {
+    // Rust: "test some::test_name ... FAILED" or "---- some::test_name stdout ----"
+    const rustMatch = line.match(/^test\s+(\S+)\s+\.\.\.\s+FAILED/);
+    if (rustMatch?.[1]) {
+      failures.add(rustMatch[1]);
+      continue;
+    }
+    const rustStdout = line.match(/^----\s+(\S+)\s+stdout\s+----/);
+    if (rustStdout?.[1]) {
+      failures.add(rustStdout[1]);
+      continue;
+    }
+    // Rust failures summary: "    some::test_name"
+    const rustSummary = line.match(/^\s{4}(\S+::\S+)$/);
+    if (rustSummary?.[1]) {
+      failures.add(rustSummary[1]);
+      continue;
+    }
+    // JS (vitest/jest): "FAIL src/foo.test.ts > test name" or "✗ test name" or "× test name"
+    const jsMatch = line.match(/^(?:FAIL|✗|×)\s+(.+)/);
+    if (jsMatch?.[1]) {
+      failures.add(jsMatch[1].trim());
+      continue;
+    }
+    // Go: "--- FAIL: TestName"
+    const goMatch = line.match(/^---\s+FAIL:\s+(\S+)/);
+    if (goMatch?.[1]) {
+      failures.add(goMatch[1]);
+      continue;
+    }
+    // Python: "FAILED tests/test_foo.py::test_name"
+    const pyMatch = line.match(/^FAILED\s+(\S+)/);
+    if (pyMatch?.[1]) {
+      failures.add(pyMatch[1]);
+      continue;
+    }
+  }
+  return failures;
+}
+
+/** Check if test failures are only pre-existing (baseline) failures, no new regressions. */
+export function isOnlyBaselineFailures(output: string, baselineFailures: Set<string>): boolean {
+  if (baselineFailures.size === 0) return false;
+  const currentFailures = extractFailedTestNames(output);
+  if (currentFailures.size === 0) return false;
+  for (const f of currentFailures) {
+    if (!baselineFailures.has(f)) return false; // New failure found
+  }
+  return true;
+}
 
 // --- Thrashing detection ---
 
@@ -349,6 +450,18 @@ export function classifyDiagnosis(failureOutputs: string[], thrashingSignal?: Th
   return 'APPROACH_WRONG';
 }
 
+// --- Spec file extraction ---
+
+/** Extract all file paths from a spec result stored in wave results. */
+function extractSpecFiles(waveResults: Partial<Record<WaveName, WaveResult>>): string[] {
+  const spec = waveResults.spec?.artifact;
+  if (spec && typeof spec === 'object' && 'pieces' in spec) {
+    const s = spec as { pieces: Array<{ files?: string[] }> };
+    return s.pieces.flatMap((p) => p.files ?? []);
+  }
+  return [];
+}
+
 // --- Wave result conversion ---
 
 function toWaveResult(
@@ -396,7 +509,8 @@ export async function runTILoop(config: TILoopConfig): Promise<TILoopResult> {
     throw new Error('maxRetries must be at least 1');
   }
 
-  const testCmd = await resolveTestCommand(workDir, config.testCommand);
+  const specFiles = extractSpecFiles(waveResults);
+  const testCmd = await resolveTestCommand(workDir, config.testCommand, specFiles);
   log.info(`[ti-loop] Test command: ${testCmd}`);
 
   let totalCost = 0;
@@ -422,6 +536,17 @@ export async function runTILoop(config: TILoopConfig): Promise<TILoopResult> {
   const updatedWaveResults = { ...waveResults, test: testWaveResult };
 
   // Step 2: Impl retry loop — orchestrator runs tests via bash
+  // Baseline: capture pre-existing test failures before impl touches anything.
+  // Only count NEW failures as regressions — pre-existing failures are ignored.
+  log.info(`[ti-loop] Capturing test baseline: ${testCmd}`);
+  const baseline = await testRunner(testCmd, workDir);
+  const baselineFailures = baseline.passed ? new Set<string>() : extractFailedTestNames(baseline.output);
+  if (baselineFailures.size > 0) {
+    log.warn(
+      `[ti-loop] Baseline has ${baselineFailures.size} pre-existing failure(s) — will ignore: ${[...baselineFailures].join(', ')}`,
+    );
+  }
+
   const failureOutputs: string[] = [];
   const modifiedFilesPerAttempt: string[][] = [];
   let implWaveResult: WaveResult | undefined;
@@ -481,6 +606,15 @@ export async function runTILoop(config: TILoopConfig): Promise<TILoopResult> {
       break;
     }
 
+    // Check if failures are only pre-existing (baseline) — treat as pass
+    if (baselineFailures.size > 0 && isOnlyBaselineFailures(testRun.output, baselineFailures)) {
+      log.info(
+        `[ti-loop] Tests failed but only pre-existing failures remain — treating as pass (attempt ${attempt + 1})`,
+      );
+      testsPassing = true;
+      break;
+    }
+
     log.warn(`[ti-loop] Tests failed on attempt ${attempt + 1} (exit ${testRun.exitCode})`);
     failureOutputs.push(testRun.output);
   }
@@ -527,7 +661,7 @@ export async function runPieceTILoop(config: PieceTILoopConfig): Promise<PieceTI
     throw new Error('maxRetries must be at least 1');
   }
 
-  const testCmd = await resolveTestCommand(workDir, config.testCommand);
+  const testCmd = await resolveTestCommand(workDir, config.testCommand, piece.files);
   log.info(`[piece-ti-loop] Piece ${pieceIndex} (${piece.name}): test command: ${testCmd}`);
 
   let cost = 0;
@@ -550,6 +684,16 @@ export async function runPieceTILoop(config: PieceTILoopConfig): Promise<PieceTI
   cost += testExecResult.cost;
 
   // Step 2: Impl retry loop — piece-scoped context
+  // Baseline: capture pre-existing test failures before impl
+  log.info(`[piece-ti-loop] Piece ${pieceIndex}: capturing test baseline`);
+  const baseline = await testRunner(testCmd, workDir);
+  const baselineFailures = baseline.passed ? new Set<string>() : extractFailedTestNames(baseline.output);
+  if (baselineFailures.size > 0) {
+    log.warn(
+      `[piece-ti-loop] Piece ${pieceIndex}: baseline has ${baselineFailures.size} pre-existing failure(s)`,
+    );
+  }
+
   const failureOutputs: string[] = [];
   let implWaveResult: WaveResult | undefined;
   let testsPassing = false;
@@ -593,6 +737,15 @@ export async function runPieceTILoop(config: PieceTILoopConfig): Promise<PieceTI
 
     if (testRun.passed) {
       log.info(`[piece-ti-loop] Piece ${pieceIndex}: tests passing on attempt ${attempt + 1}`);
+      testsPassing = true;
+      break;
+    }
+
+    // Check if failures are only pre-existing (baseline) — treat as pass
+    if (baselineFailures.size > 0 && isOnlyBaselineFailures(testRun.output, baselineFailures)) {
+      log.info(
+        `[piece-ti-loop] Piece ${pieceIndex}: only pre-existing failures remain — treating as pass (attempt ${attempt + 1})`,
+      );
       testsPassing = true;
       break;
     }
@@ -817,7 +970,8 @@ export async function runReviewLoop(config: ReviewLoopConfig): Promise<ReviewLoo
     throw new Error('maxIterations must be at least 1');
   }
 
-  const testCmd = await resolveTestCommand(workDir, config.testCommand);
+  const specFiles = extractSpecFiles(waveResults);
+  const testCmd = await resolveTestCommand(workDir, config.testCommand, specFiles);
   const resolvedPromptsDir = resolvePromptsDir(repoConfig.path, repoConfig.prompts_dir);
   let totalCost = 0;
   let reviewWaveResult: WaveResult | undefined;
