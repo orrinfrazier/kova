@@ -199,6 +199,38 @@ export function formatEpisodes(episodes: EpisodeContext[], currentRepo?: string)
   return `## Learnings from similar past issues\n\n${sections.join('\n\n')}`;
 }
 
+/**
+ * Format only failed episodes into a warning section for spec wave injection.
+ * Filters to `outcome: 'failure'`, frames each as an approach to avoid.
+ */
+export function formatFailedEpisodes(episodes: EpisodeContext[], currentRepo?: string): string {
+  const failed = episodes.filter((ep) => ep.outcome === 'failure');
+  if (failed.length === 0) {
+    return '';
+  }
+
+  const sorted = [...failed].sort((a, b) => b.score - a.score);
+
+  const sections = sorted.map((ep) => {
+    const lines = [`### #${ep.issue_number}: ${ep.issue_title}`];
+
+    if (currentRepo && ep.repo) {
+      const tag = ep.repo === currentRepo ? '[same-repo]' : `[cross-repo: ${ep.repo}]`;
+      lines.push(`- **Source:** ${tag}`);
+    }
+
+    lines.push(
+      `- **Approach:** ${ep.approach}`,
+      `- **Outcome:** failed — Avoid this decomposition.`,
+      `- **Learning:** ${ep.learnings}`,
+    );
+
+    return lines.join('\n');
+  });
+
+  return `## Past failed approaches — avoid repeating\n\n${sections.join('\n\n')}`;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Episode recording — REST endpoint (post-fix persistence)           */
 /* ------------------------------------------------------------------ */
