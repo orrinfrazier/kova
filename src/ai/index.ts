@@ -38,6 +38,14 @@ export {
   resolveOllamaApiKey,
 } from './ollama.js';
 export {
+  createRouterModel,
+  getRouterBaseUrl,
+  getRouterDefaultModel,
+  isRouterEnabled,
+  isRouterProvider,
+  resolveRouterApiKey,
+} from './router.js';
+export {
   createAfterToolCallHook,
   DEFAULT_HEAD_TOKENS,
   DEFAULT_TAIL_TOKENS,
@@ -46,14 +54,6 @@ export {
   type ToolHookOptions,
   truncateContent,
 } from './tool-hooks.js';
-export {
-  createRouterModel,
-  getRouterBaseUrl,
-  getRouterDefaultModel,
-  isRouterEnabled,
-  isRouterProvider,
-  resolveRouterApiKey,
-} from './router.js';
 export {
   executeWave,
   executeWaveWithRetry,
