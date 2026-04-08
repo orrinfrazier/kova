@@ -36,6 +36,7 @@ const {
   classifyFirstFailure,
   detectThrashing,
   extractMissingFilePaths,
+  runQualityRetryLoop,
 } = await import('./loops.js');
 const { executeWaveWithRetry } = await import('../ai/index.js');
 const { detectTooling } = await import('../services/language-detect.js');
@@ -2118,5 +2119,404 @@ describe('runPieceTILoop early diagnosis', () => {
     const implCalls = mockExecute.mock.calls.filter((c) => c[0].wave === 'impl');
     // Second impl (attempt 2) should have early escalation
     expect(implCalls.at(1)?.[0].userMessage).toContain('MISSING_CONTEXT');
+  });
+});
+
+// --- Quality Retry Loop (Issue #217) ---
+
+function qualityWaveExecResult(overrides?: Partial<Record<string, unknown>>) {
+  return {
+    result: 'done',
+    success: true,
+    duration: 150,
+    turns: 3,
+    cost: 0.08,
+    model: 'quality-model',
+    structuredOutput: {
+      gates: [
+        {
+          gate: 'lint',
+          status: 'passed',
+          auto_fixable: false,
+          fix_applied: false,
+          remaining_errors: [],
+          suggested_action: 'none',
+        },
+        {
+          gate: 'typecheck',
+          status: 'passed',
+          auto_fixable: false,
+          fix_applied: false,
+          remaining_errors: [],
+          suggested_action: 'none',
+        },
+        {
+          gate: 'tests',
+          status: 'passed',
+          auto_fixable: false,
+          fix_applied: false,
+          remaining_errors: [],
+          suggested_action: 'none',
+        },
+        {
+          gate: 'coverage',
+          status: 'passed',
+          auto_fixable: false,
+          fix_applied: false,
+          remaining_errors: [],
+          suggested_action: 'none',
+        },
+        {
+          gate: 'audit',
+          status: 'skipped',
+          auto_fixable: false,
+          fix_applied: false,
+          remaining_errors: [],
+          suggested_action: 'none',
+        },
+        {
+          gate: 'secrets',
+          status: 'passed',
+          auto_fixable: false,
+          fix_applied: false,
+          remaining_errors: [],
+          suggested_action: 'none',
+        },
+      ],
+      all_passing: true,
+      coverage_percent: 85,
+      auto_fixes_applied: [],
+      files_modified: [],
+    },
+    ...overrides,
+  };
+}
+
+function failingQualityExecResult() {
+  return qualityWaveExecResult({
+    structuredOutput: {
+      gates: [
+        {
+          gate: 'lint',
+          status: 'passed',
+          auto_fixable: false,
+          fix_applied: false,
+          remaining_errors: [],
+          suggested_action: 'none',
+        },
+        {
+          gate: 'typecheck',
+          status: 'passed',
+          auto_fixable: false,
+          fix_applied: false,
+          remaining_errors: [],
+          suggested_action: 'none',
+        },
+        {
+          gate: 'tests',
+          status: 'failed',
+          auto_fixable: false,
+          fix_applied: false,
+          remaining_errors: ['src/__tests__/foo.test.ts: Expected true, got false'],
+          suggested_action: 'retry_impl',
+        },
+        {
+          gate: 'coverage',
+          status: 'passed',
+          auto_fixable: false,
+          fix_applied: false,
+          remaining_errors: [],
+          suggested_action: 'none',
+        },
+        {
+          gate: 'audit',
+          status: 'skipped',
+          auto_fixable: false,
+          fix_applied: false,
+          remaining_errors: [],
+          suggested_action: 'none',
+        },
+        {
+          gate: 'secrets',
+          status: 'passed',
+          auto_fixable: false,
+          fix_applied: false,
+          remaining_errors: [],
+          suggested_action: 'none',
+        },
+      ],
+      all_passing: false,
+      coverage_percent: 85,
+      auto_fixes_applied: [],
+      files_modified: [],
+    },
+  });
+}
+
+describe('runQualityRetryLoop', () => {
+  let mockTestRunner: TestRunner;
+
+  beforeEach(() => {
+    mockExecute.mockClear();
+    mockTestRunner = vi.fn();
+  });
+
+  it('returns immediately when quality passes (no retry needed)', async () => {
+    const qualityResult: WaveResult = {
+      wave: 'quality',
+      success: true,
+      artifact: {
+        gates: [
+          {
+            gate: 'lint',
+            status: 'passed',
+            auto_fixable: false,
+            fix_applied: false,
+            remaining_errors: [],
+            suggested_action: 'none',
+          },
+          {
+            gate: 'tests',
+            status: 'passed',
+            auto_fixable: false,
+            fix_applied: false,
+            remaining_errors: [],
+            suggested_action: 'none',
+          },
+        ],
+        all_passing: true,
+        coverage_percent: 85,
+        auto_fixes_applied: [],
+        files_modified: [],
+      },
+      duration: 100,
+      cost: 0.05,
+      turns: 1,
+    };
+
+    const result = await runQualityRetryLoop({
+      issue: makeIssue(),
+      workDir: '/tmp/test',
+      repoConfig: makeConfig(),
+      waveResults: { quality: qualityResult },
+      testRunner: mockTestRunner,
+    });
+
+    expect(result.retried).toBe(false);
+    expect(result.qualityWaveResult).toBe(qualityResult);
+    expect(mockExecute).not.toHaveBeenCalled();
+  });
+
+  it('retries impl when quality detects test failures with retry_impl action', async () => {
+    const qualityResult: WaveResult = {
+      wave: 'quality',
+      success: true,
+      artifact: {
+        gates: [
+          {
+            gate: 'lint',
+            status: 'passed',
+            auto_fixable: false,
+            fix_applied: false,
+            remaining_errors: [],
+            suggested_action: 'none',
+          },
+          {
+            gate: 'typecheck',
+            status: 'passed',
+            auto_fixable: false,
+            fix_applied: false,
+            remaining_errors: [],
+            suggested_action: 'none',
+          },
+          {
+            gate: 'tests',
+            status: 'failed',
+            auto_fixable: false,
+            fix_applied: false,
+            remaining_errors: ['test/auth.test.ts: Expected 200 got 500'],
+            suggested_action: 'retry_impl',
+          },
+        ],
+        all_passing: false,
+        coverage_percent: 85,
+        auto_fixes_applied: [],
+        files_modified: [],
+      },
+      duration: 100,
+      cost: 0.05,
+      turns: 1,
+    };
+
+    // impl retry → quality re-run (passing)
+    mockExecute.mockResolvedValueOnce(implWaveExecResult()).mockResolvedValueOnce(qualityWaveExecResult());
+    vi.mocked(mockTestRunner).mockResolvedValueOnce({ passed: true, output: 'ok', exitCode: 0 });
+
+    const result = await runQualityRetryLoop({
+      issue: makeIssue(),
+      workDir: '/tmp/test',
+      repoConfig: makeConfig(),
+      waveResults: { quality: qualityResult },
+      testRunner: mockTestRunner,
+    });
+
+    expect(result.retried).toBe(true);
+    // Should have called impl once and quality once
+    const waveCalls = mockExecute.mock.calls.map((c) => c[0].wave);
+    expect(waveCalls).toContain('impl');
+    expect(waveCalls).toContain('quality');
+  });
+
+  it('injects quality failure context into impl retry message', async () => {
+    const qualityResult: WaveResult = {
+      wave: 'quality',
+      success: true,
+      artifact: {
+        gates: [
+          {
+            gate: 'tests',
+            status: 'failed',
+            auto_fixable: false,
+            fix_applied: false,
+            remaining_errors: ['Expected 200 got 500'],
+            suggested_action: 'retry_impl',
+          },
+        ],
+        all_passing: false,
+        coverage_percent: 85,
+        auto_fixes_applied: [],
+        files_modified: [],
+      },
+      duration: 100,
+      cost: 0.05,
+      turns: 1,
+    };
+
+    mockExecute.mockResolvedValueOnce(implWaveExecResult()).mockResolvedValueOnce(qualityWaveExecResult());
+    vi.mocked(mockTestRunner).mockResolvedValueOnce({ passed: true, output: 'ok', exitCode: 0 });
+
+    await runQualityRetryLoop({
+      issue: makeIssue(),
+      workDir: '/tmp/test',
+      repoConfig: makeConfig(),
+      waveResults: { quality: qualityResult },
+      testRunner: mockTestRunner,
+    });
+
+    const implCall = mockExecute.mock.calls.find((c) => c[0].wave === 'impl');
+    expect(implCall).toBeDefined();
+    expect(implCall?.[0].userMessage).toContain('Expected 200 got 500');
+  });
+
+  it('caps at 1 retry cycle — does not retry twice', async () => {
+    const qualityResult: WaveResult = {
+      wave: 'quality',
+      success: true,
+      artifact: {
+        gates: [
+          {
+            gate: 'tests',
+            status: 'failed',
+            auto_fixable: false,
+            fix_applied: false,
+            remaining_errors: ['test failed'],
+            suggested_action: 'retry_impl',
+          },
+        ],
+        all_passing: false,
+        coverage_percent: 85,
+        auto_fixes_applied: [],
+        files_modified: [],
+      },
+      duration: 100,
+      cost: 0.05,
+      turns: 1,
+    };
+
+    // impl retry → quality re-run (STILL failing) → should NOT retry again
+    mockExecute.mockResolvedValueOnce(implWaveExecResult()).mockResolvedValueOnce(failingQualityExecResult());
+    vi.mocked(mockTestRunner).mockResolvedValueOnce({ passed: true, output: 'ok', exitCode: 0 });
+
+    const result = await runQualityRetryLoop({
+      issue: makeIssue(),
+      workDir: '/tmp/test',
+      repoConfig: makeConfig(),
+      waveResults: { quality: qualityResult },
+      testRunner: mockTestRunner,
+    });
+
+    expect(result.retried).toBe(true);
+    // Only 1 impl + 1 quality = 2 total calls, NOT more
+    expect(mockExecute).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not retry when quality fails but suggested_action is not retry_impl', async () => {
+    const qualityResult: WaveResult = {
+      wave: 'quality',
+      success: true,
+      artifact: {
+        gates: [
+          {
+            gate: 'audit',
+            status: 'failed',
+            auto_fixable: false,
+            fix_applied: false,
+            remaining_errors: ['vulnerability found'],
+            suggested_action: 'manual_intervention',
+          },
+        ],
+        all_passing: false,
+        coverage_percent: 85,
+        auto_fixes_applied: [],
+        files_modified: [],
+      },
+      duration: 100,
+      cost: 0.05,
+      turns: 1,
+    };
+
+    const result = await runQualityRetryLoop({
+      issue: makeIssue(),
+      workDir: '/tmp/test',
+      repoConfig: makeConfig(),
+      waveResults: { quality: qualityResult },
+      testRunner: mockTestRunner,
+    });
+
+    expect(result.retried).toBe(false);
+    expect(mockExecute).not.toHaveBeenCalled();
+  });
+
+  it('handles legacy QualityResult (no gates array) gracefully', async () => {
+    const legacyQuality: WaveResult = {
+      wave: 'quality',
+      success: true,
+      artifact: {
+        lint: 'pass',
+        typecheck: 'pass',
+        tests: 'fail',
+        coverage: 85,
+        audit: 'pass',
+        all_passing: false,
+      },
+      duration: 100,
+      cost: 0.05,
+      turns: 1,
+    };
+
+    // Legacy format: tests failed → should trigger retry
+    mockExecute.mockResolvedValueOnce(implWaveExecResult()).mockResolvedValueOnce(qualityWaveExecResult());
+    vi.mocked(mockTestRunner).mockResolvedValueOnce({ passed: true, output: 'ok', exitCode: 0 });
+
+    const result = await runQualityRetryLoop({
+      issue: makeIssue(),
+      workDir: '/tmp/test',
+      repoConfig: makeConfig(),
+      waveResults: { quality: legacyQuality },
+      testRunner: mockTestRunner,
+    });
+
+    expect(result.retried).toBe(true);
+    expect(mockExecute).toHaveBeenCalledTimes(2);
   });
 });

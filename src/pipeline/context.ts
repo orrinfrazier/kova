@@ -372,46 +372,6 @@ function formatRemediationSection(remediation: QualityRemediation): string {
   return lines.join('\n');
 }
 
-function formatRemediationSection(remediation: QualityRemediation): string {
-  const coverage = remediation.coverage_percent != null ? `${remediation.coverage_percent}%` : 'N/A';
-  const gateLines = remediation.gates.map((g) => {
-    let line = `- ${g.gate}: ${g.status}`;
-    if (g.gate === 'coverage') line += ` (${coverage})`;
-    if (g.fix_applied) line += ' (auto-fixed)';
-    if (g.status === 'failed' && g.remaining_errors.length > 0) {
-      const errors = g.remaining_errors.map((e) => `    - ${e}`).join('\n');
-      line += `\n  Errors:\n${errors}`;
-      line += `\n  Suggested action: ${g.suggested_action}`;
-    }
-    return line;
-  });
-
-  const lines = [
-    '## Quality Gates',
-    '',
-    ...gateLines,
-    '',
-    `- coverage: ${coverage}`,
-    `- all passing: ${remediation.all_passing}`,
-  ];
-
-  if (remediation.auto_fixes_applied.length > 0) {
-    lines.push('', '### Auto-fixes applied');
-    for (const fix of remediation.auto_fixes_applied) {
-      lines.push(`- ${fix}`);
-    }
-  }
-
-  if (remediation.files_modified.length > 0) {
-    lines.push('', '### Files modified by quality gates');
-    for (const f of remediation.files_modified) {
-      lines.push(`- ${f}`);
-    }
-  }
-
-  return lines.join('\n');
-}
-
 function formatReviewFindingsSection(review: ReviewResult): string {
   const findings = review.findings
     .map((f) => {
