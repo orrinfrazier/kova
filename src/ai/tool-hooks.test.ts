@@ -1,11 +1,6 @@
-import { describe, expect, it } from 'vitest';
-import {
-  createAfterToolCallHook,
-  estimateTokens,
-  truncateContent,
-  DEFAULT_TOKEN_BUDGET,
-} from './tool-hooks.js';
 import type { AfterToolCallContext } from '@mariozechner/pi-agent-core';
+import { describe, expect, it } from 'vitest';
+import { createAfterToolCallHook, DEFAULT_TOKEN_BUDGET, estimateTokens, truncateContent } from './tool-hooks.js';
 
 // --- Helpers ---
 
@@ -26,7 +21,12 @@ function makeContext(opts: {
       usage: { input: 0, output: 0, cost: { input: 0, output: 0, total: 0 }, cacheRead: 0, cacheWrite: 0 },
       stopReason: 'tool_call',
     } as unknown as AfterToolCallContext['assistantMessage'],
-    toolCall: { type: 'toolCall', toolCallId: 'tc_1', toolName: opts.toolName ?? 'read', args: {} } as unknown as AfterToolCallContext['toolCall'],
+    toolCall: {
+      type: 'toolCall',
+      toolCallId: 'tc_1',
+      toolName: opts.toolName ?? 'read',
+      args: {},
+    } as unknown as AfterToolCallContext['toolCall'],
     args: {},
     result: { content: opts.content } as unknown as AfterToolCallContext['result'],
     isError: opts.isError ?? false,
@@ -127,10 +127,7 @@ describe('createAfterToolCallHook', () => {
   it('concatenates multiple text content blocks before truncating', async () => {
     const hook = createAfterToolCallHook({ tokenBudget: 50 });
     const ctx = makeContext({
-      content: [
-        makeTextContent('a'.repeat(200)),
-        makeTextContent('b'.repeat(200)),
-      ],
+      content: [makeTextContent('a'.repeat(200)), makeTextContent('b'.repeat(200))],
     });
 
     const result = await hook(ctx);
