@@ -394,6 +394,160 @@ describe('fix — grade D/F issue comment', () => {
   });
 });
 
+// --- Spec file ownership pre-validation tests ---
+
+describe('fix — spec piece file ownership pre-validation', () => {
+  let workDir: string;
+
+  beforeEach(async () => {
+    workDir = await mkdtemp(join(tmpdir(), 'kova-fix-'));
+    vi.clearAllMocks();
+    setupDefaultMocks();
+  });
+
+  afterEach(async () => {
+    await rm(workDir, { recursive: true, force: true });
+  });
+
+  it('re-runs spec when pieces have overlapping files', async () => {
+    const overlappingSpec = {
+      summary: 'overlapping spec',
+      pieces: [
+        {
+          name: 'auth',
+          description: 'auth piece',
+          files: ['src/auth.ts', 'src/shared.ts'],
+          acceptance_criteria: ['AC1'],
+          wiring: [],
+        },
+        {
+          name: 'db',
+          description: 'db piece',
+          files: ['src/db.ts', 'src/shared.ts'],
+          acceptance_criteria: ['AC2'],
+          wiring: [],
+        },
+      ],
+      dependency_order: [[0, 1]],
+      constraints: [],
+    };
+
+    const fixedSpec = {
+      summary: 'fixed spec',
+      pieces: [
+        {
+          name: 'auth',
+          description: 'auth piece',
+          files: ['src/auth.ts', 'src/shared.ts'],
+          acceptance_criteria: ['AC1'],
+          wiring: [],
+        },
+        { name: 'db', description: 'db piece', files: ['src/db.ts'], acceptance_criteria: ['AC2'], wiring: [] },
+      ],
+      dependency_order: [[0, 1]],
+      constraints: [],
+    };
+
+    // First spec call returns overlapping pieces, second returns fixed
+    let specCallCount = 0;
+    mockSpawnWaveAgent.mockImplementation(async (config: { wave: WaveName }) => {
+      if (config.wave === 'spec') {
+        specCallCount++;
+        return makeHandoff('spec', specCallCount === 1 ? overlappingSpec : fixedSpec);
+      }
+      const artifacts: Record<string, unknown> = {
+        assess: DEFAULT_ASSESS,
+        quality: DEFAULT_QUALITY,
+      };
+      return makeHandoff(config.wave, artifacts[config.wave] ?? 'done');
+    });
+
+    await fix({ issue: makeIssue(42), repoPath: workDir, repoName: 'test-repo', config: makeConfig() });
+
+    // Spec should have been called twice (original + retry)
+    const specCalls = mockSpawnWaveAgent.mock.calls.filter(
+      (c: unknown[]) => (c[0] as { wave: string }).wave === 'spec',
+    );
+    expect(specCalls).toHaveLength(2);
+  });
+
+  it('falls back to serial execution when retry still has overlaps', async () => {
+    const overlappingSpec = {
+      summary: 'persistently overlapping',
+      pieces: [
+        {
+          name: 'auth',
+          description: 'auth piece',
+          files: ['src/auth.ts', 'src/shared.ts'],
+          acceptance_criteria: ['AC1'],
+          wiring: [],
+        },
+        {
+          name: 'db',
+          description: 'db piece',
+          files: ['src/db.ts', 'src/shared.ts'],
+          acceptance_criteria: ['AC2'],
+          wiring: [],
+        },
+      ],
+      dependency_order: [[0, 1]],
+      constraints: [],
+    };
+
+    // Both spec calls return overlapping pieces
+    mockSpawnWaveAgent.mockImplementation(async (config: { wave: WaveName }) => {
+      if (config.wave === 'spec') {
+        return makeHandoff('spec', overlappingSpec);
+      }
+      const artifacts: Record<string, unknown> = {
+        assess: DEFAULT_ASSESS,
+        quality: DEFAULT_QUALITY,
+      };
+      return makeHandoff(config.wave, artifacts[config.wave] ?? 'done');
+    });
+
+    await fix({ issue: makeIssue(42), repoPath: workDir, repoName: 'test-repo', config: makeConfig() });
+
+    // TI loop should be called with maxConcurrent: 1
+    expect(mockRunParallelPieceTILoop).toHaveBeenCalledOnce();
+    const tiConfig = mockRunParallelPieceTILoop.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(tiConfig.maxConcurrent).toBe(1);
+  });
+
+  it('does not re-run spec when pieces have no overlaps', async () => {
+    const cleanSpec = {
+      summary: 'clean spec',
+      pieces: [
+        { name: 'auth', description: 'auth piece', files: ['src/auth.ts'], acceptance_criteria: ['AC1'], wiring: [] },
+        { name: 'db', description: 'db piece', files: ['src/db.ts'], acceptance_criteria: ['AC2'], wiring: [] },
+      ],
+      dependency_order: [[0, 1]],
+      constraints: [],
+    };
+
+    mockSpawnWaveAgent.mockImplementation(async (config: { wave: WaveName }) => {
+      if (config.wave === 'spec') return makeHandoff('spec', cleanSpec);
+      const artifacts: Record<string, unknown> = {
+        assess: DEFAULT_ASSESS,
+        quality: DEFAULT_QUALITY,
+      };
+      return makeHandoff(config.wave, artifacts[config.wave] ?? 'done');
+    });
+
+    await fix({ issue: makeIssue(42), repoPath: workDir, repoName: 'test-repo', config: makeConfig() });
+
+    // Spec should only have been called once
+    const specCalls = mockSpawnWaveAgent.mock.calls.filter(
+      (c: unknown[]) => (c[0] as { wave: string }).wave === 'spec',
+    );
+    expect(specCalls).toHaveLength(1);
+
+    // TI loop should NOT have maxConcurrent: 1
+    const tiConfig = mockRunParallelPieceTILoop.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(tiConfig.maxConcurrent).toBeUndefined();
+  });
+});
+
 // --- Escalation protocol tests (via runTILoop diagnosis) ---
 
 describe('fix — TI loop escalation', () => {
