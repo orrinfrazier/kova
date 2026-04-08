@@ -53,6 +53,7 @@ import {
   buildEpisodeRecord,
   formatCodeChunks,
   formatEpisodes,
+  formatFailedEpisodes,
   formatReviewFeedback,
   queryCodeContext,
   queryEpisodeContext,
@@ -399,6 +400,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
 
     // Episodic memory: query for past learnings (before assess/spec waves)
     let episodicContext: string | undefined;
+    let failedEpisodicContext: string | undefined;
     if (config.episodes?.enabled) {
       const query = `${issue.title}\n\n${issue.body}`;
       const episodes = await queryEpisodeContext(config.episodes, query, {
@@ -407,6 +409,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       });
       if (episodes.length > 0) {
         episodicContext = formatEpisodes(episodes, repoName);
+        failedEpisodicContext = formatFailedEpisodes(episodes, repoName) || undefined;
       }
     }
 
@@ -498,7 +501,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         config,
         buildWaveContext('spec', issue, state.waveResults, {
           prContext,
-          ...(episodicContext != null && { episodicContext }),
+          ...(failedEpisodicContext != null && { episodicContext: failedEpisodicContext }),
           ...(codebaseContext != null && { codebaseContext }),
           ...(repoSearchText != null && { repoSearchText }),
         }),
