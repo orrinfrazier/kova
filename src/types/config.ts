@@ -346,4 +346,7 @@ export interface FixState {
   failedPieces?: FailedPiece[] | undefined;
   reviewKnownIssues?: ReviewKnownIssue[] | undefined;
   sandboxResourceUsage?: SandboxResourceUsage | undefined;
+  diagnosis?: 'SPEC_WRONG' | 'APPROACH_WRONG' | 'MISSING_CONTEXT' | 'STUCK' | undefined;
+  thrashingSignal?: 'SAME_FILES' | 'DIFFERENT_FILES' | 'NORMAL' | 'INSUFFICIENT_DATA' | undefined;
+  retryAttempts?: number | undefined;
 }

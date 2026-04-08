@@ -90,7 +90,7 @@ import {
 import { closeFileLogger, initFileLogger, type Logger, log } from '../utils/logger.js';
 import { buildWaveContext } from './context.js';
 import { buildCostReport, printRunSummary, writeCostReport } from './cost-report.js';
-import { runParallelPieceTILoop, runReviewLoop, type TestRunner } from './loops.js';
+import { detectThrashing, runParallelPieceTILoop, runReviewLoop, type TestRunner } from './loops.js';
 import { loadPrompt, resolvePromptsDir } from './prompts.js';
 import { formatOverlapFeedback, validatePieceFileOwnership } from './spec-validator.js';
 
@@ -601,6 +601,11 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       };
       await saveHandoff(workDir, implHandoff);
       state.waveResults.impl = tiResult.implWaveResult;
+      state.diagnosis = tiResult.diagnosis;
+      state.thrashingSignal = tiResult.modifiedFilesPerAttempt.length >= 2
+        ? detectThrashing(tiResult.modifiedFilesPerAttempt)
+        : undefined;
+      state.retryAttempts = tiResult.attempts;
 
       if (!state.completedWaves.includes('test')) state.completedWaves.push('test');
       if (!state.completedWaves.includes('impl')) state.completedWaves.push('impl');
