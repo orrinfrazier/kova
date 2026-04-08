@@ -1,6 +1,8 @@
 // Merge pipeline — process kova PR stack in dependency order.
 
+import { resolveNonOverlappingConflicts } from '../services/conflict-resolver.js';
 import { fetchKovaPRsWithStatus, type KovaPRWithStatus, mergePR, rebasePROnDefault } from '../services/github.js';
+import { detectDefaultBranch } from '../services/worktree.js';
 import type { RepoConfig } from '../types/config.js';
 import { log } from '../utils/logger.js';
 
@@ -122,6 +124,8 @@ export async function runMerge(options: MergeOptions): Promise<MergeResult> {
   }
 
   const remainingPRNumbers = new Set(ordered.map((pr) => pr.number));
+  const branchMap = new Map(ordered.map((pr) => [pr.number, pr.branch]));
+  const defaultBranch = await detectDefaultBranch(repoPath);
 
   for (const pr of ordered) {
     // CI status check
@@ -149,10 +153,27 @@ export async function runMerge(options: MergeOptions): Promise<MergeResult> {
     for (const remaining of remainingPRNumbers) {
       try {
         await rebasePROnDefault(repoPath, remaining);
-      } catch (error) {
-        log.warn(
-          `[merge] Failed to rebase PR #${remaining}: ${error instanceof Error ? error.message : String(error)}`,
-        );
+      } catch {
+        // gh pr update-branch failed — try local conflict resolution
+        const branch = branchMap.get(remaining);
+        if (branch) {
+          try {
+            const resolution = await resolveNonOverlappingConflicts(repoPath, branch, defaultBranch);
+            if (resolution.resolved) {
+              log.info(
+                `[merge] Auto-resolved non-overlapping conflicts for PR #${remaining}: ${resolution.autoResolvedFiles.join(', ')}`,
+              );
+            } else {
+              log.warn(
+                `[merge] True conflicts in PR #${remaining}: ${resolution.trueConflictFiles.join(', ')}`,
+              );
+            }
+          } catch (resolveError) {
+            log.warn(
+              `[merge] Failed to resolve conflicts for PR #${remaining}: ${resolveError instanceof Error ? resolveError.message : String(resolveError)}`,
+            );
+          }
+        }
       }
     }
   }

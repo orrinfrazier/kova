@@ -9,6 +9,16 @@ vi.mock('../services/github.js', () => ({
   fetchPRDependencies: vi.fn(),
 }));
 
+// Mock conflict resolver
+vi.mock('../services/conflict-resolver.js', () => ({
+  resolveNonOverlappingConflicts: vi.fn(),
+}));
+
+// Mock worktree (detectDefaultBranch)
+vi.mock('../services/worktree.js', () => ({
+  detectDefaultBranch: vi.fn().mockResolvedValue('main'),
+}));
+
 // Import mocks and SUT after mock setup
 const githubModule = (await import('../services/github.js')) as unknown as {
   fetchKovaPRsWithStatus: ReturnType<typeof vi.fn>;
@@ -17,6 +27,12 @@ const githubModule = (await import('../services/github.js')) as unknown as {
   fetchPRDependencies: ReturnType<typeof vi.fn>;
 };
 const { fetchKovaPRsWithStatus, mergePR, rebasePROnDefault, fetchPRDependencies } = githubModule;
+
+const conflictModule = (await import('../services/conflict-resolver.js')) as unknown as {
+  resolveNonOverlappingConflicts: ReturnType<typeof vi.fn>;
+};
+const { resolveNonOverlappingConflicts } = conflictModule;
+
 const { runMerge } = await import('./merge.js');
 
 /* ------------------------------------------------------------------ */
@@ -58,6 +74,7 @@ beforeEach(() => {
   mergePR.mockResolvedValue(undefined);
   rebasePROnDefault.mockResolvedValue(undefined);
   fetchPRDependencies.mockResolvedValue([]);
+  resolveNonOverlappingConflicts.mockResolvedValue({ resolved: true, autoResolvedFiles: [] });
 });
 
 /* ------------------------------------------------------------------ */
@@ -79,13 +96,12 @@ describe('runMerge', () => {
     expect(mergePR).not.toHaveBeenCalled();
     expect(result.dryRun).toBe(true);
     expect(result.merged.length).toBe(0);
-    // dry run should report what would be merged
     expect(result.skipped.length + result.failed.length + result.merged.length).toBeGreaterThanOrEqual(0);
   });
 
   it('merges PRs in topological dependency order (dependency before dependent)', async () => {
     const pr2 = makePR(2, 'success', []);
-    const pr3 = makePR(3, 'success', [2]); // pr3 depends on pr2
+    const pr3 = makePR(3, 'success', [2]);
     fetchKovaPRsWithStatus.mockResolvedValue([pr3, pr2]);
     fetchPRDependencies.mockImplementation((_repoPath: string, number: number) =>
       Promise.resolve(number === 3 ? [2] : []),
@@ -155,9 +171,6 @@ describe('runMerge', () => {
       config: baseConfig,
     });
 
-    // After merging PR 1, PRs 2 and 3 should be rebased
-    // After merging PR 2, PR 3 should be rebased
-    // Total rebase calls: 2 + 1 = 3 (at minimum)
     expect(rebasePROnDefault).toHaveBeenCalled();
   });
 
@@ -193,7 +206,6 @@ describe('runMerge', () => {
   });
 
   it('falls back to ascending PR number order when topological sort encounters a cycle', async () => {
-    // PR 1 depends on 2, PR 2 depends on 1 — a cycle
     const pr1 = makePR(1, 'success', [2]);
     const pr2 = makePR(2, 'success', [1]);
     fetchKovaPRsWithStatus.mockResolvedValue([pr1, pr2]);
@@ -207,7 +219,6 @@ describe('runMerge', () => {
       return Promise.resolve();
     });
 
-    // Should not throw — falls back to ascending order
     await expect(
       runMerge({
         repoPath: '/repo',
@@ -216,7 +227,6 @@ describe('runMerge', () => {
       }),
     ).resolves.toBeDefined();
 
-    // Fallback order: ascending by PR number
     expect(mergeOrder).toEqual([1, 2]);
   });
 
@@ -258,9 +268,9 @@ describe('runMerge', () => {
     fetchPRDependencies.mockReturnValue([]);
 
     mergePR
-      .mockResolvedValueOnce(undefined) // PR 1 succeeds
-      .mockRejectedValueOnce(new Error('PR has conflicts')) // PR 2 fails
-      .mockResolvedValueOnce(undefined); // PR 3 succeeds
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('PR has conflicts'))
+      .mockResolvedValueOnce(undefined);
 
     const result = await runMerge({
       repoPath: '/repo',
@@ -289,5 +299,37 @@ describe('runMerge', () => {
     expect(result.skipped).toEqual([1, 2, 3]);
     expect(result.merged).toHaveLength(0);
     expect(result.dryRun).toBe(true);
+  });
+
+  it('falls back to resolveNonOverlappingConflicts when rebasePROnDefault fails', async () => {
+    fetchKovaPRsWithStatus.mockResolvedValue([makePR(1), makePR(2)]);
+    fetchPRDependencies.mockResolvedValue([]);
+
+    rebasePROnDefault.mockRejectedValue(new Error('merge conflict'));
+    resolveNonOverlappingConflicts.mockResolvedValue({
+      resolved: true,
+      autoResolvedFiles: ['package-lock.json'],
+    });
+
+    await runMerge({
+      repoPath: '/repo',
+      repoName: 'my-repo',
+      config: baseConfig,
+    });
+
+    expect(resolveNonOverlappingConflicts).toHaveBeenCalledWith('/repo', 'kova/fix-2', 'main');
+  });
+
+  it('does not call resolveNonOverlappingConflicts when rebasePROnDefault succeeds', async () => {
+    fetchKovaPRsWithStatus.mockResolvedValue([makePR(1), makePR(2)]);
+    fetchPRDependencies.mockResolvedValue([]);
+
+    await runMerge({
+      repoPath: '/repo',
+      repoName: 'my-repo',
+      config: baseConfig,
+    });
+
+    expect(resolveNonOverlappingConflicts).not.toHaveBeenCalled();
   });
 });
