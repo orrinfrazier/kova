@@ -134,6 +134,15 @@ vi.mock('../services/worktree.js', async (importOriginal) => {
 // --- Conflict resolver mock ---
 const mockResolveConflicts = vi.fn();
 
+vi.mock('../services/conflict-check.js', () => ({
+  checkForConflicts: vi.fn().mockResolvedValue({
+    hasConflicts: false,
+    conflictingFiles: [],
+    overlapping: [],
+    nonOverlapping: [],
+  }),
+}));
+
 vi.mock('../services/conflict-resolver.js', () => ({
   resolveConflicts: (...args: unknown[]) => mockResolveConflicts(...args),
 }));
