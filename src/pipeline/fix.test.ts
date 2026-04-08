@@ -563,7 +563,7 @@ describe('fix — TI loop escalation', () => {
     await rm(workDir, { recursive: true, force: true });
   });
 
-  it('SPEC_WRONG: re-runs spec then TI loop after diagnosis', async () => {
+  it('SPEC_WRONG: re-runs spec then TI loop when shouldRespec is true', async () => {
     let tiCallCount = 0;
     mockRunParallelPieceTILoop.mockImplementation(async () => {
       tiCallCount++;
@@ -575,6 +575,7 @@ describe('fix — TI loop escalation', () => {
           totalCost: 0.03,
           attempts: 3,
           diagnosis: 'SPEC_WRONG',
+          shouldRespec: true,
           pieceResults: [],
           modifiedFilesPerAttempt: [],
         };
@@ -648,6 +649,7 @@ describe('fix — TI loop escalation', () => {
       totalCost: 0.03,
       attempts: 3,
       diagnosis: 'SPEC_WRONG',
+      shouldRespec: true,
       pieceResults: [],
       modifiedFilesPerAttempt: [],
     });

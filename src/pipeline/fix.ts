@@ -617,9 +617,10 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       metrics.recordWaveCompleted('impl');
       metrics.recordWaveDuration('impl', tiDuration);
 
-      // Escalation: SPEC_WRONG → re-run spec + TI loop
-      if (!tiResult.testsPassing && tiResult.diagnosis === 'SPEC_WRONG') {
-        flog.info('[escalation] SPEC_WRONG — re-running spec then TI loop');
+      // Escalation: shouldRespec → re-run spec + TI loop (max 1 re-spec)
+      if (!tiResult.testsPassing && tiResult.shouldRespec) {
+        flog.info(`[escalation] ${tiResult.diagnosis ?? 'SPEC_WRONG'} — re-running spec then TI loop`);
+        const respecContext = `Previous spec led to ${tiResult.diagnosis ?? 'failure'} — the implementation could not pass the tests. Re-examine the requirements and produce a revised spec.`;
         const { handoff: specHandoff, promptHash: specPromptHash } = await spawnWave(
           'spec',
           workDir,
@@ -630,6 +631,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
             ...(episodicContext != null && { episodicContext }),
             ...(codebaseContext != null && { codebaseContext }),
             ...(repoSearchText != null && { repoSearchText }),
+            escalationHint: respecContext,
           }),
           toOutputFormat(SpecResultSchema),
           mcpHandles,
