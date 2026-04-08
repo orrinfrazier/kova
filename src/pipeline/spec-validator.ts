@@ -168,6 +168,20 @@ export function validatePieceFileOwnership(pieces: SpecPiece[], dependencyOrder:
   };
 }
 
+/**
+ * Format file overlap information into a feedback message for spec re-run.
+ * Returns an empty string if there are no overlaps.
+ */
+export function formatOverlapFeedback(overlaps: FileOverlap[]): string {
+  if (overlaps.length === 0) return '';
+
+  const lines = overlaps.map(
+    (o) => `Pieces [${o.pieceNames.join(', ')}] both modify "${o.file}". Decompose so each piece owns disjoint files.`,
+  );
+
+  return `## File Ownership Feedback\n\nThe previous spec had overlapping file ownership between pieces. Each piece must own a disjoint set of files to allow safe parallel execution.\n\n${lines.join('\n')}`;
+}
+
 function mergePieces(toMerge: SpecPiece[]): SpecPiece {
   const names = toMerge.map((p) => p.name);
   const allFiles = new Set<string>();

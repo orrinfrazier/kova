@@ -1,10 +1,7 @@
 // afterToolCall hook — truncates large tool results to stay within a token budget.
 // Wired into spawnWaveAgent() via the pi-agent-core Agent constructor.
 
-import type {
-  AfterToolCallContext,
-  AfterToolCallResult,
-} from '@mariozechner/pi-agent-core';
+import type { AfterToolCallContext, AfterToolCallResult } from '@mariozechner/pi-agent-core';
 
 /** Default token budget for tool results. Results exceeding this are truncated. */
 export const DEFAULT_TOKEN_BUDGET = 8_000;
@@ -31,12 +28,7 @@ export function estimateTokens(text: string): number {
 }
 
 /** Truncate text to head + tail tokens with a marker in the middle. */
-export function truncateContent(
-  text: string,
-  tokenBudget: number,
-  headTokens: number,
-  tailTokens: number,
-): string {
+export function truncateContent(text: string, tokenBudget: number, headTokens: number, tailTokens: number): string {
   if (estimateTokens(text) <= tokenBudget) return text;
 
   const headChars = headTokens * 4;
@@ -97,10 +89,7 @@ export function createAfterToolCallHook(
     const truncatedText = truncateContent(fullText, tokenBudget, headTokens, tailTokens);
 
     return {
-      content: [
-        ...nonTextBlocks,
-        { type: 'text' as const, text: truncatedText },
-      ],
+      content: [...nonTextBlocks, { type: 'text' as const, text: truncatedText }],
     };
   };
 }

@@ -92,7 +92,7 @@ import { buildWaveContext } from './context.js';
 import { buildCostReport, printRunSummary, writeCostReport } from './cost-report.js';
 import { runParallelPieceTILoop, runReviewLoop, type TestRunner } from './loops.js';
 import { loadPrompt, resolvePromptsDir } from './prompts.js';
-import { validatePieceFileOwnership } from './spec-validator.js';
+import { formatOverlapFeedback, validatePieceFileOwnership } from './spec-validator.js';
 
 function toOutputFormat(schema: z.ZodType): OutputFormat {
   return {
@@ -526,17 +526,51 @@ export async function fix(options: FixOptions): Promise<FixResult> {
     }
 
     // Gate: validate spec pieces have no overlapping files before fan-out
+    let serialFallback = false;
     const specArtifact = state.waveResults.spec?.artifact as SpecResult | undefined;
     if (specArtifact?.pieces && specArtifact.pieces.length > 1) {
       const validation = validatePieceFileOwnership(specArtifact.pieces, specArtifact.dependency_order);
       if (!validation.valid) {
-        specArtifact.pieces = validation.pieces;
-        specArtifact.dependency_order = validation.dependencyOrder;
-        // Persist the corrected spec
-        if (state.waveResults.spec) {
-          state.waveResults.spec.artifact = specArtifact;
-          await saveHandoff(workDir, waveResultToHandoff(state.waveResults.spec));
-          await saveCheckpoint(workDir, state);
+        // Re-run spec with feedback about overlapping files (max 1 retry)
+        const feedback = formatOverlapFeedback(validation.overlaps);
+        log.warn(`[fix] Spec pieces have overlapping files, re-running spec with feedback`);
+
+        const specContext = buildWaveContext('spec', issue, state.waveResults, {
+          prContext,
+          ...(episodicContext != null && { episodicContext }),
+          ...(codebaseContext != null && { codebaseContext }),
+          ...(repoSearchText != null && { repoSearchText }),
+        });
+
+        const { handoff: retryHandoff, promptHash: retryPromptHash } = await spawnWave(
+          'spec',
+          workDir,
+          repoPath,
+          config,
+          `${specContext}\n\n${feedback}`,
+          toOutputFormat(SpecResultSchema),
+          mcpHandles,
+          undefined,
+          resolvedPromptsDir,
+          projectContext,
+          abTestVariants?.spec,
+        );
+
+        await saveHandoff(workDir, retryHandoff);
+        promptHashes.spec = retryPromptHash;
+        state.waveResults.spec = handoffToResult(retryHandoff, waveProvider(config, 'spec'), retryPromptHash);
+        await saveCheckpoint(workDir, state);
+
+        // Validate retry result
+        const retryArtifact = state.waveResults.spec?.artifact as SpecResult | undefined;
+        if (retryArtifact?.pieces && retryArtifact.pieces.length > 1) {
+          const retryValidation = validatePieceFileOwnership(retryArtifact.pieces, retryArtifact.dependency_order);
+          if (!retryValidation.valid) {
+            log.warn(
+              `[fix] Spec retry still has overlapping files — falling back to serial execution (maxConcurrent: 1)`,
+            );
+            serialFallback = true;
+          }
         }
       }
     }
@@ -553,6 +587,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         codebaseContext,
         projectContext,
         ...(testRunner != null && { testRunner }),
+        ...(serialFallback && { maxConcurrent: 1 }),
       });
 
       // Save handoffs for test and impl
