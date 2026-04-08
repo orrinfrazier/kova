@@ -1,9 +1,9 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { readFile, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { $ } from 'zx';
-import { resolveConflicts } from './conflict-resolver.js';
+import { resolveConflicts, resolveNonOverlappingConflicts } from './conflict-resolver.js';
 
 $.verbose = false;
 
@@ -32,7 +32,9 @@ async function setupConflictRepos(opts?: {
   await $`git -C ${local} config user.name "Kova Test"`;
 
   // Initial commit with data.ts on main
-  const baseContent = ['// Section A', 'export const a = 1;', '', '// Section B', 'export const b = 2;', ''].join('\n');
+  const baseContent = ['// Section A', 'export const a = 1;', '', '// Section B', 'export const b = 2;', ''].join(
+    '\n',
+  );
   await writeFile(join(local, 'data.ts'), baseContent);
   await $`git -C ${local} add data.ts`;
 
@@ -188,7 +190,6 @@ describe('resolveConflicts', () => {
     await resolveConflicts(repos.local, 'main');
 
     // .git/rebase-merge should NOT exist (rebase was aborted)
-    const { stat } = await import('node:fs/promises');
     await expect(stat(join(repos.local, '.git', 'rebase-merge'))).rejects.toThrow();
 
     // Working tree should be clean
@@ -224,5 +225,169 @@ describe('resolveConflicts', () => {
       const allFiles = [...unresolved];
       expect(allFiles.includes('data.ts') || allFiles.includes('config.ts')).toBe(true);
     }
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/*  resolveNonOverlappingConflicts — file-level ownership resolution   */
+/* ------------------------------------------------------------------ */
+
+async function setupNonOverlappingConflict(): Promise<{
+  remote: string;
+  local: string;
+  branch: string;
+  base: string;
+}> {
+  const base = await mkdtemp(join(tmpdir(), 'kova-nonoverlap-'));
+  const remote = join(base, 'remote.git');
+  const local = join(base, 'local');
+  const branch = 'kova/fix-99';
+
+  await $`git init --bare ${remote}`;
+  await $`git clone ${remote} ${local}`;
+  await $`git -C ${local} config user.email "test@kova.dev"`;
+  await $`git -C ${local} config user.name "Kova Test"`;
+
+  await writeFile(join(local, 'fileA.ts'), 'export const a = "original";\n');
+  await writeFile(join(local, 'fileB.ts'), 'export const b = "original";\n');
+  await $`git -C ${local} add .`;
+  await $`git -C ${local} commit -m "initial"`;
+  await $`git -C ${local} push origin main`;
+
+  await $`git -C ${local} branch ${branch}`;
+
+  await writeFile(join(local, 'fileA.ts'), 'export const a = "main-version";\n');
+  await $`git -C ${local} add fileA.ts`;
+  await $`git -C ${local} commit -m "main: change A"`;
+  await $`git -C ${local} push origin main`;
+
+  await $`git -C ${local} checkout ${branch}`;
+  await writeFile(join(local, 'fileA.ts'), 'export const a = "temp-on-branch";\n');
+  await writeFile(join(local, 'fileB.ts'), 'export const b = "fixed";\n');
+  await $`git -C ${local} add .`;
+  await $`git -C ${local} commit -m "fix: temp change to A, fix B"`;
+
+  await writeFile(join(local, 'fileA.ts'), 'export const a = "original";\n');
+  await $`git -C ${local} add fileA.ts`;
+  await $`git -C ${local} commit -m "fix: revert A"`;
+
+  await $`git -C ${local} push origin ${branch}`;
+  await $`git -C ${local} checkout main`;
+
+  return { remote, local, branch, base };
+}
+
+async function setupOverlappingConflict(): Promise<{
+  remote: string;
+  local: string;
+  branch: string;
+  base: string;
+}> {
+  const base = await mkdtemp(join(tmpdir(), 'kova-overlap-'));
+  const remote = join(base, 'remote.git');
+  const local = join(base, 'local');
+  const branch = 'kova/fix-99';
+
+  await $`git init --bare ${remote}`;
+  await $`git clone ${remote} ${local}`;
+  await $`git -C ${local} config user.email "test@kova.dev"`;
+  await $`git -C ${local} config user.name "Kova Test"`;
+
+  await writeFile(join(local, 'data.ts'), 'export const value = "original";\n');
+  await $`git -C ${local} add data.ts`;
+  await $`git -C ${local} commit -m "initial"`;
+  await $`git -C ${local} push origin main`;
+
+  await $`git -C ${local} branch ${branch}`;
+
+  await writeFile(join(local, 'data.ts'), 'export const value = "changed-on-main";\n');
+  await $`git -C ${local} add data.ts`;
+  await $`git -C ${local} commit -m "main: change value"`;
+  await $`git -C ${local} push origin main`;
+
+  await $`git -C ${local} checkout ${branch}`;
+  await writeFile(join(local, 'data.ts'), 'export const value = "changed-on-branch";\n');
+  await $`git -C ${local} add data.ts`;
+  await $`git -C ${local} commit -m "fix: change value"`;
+  await $`git -C ${local} push origin ${branch}`;
+
+  await $`git -C ${local} checkout main`;
+
+  return { remote, local, branch, base };
+}
+
+describe('resolveNonOverlappingConflicts', () => {
+  let base: string;
+
+  afterEach(async () => {
+    if (base) {
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
+  it('auto-resolves conflicts in files the PR did not modify (accepts upstream)', async () => {
+    const repos = await setupNonOverlappingConflict();
+    base = repos.base;
+
+    const result = await resolveNonOverlappingConflicts(repos.local, repos.branch, 'main');
+
+    expect(result.resolved).toBe(true);
+    if (result.resolved) {
+      expect(result.autoResolvedFiles).toContain('fileA.ts');
+    }
+
+    await $`git -C ${repos.local} checkout ${repos.branch}`;
+    const fileAContent = await readFile(join(repos.local, 'fileA.ts'), 'utf-8');
+    expect(fileAContent).toContain('main-version');
+
+    const fileBContent = await readFile(join(repos.local, 'fileB.ts'), 'utf-8');
+    expect(fileBContent).toContain('fixed');
+  });
+
+  it('reports true conflicts when PR modified the conflicting file', async () => {
+    const repos = await setupOverlappingConflict();
+    base = repos.base;
+
+    const result = await resolveNonOverlappingConflicts(repos.local, repos.branch, 'main');
+
+    expect(result.resolved).toBe(false);
+    if (!result.resolved) {
+      expect(result.trueConflictFiles).toContain('data.ts');
+    }
+  });
+
+  it('aborts rebase on true conflict, leaving clean git state', async () => {
+    const repos = await setupOverlappingConflict();
+    base = repos.base;
+
+    await resolveNonOverlappingConflicts(repos.local, repos.branch, 'main');
+
+    await expect(stat(join(repos.local, '.git', 'rebase-merge'))).rejects.toThrow();
+
+    const gitStatus = (await $`git -C ${repos.local} status --porcelain`).stdout.trim();
+    expect(gitStatus).toBe('');
+  });
+
+  it('restores original checkout after resolution', async () => {
+    const repos = await setupNonOverlappingConflict();
+    base = repos.base;
+
+    const beforeRef = (await $`git -C ${repos.local} rev-parse --abbrev-ref HEAD`).stdout.trim();
+    expect(beforeRef).toBe('main');
+
+    await resolveNonOverlappingConflicts(repos.local, repos.branch, 'main');
+
+    const afterRef = (await $`git -C ${repos.local} rev-parse --abbrev-ref HEAD`).stdout.trim();
+    expect(afterRef).toBe('main');
+  });
+
+  it('pushes rebased branch to remote after successful resolution', async () => {
+    const repos = await setupNonOverlappingConflict();
+    base = repos.base;
+
+    await resolveNonOverlappingConflicts(repos.local, repos.branch, 'main');
+
+    const remoteLog = (await $`git -C ${repos.local} log --oneline origin/${repos.branch}`).stdout.trim();
+    expect(remoteLog.length).toBeGreaterThan(0);
   });
 });
