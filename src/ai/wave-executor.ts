@@ -9,6 +9,7 @@ import { convertToLlm } from '@mariozechner/pi-coding-agent';
 import type { z } from 'zod';
 import type { WaveHandoff, WaveModelConfig, WaveName } from '../types/index.js';
 import { log } from '../utils/logger.js';
+import { createTransformContext } from './context-transform.js';
 import { classifyError, isSpendingCapBehavior, KovaError } from './errors.js';
 import { resolveModelFromString, resolveWaveModel } from './models.js';
 import { isOllamaProvider, resolveOllamaApiKey } from './ollama.js';
@@ -118,6 +119,7 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
     streamFn: streamSimple,
     convertToLlm,
     getApiKey: resolveApiKey,
+    transformContext: createTransformContext(model.contextWindow),
     ...(afterToolCallHook && { afterToolCall: afterToolCallHook }),
   });
 

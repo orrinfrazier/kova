@@ -1,3 +1,4 @@
+export { COMPACTABLE_TOOLS, createTransformContext } from './context-transform.js';
 export { classifyError, type ErrorClassification, isRetryable, isSpendingCapBehavior, KovaError } from './errors.js';
 export {
   getMCPToolsForWave,
