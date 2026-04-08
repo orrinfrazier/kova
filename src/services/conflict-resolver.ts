@@ -229,3 +229,107 @@ async function safeAbortRebase(workDir: string): Promise<void> {
     // Best effort
   }
 }
+
+/* ------------------------------------------------------------------ */
+/*  File-level non-overlapping conflict resolution for merge pipeline  */
+/* ------------------------------------------------------------------ */
+
+export type NonOverlappingResolutionResult =
+  | { resolved: true; autoResolvedFiles: string[] }
+  | { resolved: false; trueConflictFiles: string[] };
+
+const MAX_REBASE_STEPS = 50;
+
+/**
+ * Resolve rebase conflicts by file ownership: if a conflicting file was NOT
+ * modified by the PR (net change from merge-base to branch tip), accept the
+ * upstream version. If the PR DID modify it, it's a true conflict.
+ *
+ * Used in the merge pipeline when `gh pr update-branch` fails. Operates on
+ * the local repo, checking out the PR branch, rebasing, resolving, pushing,
+ * then restoring the original checkout.
+ *
+ * In a rebase context, "ours" = upstream (the branch we rebase onto),
+ * "theirs" = the commit being replayed. To accept upstream, use --ours.
+ */
+export async function resolveNonOverlappingConflicts(
+  repoPath: string,
+  branch: string,
+  defaultBranch: string,
+): Promise<NonOverlappingResolutionResult> {
+  const originalRef = (await $`git -C ${repoPath} rev-parse --abbrev-ref HEAD`).stdout.trim();
+
+  try {
+    await $`git -C ${repoPath} fetch origin`;
+
+    // Files the PR actually modified (net change from merge-base to branch tip)
+    const prModifiedResult =
+      await $`git -C ${repoPath} diff --name-only origin/${defaultBranch}...origin/${branch}`;
+    const prModifiedFiles = new Set(prModifiedResult.stdout.trim().split('\n').filter(Boolean));
+
+    // Checkout PR branch locally
+    await $`git -C ${repoPath} checkout -B ${branch} origin/${branch}`;
+
+    // Attempt rebase onto default branch
+    try {
+      await $`git -C ${repoPath} rebase origin/${defaultBranch}`;
+      // Clean rebase — push and return
+      await $`git -C ${repoPath} push --force-with-lease origin ${branch}`;
+      return { resolved: true, autoResolvedFiles: [] };
+    } catch {
+      log.debug('[conflict-resolver] Rebase conflict, attempting file-level resolution');
+    }
+
+    const allAutoResolved: string[] = [];
+
+    // Resolve conflicts across multiple rebased commits
+    for (let step = 0; step < MAX_REBASE_STEPS; step++) {
+      const conflictResult = await $`git -C ${repoPath} diff --name-only --diff-filter=U`;
+      const conflictFiles = conflictResult.stdout.trim().split('\n').filter(Boolean);
+
+      if (conflictFiles.length === 0) break;
+
+      const trueConflicts: string[] = [];
+      for (const file of conflictFiles) {
+        if (prModifiedFiles.has(file)) {
+          trueConflicts.push(file);
+        } else {
+          // Non-overlapping: accept upstream version (ours in rebase context)
+          await $`git -C ${repoPath} checkout --ours ${file}`;
+          await $`git -C ${repoPath} add ${file}`;
+          allAutoResolved.push(file);
+        }
+      }
+
+      if (trueConflicts.length > 0) {
+        await safeAbortRebase(repoPath);
+        return { resolved: false, trueConflictFiles: trueConflicts };
+      }
+
+      // All conflicts in this step resolved — continue rebase
+      try {
+        await $({ env: { ...process.env, GIT_EDITOR: 'true' } })`git -C ${repoPath} rebase --continue`;
+        break; // Rebase completed
+      } catch {
+        // More conflicts on next commit — continue loop
+      }
+    }
+
+    // Push the rebased branch
+    await $`git -C ${repoPath} push --force-with-lease origin ${branch}`;
+    return { resolved: true, autoResolvedFiles: [...new Set(allAutoResolved)] };
+  } catch (error) {
+    // Unexpected error — ensure clean state
+    await safeAbortRebase(repoPath);
+    const msg = error instanceof Error ? error.message : String(error);
+    log.error(`[conflict-resolver] Non-overlapping resolution failed: ${msg}`);
+    throw error;
+  } finally {
+    // Restore original checkout
+    try {
+      await $`git -C ${repoPath} checkout ${originalRef}`;
+    } catch {
+      // Best effort
+    }
+  }
+}
