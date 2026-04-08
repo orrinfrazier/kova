@@ -154,9 +154,7 @@ export async function fixLoop(options: LoopOptions): Promise<LoopResult> {
   };
 
   // Determine effective budget: use shared tracker if available, otherwise local budget
-  const effectiveBudgetExceeded = budgetTracker
-    ? () => budgetTracker.isExceeded()
-    : undefined;
+  const effectiveBudgetExceeded = budgetTracker ? () => budgetTracker.isExceeded() : undefined;
 
   await runFixesWithConcurrency(toFix, tiers, executor, {
     concurrency,
