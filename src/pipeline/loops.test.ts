@@ -33,6 +33,7 @@ const {
   normalizeTestOutput,
   extractFailingTestNames,
   classifyDiagnosis,
+  classifyFirstFailure,
   detectThrashing,
 } = await import('./loops.js');
 const { executeWaveWithRetry } = await import('../ai/index.js');
@@ -1748,5 +1749,189 @@ describe('runParallelPieceTILoop', () => {
     expect(result.pieceResults[0]?.cost).toBeCloseTo(0.15, 2);
     expect(result.pieceResults[1]?.cost).toBeCloseTo(0.15, 2);
     expect(result.totalCost).toBeCloseTo(0.3, 2);
+  });
+});
+
+// --- classifyFirstFailure unit tests ---
+
+describe('classifyFirstFailure', () => {
+  const specFiles = ['src/auth.ts', 'src/auth.test.ts'];
+
+  it('returns MISSING_CONTEXT for import/module-not-found errors', () => {
+    const output = "Cannot find module './service'\nError: module not found";
+    expect(classifyFirstFailure(output, specFiles)).toBe('MISSING_CONTEXT');
+  });
+
+  it('returns MISSING_CONTEXT for "no such file or directory"', () => {
+    const output = "ENOENT: no such file or directory, open 'src/helpers.ts'";
+    expect(classifyFirstFailure(output, specFiles)).toBe('MISSING_CONTEXT');
+  });
+
+  it('returns MISSING_CONTEXT for "cannot resolve" errors', () => {
+    const output = "Cannot resolve './missing-dep' from 'src/auth.ts'";
+    expect(classifyFirstFailure(output, specFiles)).toBe('MISSING_CONTEXT');
+  });
+
+  it('returns MISSING_CONTEXT for "could not find" errors', () => {
+    const output = "error: Could not find module 'nonexistent'";
+    expect(classifyFirstFailure(output, specFiles)).toBe('MISSING_CONTEXT');
+  });
+
+  it('returns MISSING_CONTEXT for "module not found" errors', () => {
+    const output = "Module not found: Error: Can't resolve './foo'";
+    expect(classifyFirstFailure(output, specFiles)).toBe('MISSING_CONTEXT');
+  });
+
+  it('returns MISSING_CONTEXT when errors reference files outside spec files', () => {
+    const output =
+      "error TS2307: Cannot find module './utils/helpers'.\n  src/utils/helpers.ts(5,10): error TS2339: Property 'x' does not exist";
+    expect(classifyFirstFailure(output, specFiles)).toBe('MISSING_CONTEXT');
+  });
+
+  it('returns APPROACH_WRONG when all type errors are in spec-listed files', () => {
+    const output =
+      "src/auth.ts(10,5): error TS2322: Type 'string' is not assignable to type 'number'.\nsrc/auth.ts(15,3): error TS2345: Argument of type 'X' is not assignable to parameter of type 'Y'.";
+    expect(classifyFirstFailure(output, specFiles)).toBe('APPROACH_WRONG');
+  });
+
+  it('returns undefined for ambiguous output (no clear pattern)', () => {
+    const output = 'AssertionError: expected 42 to equal 43\n  at Context.<anonymous>';
+    expect(classifyFirstFailure(output, specFiles)).toBeUndefined();
+  });
+
+  it('returns undefined for empty output', () => {
+    expect(classifyFirstFailure('', specFiles)).toBeUndefined();
+  });
+
+  it('returns undefined for generic test failures without clear patterns', () => {
+    const output = ' FAIL  src/auth.test.ts > AuthService > validates tokens\n   Error: expected true to be false';
+    expect(classifyFirstFailure(output, specFiles)).toBeUndefined();
+  });
+
+  it('returns undefined when empty spec files list provided', () => {
+    const output = "src/auth.ts(10,5): error TS2322: Type 'string' is not assignable to type 'number'.";
+    // With no spec files, we can't determine if type errors are in-scope
+    expect(classifyFirstFailure(output, [])).toBeUndefined();
+  });
+});
+
+// --- Early diagnosis integration in runTILoop ---
+
+describe('runTILoop early diagnosis', () => {
+  let mockTestRunner: TestRunner;
+
+  beforeEach(() => {
+    mockExecute.mockClear();
+    mockTestRunner = vi.fn();
+    mockExecute.mockResolvedValueOnce(testWaveExecResult()).mockResolvedValue(implWaveExecResult());
+  });
+
+  it('injects early escalation hint after first failure when classifyFirstFailure returns MISSING_CONTEXT', async () => {
+    const missingModuleOutput = "Cannot find module './service'\nError: module not found";
+
+    vi.mocked(mockTestRunner)
+      .mockResolvedValueOnce({ passed: false, output: missingModuleOutput, exitCode: 1 })
+      .mockResolvedValueOnce({ passed: true, output: 'ok', exitCode: 0 });
+
+    await runTILoop({
+      issue: makeIssue(),
+      workDir: '/tmp/test',
+      repoConfig: makeConfig(),
+      waveResults: {
+        spec: {
+          wave: 'spec',
+          success: true,
+          artifact: {
+            summary: 'test',
+            pieces: [
+              { name: 'p1', description: 'd', files: ['src/auth.ts'], acceptance_criteria: ['ac1'], wiring: [] },
+            ],
+            dependency_order: [[0]],
+            constraints: [],
+          },
+          duration: 100,
+          cost: 0.01,
+          turns: 1,
+        },
+      },
+      testRunner: mockTestRunner,
+      testCommand: 'npm test',
+    });
+
+    const implCalls = mockExecute.mock.calls.filter((c) => c[0].wave === 'impl');
+    // Second impl call (attempt 2) should have early escalation hint
+    expect(implCalls.at(1)?.[0].userMessage).toContain('MISSING_CONTEXT');
+  });
+
+  it('does not inject early hint when classifyFirstFailure returns undefined', async () => {
+    const genericFailure =
+      ' FAIL  src/auth.test.ts > AuthService > validates tokens\n   Error: expected true to be false';
+
+    vi.mocked(mockTestRunner)
+      .mockResolvedValueOnce({ passed: false, output: genericFailure, exitCode: 1 })
+      .mockResolvedValueOnce({ passed: true, output: 'ok', exitCode: 0 });
+
+    await runTILoop({
+      issue: makeIssue(),
+      workDir: '/tmp/test',
+      repoConfig: makeConfig(),
+      waveResults: {
+        spec: {
+          wave: 'spec',
+          success: true,
+          artifact: {
+            summary: 'test',
+            pieces: [
+              { name: 'p1', description: 'd', files: ['src/auth.ts'], acceptance_criteria: ['ac1'], wiring: [] },
+            ],
+            dependency_order: [[0]],
+            constraints: [],
+          },
+          duration: 100,
+          cost: 0.01,
+          turns: 1,
+        },
+      },
+      testRunner: mockTestRunner,
+      testCommand: 'npm test',
+    });
+
+    const implCalls = mockExecute.mock.calls.filter((c) => c[0].wave === 'impl');
+    // Second impl call should NOT have early escalation hint
+    expect(implCalls.at(1)?.[0].userMessage).not.toContain('Early diagnosis');
+    expect(implCalls.at(1)?.[0].userMessage).not.toContain('MISSING_CONTEXT');
+  });
+});
+
+// --- Early diagnosis integration in runPieceTILoop ---
+
+describe('runPieceTILoop early diagnosis', () => {
+  let mockTestRunner: TestRunner;
+
+  beforeEach(() => {
+    mockExecute.mockClear();
+    mockTestRunner = vi.fn();
+    mockExecute.mockResolvedValueOnce(testWaveExecResult()).mockResolvedValue(implWaveExecResult());
+  });
+
+  it('injects early escalation hint via classifyFirstFailure for piece loop', async () => {
+    const missingModuleOutput = "Cannot find module './helpers'\nModule not found: './helpers'";
+
+    vi.mocked(mockTestRunner)
+      .mockResolvedValueOnce({ passed: false, output: missingModuleOutput, exitCode: 1 })
+      .mockResolvedValueOnce({ passed: true, output: 'ok', exitCode: 0 });
+
+    await runPieceTILoop({
+      piece: makePiece(0),
+      pieceIndex: 0,
+      workDir: '/tmp/test',
+      repoConfig: makeConfig(),
+      testRunner: mockTestRunner,
+      testCommand: 'npm test',
+    });
+
+    const implCalls = mockExecute.mock.calls.filter((c) => c[0].wave === 'impl');
+    // Second impl (attempt 2) should have early escalation
+    expect(implCalls.at(1)?.[0].userMessage).toContain('MISSING_CONTEXT');
   });
 });
