@@ -128,20 +128,23 @@ export interface CommitAndPushResult {
   commitMessage?: string;
 }
 
+export async function getChangedFiles(workDir: string): Promise<string[]> {
+  const [modified, untracked] = await Promise.all([
+    $`git -C ${workDir} diff --name-only`,
+    $`git -C ${workDir} ls-files --others --exclude-standard`,
+  ]);
+  return [
+    ...modified.stdout.trim().split('\n').filter(Boolean),
+    ...untracked.stdout.trim().split('\n').filter(Boolean),
+  ];
+}
+
 export async function commitAndPush(
   workDir: string,
   branch: string,
   issue: { number: number; title: string },
 ): Promise<CommitAndPushResult> {
-  // Detect changed files: modified tracked + untracked
-  const [modified, untracked] = await Promise.all([
-    $`git -C ${workDir} diff --name-only`,
-    $`git -C ${workDir} ls-files --others --exclude-standard`,
-  ]);
-  const files = [
-    ...modified.stdout.trim().split('\n').filter(Boolean),
-    ...untracked.stdout.trim().split('\n').filter(Boolean),
-  ];
+  const files = await getChangedFiles(workDir);
 
   if (files.length === 0) {
     log.info('[ship] No changed files — skipping commit');
