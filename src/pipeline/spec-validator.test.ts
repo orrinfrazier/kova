@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { SpecPiece } from '../types/index.js';
-import { validatePieceFileOwnership } from './spec-validator.js';
+import { formatOverlapFeedback, validatePieceFileOwnership } from './spec-validator.js';
 
 function makePiece(name: string, files: string[], criteria?: string[]): SpecPiece {
   return {
@@ -149,5 +149,35 @@ describe('validatePieceFileOwnership', () => {
     expect(result.overlaps).toHaveLength(2);
     const files = result.overlaps.map((o) => o.file).sort();
     expect(files).toEqual(['src/x.ts', 'src/y.ts']);
+  });
+});
+
+describe('formatOverlapFeedback', () => {
+  it('formats single overlap into feedback message', () => {
+    const overlaps = [{ file: 'src/shared.ts', pieceIndices: [0, 1], pieceNames: ['auth', 'db'] }];
+    const msg = formatOverlapFeedback(overlaps);
+
+    expect(msg).toContain('auth');
+    expect(msg).toContain('db');
+    expect(msg).toContain('src/shared.ts');
+    expect(msg).toContain('disjoint');
+  });
+
+  it('formats multiple overlaps', () => {
+    const overlaps = [
+      { file: 'src/shared.ts', pieceIndices: [0, 1], pieceNames: ['auth', 'db'] },
+      { file: 'src/utils.ts', pieceIndices: [1, 2], pieceNames: ['db', 'api'] },
+    ];
+    const msg = formatOverlapFeedback(overlaps);
+
+    expect(msg).toContain('src/shared.ts');
+    expect(msg).toContain('src/utils.ts');
+    expect(msg).toContain('auth');
+    expect(msg).toContain('db');
+    expect(msg).toContain('api');
+  });
+
+  it('returns empty string for no overlaps', () => {
+    expect(formatOverlapFeedback([])).toBe('');
   });
 });
