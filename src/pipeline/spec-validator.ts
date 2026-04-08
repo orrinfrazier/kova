@@ -7,21 +7,42 @@ export interface FileOverlap {
   pieceNames: string[];
 }
 
+export interface PendingPRConflict {
+  file: string;
+  pieceName: string;
+  pieceIndex: number;
+}
+
 export interface ValidationResult {
   valid: boolean;
   overlaps: FileOverlap[];
+  pendingPRConflicts: PendingPRConflict[];
   pieces: SpecPiece[];
   dependencyOrder: number[][];
 }
 
 /**
- * Validate that no file appears in more than one spec piece.
- * If overlap is detected, merge overlapping pieces into one (preferred over serialization).
- * Returns the (possibly merged) pieces and updated dependency_order.
+ * Validate that no file appears in more than one spec piece, and that no piece
+ * modifies files already touched by pending PRs.
+ * If piece-to-piece overlap is detected, merge overlapping pieces into one.
+ * Returns the (possibly merged) pieces, updated dependency_order, and any pending PR conflicts.
  */
-export function validatePieceFileOwnership(pieces: SpecPiece[], dependencyOrder: number[][]): ValidationResult {
+export function validatePieceFileOwnership(
+  pieces: SpecPiece[],
+  dependencyOrder: number[][],
+  pendingPRFiles?: string[],
+): ValidationResult {
+  // Detect pending PR conflicts
+  const pendingPRConflicts = detectPendingPRConflicts(pieces, pendingPRFiles);
+
   if (pieces.length <= 1) {
-    return { valid: true, overlaps: [], pieces, dependencyOrder };
+    return {
+      valid: pendingPRConflicts.length === 0,
+      overlaps: [],
+      pendingPRConflicts,
+      pieces,
+      dependencyOrder,
+    };
   }
 
   // Step 1: Detect overlaps — build file → piece indices map
@@ -51,7 +72,7 @@ export function validatePieceFileOwnership(pieces: SpecPiece[], dependencyOrder:
   }
 
   if (overlaps.length === 0) {
-    return { valid: true, overlaps: [], pieces, dependencyOrder };
+    return { valid: pendingPRConflicts.length === 0, overlaps: [], pendingPRConflicts, pieces, dependencyOrder };
   }
 
   // Log warnings
@@ -163,6 +184,7 @@ export function validatePieceFileOwnership(pieces: SpecPiece[], dependencyOrder:
   return {
     valid: false,
     overlaps,
+    pendingPRConflicts,
     pieces: mergedPieces,
     dependencyOrder: deduped,
   };
@@ -180,6 +202,40 @@ export function formatOverlapFeedback(overlaps: FileOverlap[]): string {
   );
 
   return `## File Ownership Feedback\n\nThe previous spec had overlapping file ownership between pieces. Each piece must own a disjoint set of files to allow safe parallel execution.\n\n${lines.join('\n')}`;
+}
+
+function detectPendingPRConflicts(pieces: SpecPiece[], pendingPRFiles?: string[]): PendingPRConflict[] {
+  if (!pendingPRFiles || pendingPRFiles.length === 0) return [];
+
+  const prFileSet = new Set(pendingPRFiles);
+  const conflicts: PendingPRConflict[] = [];
+
+  for (let i = 0; i < pieces.length; i++) {
+    const piece = pieces[i];
+    if (!piece) continue;
+    for (const file of piece.files) {
+      if (prFileSet.has(file)) {
+        conflicts.push({ file, pieceName: piece.name, pieceIndex: i });
+      }
+    }
+  }
+
+  return conflicts;
+}
+
+/**
+ * Format pending PR conflict information into a feedback message for spec re-run.
+ * Returns an empty string if there are no conflicts.
+ */
+export function formatPendingPRConflictFeedback(conflicts: PendingPRConflict[]): string {
+  if (conflicts.length === 0) return '';
+
+  const lines = conflicts.map(
+    (c) =>
+      `Piece "${c.pieceName}" modifies "${c.file}" which is already changed by a pending PR. Restructure to avoid this file.`,
+  );
+
+  return `## Pending PR Conflict Feedback\n\nThe spec includes pieces that modify files already changed by open PRs. Restructure pieces to avoid these files, or use different files to achieve the same goal.\n\n${lines.join('\n')}`;
 }
 
 function mergePieces(toMerge: SpecPiece[]): SpecPiece {
