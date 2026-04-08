@@ -3,7 +3,7 @@
 // and explicit handoff context. Returns WaveHandoff<T>.
 // executeWave() is a backward-compat wrapper that resolves model/tools internally.
 
-import { Agent, type AgentTool, type ThinkingLevel } from '@mariozechner/pi-agent-core';
+import { Agent, type AgentMessage, type AgentTool, type ThinkingLevel } from '@mariozechner/pi-agent-core';
 import { type AssistantMessage, streamSimple } from '@mariozechner/pi-ai';
 import { convertToLlm } from '@mariozechner/pi-coding-agent';
 import type { z } from 'zod';
@@ -65,7 +65,7 @@ export interface SpawnWaveAgentConfig {
   timeoutMs?: number;
   maxCostUsd?: number;
   thinkingLevel?: ThinkingLevel;
-  /** Context usage threshold (0-1) — abort if input tokens exceed this fraction of contextWindow. Default: 0.8 */
+  /** Context usage threshold (0-1) — abort if input tokens exceed this fraction of contextWindow. Default: 0.9. Steer warning at 70%, aggressive trim at 80%. */
   contextThreshold?: number;
   /** Tool result truncation options. Set to configure or `false` to disable. Default: enabled with 8k token budget. */
   toolResultTruncation?: ToolHookOptions | false;
@@ -85,7 +85,7 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
     timeoutMs: explicitTimeout,
     maxCostUsd,
     thinkingLevel: explicitThinking,
-    contextThreshold: rawThreshold = 0.8,
+    contextThreshold: rawThreshold = 0.9,
     toolResultTruncation,
   } = config;
 
@@ -126,7 +126,13 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
   let costCapExceeded = false;
   let accumulatedCost = 0;
   let contextExhausted = false;
+  let contextSteered = false;
+  let contextTrimmed = false;
   let lastErrorMessage: string | undefined;
+
+  // Fixed thresholds for graceful degradation
+  const STEER_THRESHOLD = 0.7;
+  const TRIM_THRESHOLD = 0.8;
 
   const unsubscribe = agent.subscribe((event) => {
     if (event.type === 'turn_end') {
@@ -154,21 +160,50 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
         );
       }
 
-      // Context window monitoring: check input tokens against threshold
+      // Context window monitoring: 3-tier graceful degradation
+      // Tier 1 (70%): steer agent with focus warning
+      // Tier 2 (80%): set aggressive transformContext trimming
+      // Tier 3 (contextThreshold, default 90%): abort as last resort
       const inputTokens = isAssistantMessage(msg) ? msg.usage.input : 0;
       if (inputTokens > 0 && model.contextWindow > 0) {
         const usageRatio = inputTokens / model.contextWindow;
         if (usageRatio >= contextThreshold && !aborted) {
+          // Tier 3: abort
           contextExhausted = true;
           aborted = true;
           log.warn(
-            `[${wave}] Context usage ${(usageRatio * 100).toFixed(0)}% exceeds ${(contextThreshold * 100).toFixed(0)}% threshold (${inputTokens}/${model.contextWindow} tokens), aborting`,
+            `[${wave}] Context exhausted ${(usageRatio * 100).toFixed(0)}% >= ${(contextThreshold * 100).toFixed(0)}% threshold (${inputTokens}/${model.contextWindow} tokens), aborting`,
           );
           agent.abort();
-        } else if (usageRatio >= contextThreshold * 0.875) {
+        } else if (usageRatio >= TRIM_THRESHOLD && !contextTrimmed) {
+          // Tier 2: aggressive trimming via transformContext
+          contextTrimmed = true;
           log.warn(
-            `[${wave}] Context usage approaching threshold: ${(usageRatio * 100).toFixed(0)}% (${inputTokens}/${model.contextWindow} tokens)`,
+            `[${wave}] Context usage ${(usageRatio * 100).toFixed(0)}% hit trim threshold (${inputTokens}/${model.contextWindow} tokens), enabling aggressive context compaction`,
           );
+          agent.transformContext = aggressiveTrimContext;
+          // Also steer if not already done
+          if (!contextSteered) {
+            contextSteered = true;
+            agent.steer({
+              role: 'user',
+              content:
+                'Focus on completing the current task. Avoid reading additional files unless absolutely necessary.',
+              timestamp: Date.now(),
+            });
+          }
+        } else if (usageRatio >= STEER_THRESHOLD && !contextSteered) {
+          // Tier 1: steer with warning
+          contextSteered = true;
+          log.info(
+            `[${wave}] Context usage ${(usageRatio * 100).toFixed(0)}% hit steer threshold (${inputTokens}/${model.contextWindow} tokens), steering agent to focus`,
+          );
+          agent.steer({
+            role: 'user',
+            content:
+              'Focus on completing the current task. Avoid reading additional files unless absolutely necessary.',
+            timestamp: Date.now(),
+          });
         }
       }
     }
@@ -528,6 +563,21 @@ export function buildStructuredOutputInstructions(schema: Record<string, unknown
     '',
     'The `<json>` tags are REQUIRED. Do not include any text inside the tags other than the JSON object.',
   ].join('\n');
+}
+
+/**
+ * Aggressive context trimmer for when context usage exceeds 80%.
+ * Keeps the first user message and the last 3 tool-result/assistant turn pairs,
+ * dropping intermediate messages to free context space.
+ */
+async function aggressiveTrimContext(messages: AgentMessage[]): Promise<AgentMessage[]> {
+  // Keep at most the first message + last 6 messages (≈ 3 turn pairs)
+  const KEEP_TAIL = 6;
+  if (messages.length <= KEEP_TAIL + 1) return messages;
+
+  const head = messages.slice(0, 1);
+  const tail = messages.slice(-KEEP_TAIL);
+  return [...head, ...tail];
 }
 
 export function parseStructuredOutput(text: string): unknown | undefined {
