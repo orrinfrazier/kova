@@ -3,6 +3,7 @@
 // and runReviewLoop() for review. Handoffs persist after every wave.
 
 import { z } from 'zod';
+import { $ } from 'zx';
 import {
   type FixAIWaveName,
   getApiFallbackModelString,
@@ -20,6 +21,7 @@ import {
 } from '../ai/index.js';
 import { selectVariants, type VariantSelection } from '../services/ab-test.js';
 import { clearCheckpoint, loadCheckpoint, saveCheckpoint } from '../services/checkpoint.js';
+import { checkForConflicts } from '../services/conflict-check.js';
 import { resolveConflicts } from '../services/conflict-resolver.js';
 import { collectPRFeedback } from '../services/feedback-collector.js';
 import { commentOnIssue, createPR, listOpenPRs } from '../services/github.js';
@@ -818,6 +820,61 @@ export async function fix(options: FixOptions): Promise<FixResult> {
     if (!shouldSkip('ship')) {
       const shipStart = Date.now();
       const branch = worktree?.branch ?? `kova/fix-${issue.number}`;
+
+      // Pre-ship conflict detection via dry-run merge
+      const specArtifactForShip = state.waveResults.spec?.artifact as SpecResult | undefined;
+      const specFiles = specArtifactForShip?.pieces?.flatMap((p) => p.files) ?? [];
+      const conflictCheck = await checkForConflicts(workDir, specFiles);
+
+      if (conflictCheck.hasConflicts) {
+        metrics.recordConflictDetected();
+        flog.info(`Pre-ship conflict check: ${conflictCheck.conflictingFiles.join(', ')}`);
+
+        // Non-overlapping conflicts (files we didn't touch) — accept upstream version
+        if (conflictCheck.nonOverlapping.length > 0) {
+          const defaultBranch = await detectDefaultBranch(workDir);
+          flog.info(`Auto-resolving non-overlapping conflicts: ${conflictCheck.nonOverlapping.join(', ')}`);
+          for (const file of conflictCheck.nonOverlapping) {
+            try {
+              await $`git -C ${workDir} checkout origin/${defaultBranch} -- ${file}`;
+              await $`git -C ${workDir} add ${file}`;
+            } catch {
+              flog.warn(`Failed to checkout upstream version of ${file}`);
+            }
+          }
+          // Commit the upstream file adoptions
+          try {
+            await $`git -C ${workDir} commit -m ${'chore: adopt upstream changes for non-overlapping files'}`;
+          } catch {
+            // Nothing to commit — that's fine
+          }
+        }
+
+        // Overlapping conflicts (in our spec files) — retry impl once with conflict context
+        if (conflictCheck.overlapping.length > 0) {
+          flog.info(`Overlapping conflicts in spec files: ${conflictCheck.overlapping.join(', ')} — retrying impl`);
+          const conflictHint = `Your changes conflict with upstream in: ${conflictCheck.overlapping.join(', ')}. Fetch the latest version of these files from the default branch and adapt your implementation to avoid merge conflicts.`;
+
+          const retryTI = await runParallelPieceTILoop({
+            issue,
+            workDir,
+            repoConfig: config,
+            waveResults: state.waveResults,
+            prContext,
+            codebaseContext: [codebaseContext, conflictHint].filter(Boolean).join('\n\n'),
+            projectContext,
+            ...(testRunner != null && { testRunner }),
+          });
+
+          state.waveResults.test = retryTI.testWaveResult;
+          state.waveResults.impl = retryTI.implWaveResult;
+          await saveCheckpoint(workDir, state);
+
+          if (!retryTI.testsPassing) {
+            flog.warn('Conflict retry: tests not passing after impl retry, proceeding with rebase');
+          }
+        }
+      }
 
       // Rebase on default branch before shipping
       const rebaseResult = await rebaseOnDefault(workDir);
