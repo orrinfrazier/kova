@@ -12,7 +12,7 @@
 
 import { resolve } from 'node:path';
 import { Command } from 'commander';
-import { registerOllamaModels, validateModelConfig } from '../ai/index.js';
+import { validateModelConfig } from '../ai/index.js';
 import { runAuto, runAutoMultiRepo, runAutoMultiRepoParallel } from '../pipeline/auto.js';
 import { brainstorm, printBrainstormPreview } from '../pipeline/brainstorm.js';
 import { fix } from '../pipeline/fix.js';
@@ -125,9 +125,6 @@ program
     ) => {
       const kovaConfig = await tryLoadConfig(program.opts().config);
       const { repoPath, repoName, config } = resolveRepo(opts.repo ?? '.', kovaConfig);
-      if (config.providers?.ollama) {
-        registerOllamaModels(config.providers.ollama);
-      }
       initMetrics(config.metrics);
 
       if (opts.all) {
