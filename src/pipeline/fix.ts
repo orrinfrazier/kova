@@ -95,7 +95,13 @@ import {
 import { closeFileLogger, initFileLogger, type Logger, log } from '../utils/logger.js';
 import { buildWaveContext } from './context.js';
 import { buildCostReport, printRunSummary, writeCostReport } from './cost-report.js';
-import { detectThrashing, runParallelPieceTILoop, runReviewLoop, type TestRunner } from './loops.js';
+import {
+  detectThrashing,
+  runParallelPieceTILoop,
+  runQualityRetryLoop,
+  runReviewLoop,
+  type TestRunner,
+} from './loops.js';
 import { loadPrompt, resolvePromptsDir } from './prompts.js';
 import {
   formatOverlapFeedback,
@@ -750,6 +756,21 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       await progress?.waveCompleted('quality', state);
       metrics.recordWaveCompleted('quality');
       metrics.recordWaveDuration('quality', Date.now() - waveStart);
+
+      // Quality self-healing: retry impl if quality detects test failures
+      const qualityRetry = await runQualityRetryLoop({
+        issue,
+        workDir,
+        repoConfig: config,
+        waveResults: state.waveResults,
+        ...(testRunner != null && { testRunner }),
+        projectContext,
+      });
+      if (qualityRetry.retried) {
+        state.waveResults.quality = qualityRetry.qualityWaveResult;
+        await saveCheckpoint(workDir, state);
+        log.info(`[fix] Quality self-healing completed (cost: $${qualityRetry.totalCost.toFixed(2)})`);
+      }
 
       const interrupted = await interruptIfShutdown();
       if (interrupted) return interrupted;

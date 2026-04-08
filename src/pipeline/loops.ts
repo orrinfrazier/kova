@@ -13,6 +13,8 @@ import { detectTooling } from '../services/language-detect.js';
 import type { ProjectContext } from '../services/project-context.js';
 import type {
   Issue,
+  QualityRemediation,
+  QualityResult,
   RepoConfig,
   ReviewFinding,
   ReviewResult,
@@ -1190,6 +1192,164 @@ function buildMechanicalFixImplContext(
   if (prContext) {
     sections.push(`\n${prContext}`);
   }
+
+  return sections.join('\n');
+}
+
+// --- Quality Retry Loop Types (Issue #217) ---
+
+export interface QualityRetryConfig {
+  issue: Issue;
+  workDir: string;
+  repoConfig: RepoConfig;
+  waveResults: Partial<Record<WaveName, WaveResult>>;
+  testRunner?: TestRunner;
+  testCommand?: string;
+  projectContext?: ProjectContext | undefined;
+}
+
+export interface QualityRetryResult {
+  qualityWaveResult: WaveResult;
+  retried: boolean;
+  totalCost: number;
+}
+
+// --- Quality Retry Loop Controller ---
+
+/**
+ * After quality wave completes, check if test failures need a focused impl retry.
+ * Max 1 retry cycle: impl → quality re-run.
+ */
+export async function runQualityRetryLoop(config: QualityRetryConfig): Promise<QualityRetryResult> {
+  const { issue, workDir, repoConfig, waveResults, projectContext, testRunner = defaultTestRunner } = config;
+
+  const qualityWaveResult = waveResults.quality;
+  if (!qualityWaveResult) {
+    throw new Error('quality wave result required for quality retry loop');
+  }
+
+  const failureInfo = extractTestFailureInfo(qualityWaveResult.artifact);
+  if (!failureInfo.shouldRetry) {
+    log.info('[quality-retry] No retryable test failures — skipping');
+    return { qualityWaveResult, retried: false, totalCost: 0 };
+  }
+
+  log.info(`[quality-retry] Test failures detected (${failureInfo.errors.length} error(s)) — triggering impl retry`);
+
+  let totalCost = 0;
+  const testCmd = await resolveTestCommand(workDir, config.testCommand);
+  const resolvedPromptsDir = resolvePromptsDir(repoConfig.path, repoConfig.prompts_dir);
+
+  // Step 1: Focused impl retry with quality failure context
+  const escalationHint = buildQualityFailureEscalation(failureInfo);
+  const implContext = buildWaveContext('impl', issue, waveResults, {
+    escalationHint,
+  });
+
+  const implSystemPrompt = await loadPrompt('impl', repoConfig.tools, projectContext, resolvedPromptsDir);
+  const implExecResult = await executeWaveWithRetry({
+    wave: 'impl',
+    systemPrompt: implSystemPrompt,
+    userMessage: implContext,
+    cwd: workDir,
+    modelTier: repoConfig.model.impl,
+    thinkingLevel: resolveThinkingLevel(repoConfig, 'impl'),
+    customTools: repoConfig.tools,
+  });
+  totalCost += implExecResult.cost;
+  waveResults.impl = toWaveResult('impl', implExecResult);
+
+  // Verify tests pass after impl retry
+  const verifyRun = await testRunner(testCmd, workDir);
+  if (!verifyRun.passed) {
+    log.warn('[quality-retry] Tests still failing after impl retry');
+  }
+
+  // Step 2: Re-run quality gates
+  const qualitySystemPrompt = await loadPrompt('quality', repoConfig.tools, projectContext, resolvedPromptsDir);
+  const qualityExecResult = await executeWaveWithRetry({
+    wave: 'quality',
+    systemPrompt: qualitySystemPrompt,
+    userMessage: buildWaveContext('quality', issue, waveResults, {
+      coverageThreshold: repoConfig.rules.coverage,
+    }),
+    cwd: workDir,
+    modelTier: repoConfig.model.quality,
+    thinkingLevel: resolveThinkingLevel(repoConfig, 'quality'),
+    customTools: repoConfig.tools,
+  });
+  totalCost += qualityExecResult.cost;
+
+  const updatedQualityResult = toWaveResult('quality', qualityExecResult);
+  waveResults.quality = updatedQualityResult;
+
+  return {
+    qualityWaveResult: updatedQualityResult,
+    retried: true,
+    totalCost,
+  };
+}
+
+// --- Quality failure analysis helpers ---
+
+interface TestFailureInfo {
+  shouldRetry: boolean;
+  errors: string[];
+  suggestedAction: string;
+}
+
+function extractTestFailureInfo(artifact: unknown): TestFailureInfo {
+  // New structured format (QualityRemediation)
+  if (isQualityRemediation(artifact)) {
+    const testsGate = artifact.gates.find((g) => g.gate === 'tests');
+    if (testsGate && testsGate.status === 'failed' && testsGate.suggested_action === 'retry_impl') {
+      return {
+        shouldRetry: true,
+        errors: testsGate.remaining_errors,
+        suggestedAction: testsGate.suggested_action,
+      };
+    }
+    return { shouldRetry: false, errors: [], suggestedAction: 'none' };
+  }
+
+  // Legacy format (QualityResult)
+  if (isLegacyQualityResult(artifact)) {
+    if (artifact.tests === 'fail' && artifact.lint === 'pass' && artifact.typecheck === 'pass') {
+      return {
+        shouldRetry: true,
+        errors: ['Tests failed (legacy format — no detailed error info)'],
+        suggestedAction: 'retry_impl',
+      };
+    }
+    return { shouldRetry: false, errors: [], suggestedAction: 'none' };
+  }
+
+  return { shouldRetry: false, errors: [], suggestedAction: 'none' };
+}
+
+function isQualityRemediation(v: unknown): v is QualityRemediation {
+  return v != null && typeof v === 'object' && 'gates' in v && Array.isArray((v as QualityRemediation).gates);
+}
+
+function isLegacyQualityResult(v: unknown): v is QualityResult {
+  return v != null && typeof v === 'object' && 'all_passing' in v && 'lint' in v && 'tests' in v;
+}
+
+function buildQualityFailureEscalation(failureInfo: TestFailureInfo): string {
+  const sections = [
+    '## Quality Wave — Test Failures Detected',
+    '',
+    'The quality wave detected test failures after the initial implementation.',
+    'Fix the failing tests without changing the test files themselves.',
+    '',
+    '### Failing Tests',
+  ];
+
+  for (const error of failureInfo.errors) {
+    sections.push(`- ${error}`);
+  }
+
+  sections.push('', `Suggested action: ${failureInfo.suggestedAction}`);
 
   return sections.join('\n');
 }
