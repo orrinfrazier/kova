@@ -48,6 +48,7 @@ import {
   parseTimeout,
   startSandboxContainer,
 } from '../services/sandbox.js';
+import { scanForSecrets } from '../services/secrets-scan.js';
 import { shutdownRequested } from '../services/shutdown.js';
 import {
   buildEpisodeRecord,
@@ -64,6 +65,7 @@ import {
   commitAndPush,
   createWorktree,
   detectDefaultBranch,
+  getChangedFiles,
   worktreePath as getWorktreePath,
   rebaseOnDefault,
   removeWorktree,
@@ -839,6 +841,21 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           flog.error('Merge conflicts could not be resolved');
           state.status = 'failed';
           state.error = `Unresolvable merge conflicts in: ${filesUnresolved.join(', ')}`;
+          await saveCheckpoint(workDir, state);
+          metrics.recordIssueFailed();
+          return { success: false, error: state.error, state };
+        }
+      }
+
+      // Pre-commit secrets scan — deterministic orchestrator gate
+      const changedFiles = await getChangedFiles(workDir);
+
+      if (changedFiles.length > 0) {
+        const secretsScan = await scanForSecrets(workDir, changedFiles);
+        if (!secretsScan.clean) {
+          flog.error(`Secrets detected before commit:\n${secretsScan.report}`);
+          state.status = 'failed';
+          state.error = `Secrets detected — commit blocked: ${secretsScan.findings.length} finding(s)\n${secretsScan.report}`;
           await saveCheckpoint(workDir, state);
           metrics.recordIssueFailed();
           return { success: false, error: state.error, state };
