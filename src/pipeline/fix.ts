@@ -88,6 +88,7 @@ import {
   type AssessResult,
   AssessResultSchema,
   loadAllHandoffs,
+  QualityRemediationSchema,
   SpecResultSchema,
   saveHandoff,
 } from '../types/index.js';
@@ -734,7 +735,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           coverageThreshold: config.rules.coverage,
           ...(repoStandardsText != null && { repoStandardsText }),
         }),
-        undefined,
+        toOutputFormat(QualityRemediationSchema),
         mcpHandles,
         undefined,
         resolvedPromptsDir,

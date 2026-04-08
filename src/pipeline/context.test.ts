@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type {
   AssessResult,
   Issue,
+  QualityRemediation,
   QualityResult,
   ReviewResult,
   SpecPiece,
@@ -722,5 +723,115 @@ describe('review wave — past feedback injection', () => {
 
     // And the feedback section is also present
     expect(ctx).toContain('Past Reviewer Feedback');
+  });
+});
+
+// --- Structured quality remediation output (Issue #218) ---
+
+describe('review wave — QualityRemediation structured output', () => {
+  const remediationArtifact: QualityRemediation = {
+    gates: [
+      {
+        gate: 'lint',
+        status: 'passed',
+        auto_fixable: true,
+        fix_applied: true,
+        remaining_errors: [],
+        suggested_action: 'none',
+      },
+      {
+        gate: 'typecheck',
+        status: 'passed',
+        auto_fixable: false,
+        fix_applied: false,
+        remaining_errors: [],
+        suggested_action: 'none',
+      },
+      {
+        gate: 'tests',
+        status: 'failed',
+        auto_fixable: false,
+        fix_applied: false,
+        remaining_errors: ['test/auth.test.ts: assertion failed at line 42'],
+        suggested_action: 'retry_impl',
+      },
+      {
+        gate: 'coverage',
+        status: 'passed',
+        auto_fixable: false,
+        fix_applied: false,
+        remaining_errors: [],
+        suggested_action: 'none',
+      },
+      {
+        gate: 'audit',
+        status: 'skipped',
+        auto_fixable: false,
+        fix_applied: false,
+        remaining_errors: [],
+        suggested_action: 'none',
+      },
+      {
+        gate: 'secrets',
+        status: 'passed',
+        auto_fixable: false,
+        fix_applied: false,
+        remaining_errors: [],
+        suggested_action: 'none',
+      },
+    ],
+    all_passing: false,
+    coverage_percent: 82,
+    auto_fixes_applied: ['Fixed trailing comma in src/index.ts'],
+    files_modified: ['src/index.ts'],
+  };
+
+  it('formats QualityRemediation in review wave context', () => {
+    const handoffs: Partial<Record<string, WaveResult>> = {
+      spec: makeWaveResult('spec', specArtifact),
+      quality: makeWaveResult('quality', remediationArtifact),
+    };
+    const ctx = buildWaveContext('review', makeIssue(), handoffs);
+
+    expect(ctx).toContain('Quality Gates');
+    // Should include per-gate status
+    expect(ctx).toContain('lint: passed');
+    expect(ctx).toContain('typecheck: passed');
+    expect(ctx).toContain('tests: failed');
+    expect(ctx).toContain('audit: skipped');
+    expect(ctx).toContain('coverage: 82%');
+  });
+
+  it('includes remaining errors for failed gates', () => {
+    const handoffs: Partial<Record<string, WaveResult>> = {
+      spec: makeWaveResult('spec', specArtifact),
+      quality: makeWaveResult('quality', remediationArtifact),
+    };
+    const ctx = buildWaveContext('review', makeIssue(), handoffs);
+
+    expect(ctx).toContain('assertion failed at line 42');
+  });
+
+  it('includes suggested actions for failed gates', () => {
+    const handoffs: Partial<Record<string, WaveResult>> = {
+      spec: makeWaveResult('spec', specArtifact),
+      quality: makeWaveResult('quality', remediationArtifact),
+    };
+    const ctx = buildWaveContext('review', makeIssue(), handoffs);
+
+    expect(ctx).toContain('retry_impl');
+  });
+
+  it('still formats legacy QualityResult correctly', () => {
+    const handoffs: Partial<Record<string, WaveResult>> = {
+      spec: makeWaveResult('spec', specArtifact),
+      quality: makeWaveResult('quality', qualityArtifact),
+    };
+    const ctx = buildWaveContext('review', makeIssue(), handoffs);
+
+    expect(ctx).toContain('Quality Gates');
+    expect(ctx).toContain('lint: pass');
+    expect(ctx).toContain('coverage: 85%');
+    expect(ctx).toContain('all passing: true');
   });
 });
