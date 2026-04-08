@@ -211,14 +211,104 @@ describe('buildEpisodeRecord', () => {
     expect(buildEpisodeRecord(state).review_findings).toEqual([]);
   });
 
-  it('handles missing spec artifact gracefully', () => {
+  it('handles missing spec artifact — falls back to assess reasoning', () => {
     const state = makeFixState();
     delete state.waveResults.spec;
-    expect(buildEpisodeRecord(state).approach).toBe('');
+    expect(buildEpisodeRecord(state).approach).toBe('simple fix');
+  });
+
+  it('handles missing spec AND assess — falls back to issue title', () => {
+    const state = makeFixState();
+    delete state.waveResults.spec;
+    delete state.waveResults.assess;
+    expect(buildEpisodeRecord(state).approach).toBe('Fix login bug');
   });
 
   it('failed_at_wave is null for successful fixes', () => {
     expect(buildEpisodeRecord(makeFixState()).failed_at_wave).toBeNull();
+  });
+
+  it('captures error_message from state.error on failure', () => {
+    const base = makeFixState();
+    const record = buildEpisodeRecord(
+      makeFixState({
+        status: 'failed',
+        error: 'TypeError: Cannot read property x of undefined',
+        completedWaves: ['assess', 'spec'],
+        waveResults: {
+          assess: base.waveResults.assess!,
+          spec: base.waveResults.spec!,
+        },
+      }),
+    );
+    expect(record.error_message).toBe('TypeError: Cannot read property x of undefined');
+  });
+
+  it('error_message is undefined for successful fixes', () => {
+    expect(buildEpisodeRecord(makeFixState()).error_message).toBeUndefined();
+  });
+
+  it('captures learnings from failed pieces diagnosis', () => {
+    const record = buildEpisodeRecord(
+      makeFixState({
+        status: 'failed',
+        error: 'tests failing',
+        completedWaves: ['assess', 'spec', 'test', 'impl'],
+        failedPieces: [
+          {
+            pieceName: 'impl',
+            diagnosis: {
+              category: 'SPEC_WRONG',
+              theory: 'file X should be in piece Y',
+              tests_still_failing: ['test1.ts', 'test2.ts'],
+            },
+          },
+        ],
+        waveResults: {
+          assess: makeFixState().waveResults.assess!,
+          spec: makeFixState().waveResults.spec!,
+          test: makeWaveResult('test', { test_files_created: ['test.ts'], test_count: 3, all_failing: true }),
+          impl: makeWaveResult('impl', { files_modified: [], files_created: [], tests_passing: false }),
+        },
+      }),
+    );
+    expect(record.learnings).toBeDefined();
+    expect(record.learnings).toContain('SPEC_WRONG');
+  });
+
+  it('learnings is undefined for successful fixes', () => {
+    expect(buildEpisodeRecord(makeFixState()).learnings).toBeUndefined();
+  });
+
+  it('captures failed_wave_output from the failing wave artifact', () => {
+    const base = makeFixState();
+    const record = buildEpisodeRecord(
+      makeFixState({
+        status: 'failed',
+        error: 'quality gates failed',
+        completedWaves: ['assess', 'spec', 'test', 'impl', 'quality'],
+        waveResults: {
+          assess: base.waveResults.assess!,
+          spec: base.waveResults.spec!,
+          test: makeWaveResult('test', { test_files_created: ['test.ts'], test_count: 3, all_failing: true }),
+          impl: makeWaveResult('impl', { files_modified: ['src/auth.ts'], files_created: [], tests_passing: true }),
+          quality: makeWaveResult('quality', {
+            lint: 'fail',
+            typecheck: 'fail',
+            tests: 'pass',
+            coverage: 40,
+            audit: 'pass',
+            all_passing: false,
+          }),
+        },
+      }),
+    );
+    expect(record.failed_wave_output).toBeDefined();
+    expect(record.failed_wave_output?.length).toBeLessThanOrEqual(500);
+  });
+
+  it('failed_wave_output is undefined for successful fixes', () => {
+    expect(buildEpisodeRecord(makeFixState()).failed_wave_output).toBeUndefined();
   });
 
   it('failed_at_wave points to wave after last completed on failure', () => {
