@@ -67,20 +67,34 @@ If auto-fixes were applied in any gate, re-run Gate 3 (Tests) to ensure fixes di
 
 ## Output
 
-Read the output of each gate and report results. Do NOT include raw lint output, raw test output, or raw coverage reports. Only the summary:
+After running all gates, emit a **structured JSON** remediation plan. Do NOT include raw lint output, raw test output, or raw coverage reports — only the structured summary.
 
-```
-QUALITY GATES REPORT
-- Lint: passed/FAILED (Xs)
-- Typecheck: passed/FAILED (Xs)
-- Tests: passed/FAILED (Xs)
-- Coverage: XX% (threshold: YY%)
-- Audit: passed/FAILED/skipped
-- Secrets: no secrets detected / FOUND SECRETS
+Wrap the JSON in `<json>...</json>` tags. The schema:
 
-Auto-fixes applied: (list or "none")
-Files modified by auto-fix: (list or "none")
+```json
+{
+  "gates": [
+    {
+      "gate": "lint | typecheck | tests | coverage | audit | secrets",
+      "status": "passed | failed | skipped",
+      "auto_fixable": true/false,
+      "fix_applied": true/false,
+      "remaining_errors": ["error description if failed, empty if passed"],
+      "suggested_action": "none | retry_impl | manual_intervention | accept_known_issue"
+    }
+  ],
+  "all_passing": true/false,
+  "coverage_percent": 85,
+  "auto_fixes_applied": ["description of each auto-fix applied"],
+  "files_modified": ["paths of files modified by auto-fixes"]
+}
 ```
+
+Rules for `suggested_action`:
+- `none` — gate passed or was skipped
+- `retry_impl` — test failures or type errors likely caused by implementation bugs
+- `manual_intervention` — security audit findings, secrets detected, or issues beyond auto-fix
+- `accept_known_issue` — pre-existing issues unrelated to current changes
 
 ## Rules
 
