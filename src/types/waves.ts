@@ -71,6 +71,25 @@ export const QualityResultSchema = z.object({
 });
 export type QualityResult = z.infer<typeof QualityResultSchema>;
 
+export const QualityGateResultSchema = z.object({
+  gate: z.enum(['lint', 'typecheck', 'tests', 'coverage', 'audit', 'secrets']),
+  status: z.enum(['passed', 'failed', 'skipped']),
+  auto_fixable: z.boolean(),
+  fix_applied: z.boolean(),
+  remaining_errors: z.array(z.string()),
+  suggested_action: z.enum(['none', 'retry_impl', 'manual_intervention', 'accept_known_issue']),
+});
+export type QualityGateResult = z.infer<typeof QualityGateResultSchema>;
+
+export const QualityRemediationSchema = z.object({
+  gates: z.array(QualityGateResultSchema),
+  all_passing: z.boolean(),
+  coverage_percent: z.number().optional(),
+  auto_fixes_applied: z.array(z.string()),
+  files_modified: z.array(z.string()),
+});
+export type QualityRemediation = z.infer<typeof QualityRemediationSchema>;
+
 export const ReviewFindingSchema = z.object({
   category: z.enum(['needs_new_tests', 'mechanical_fix']),
   file: z.string(),
