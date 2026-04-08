@@ -146,6 +146,15 @@ vi.mock('../services/worktree.js', async (importOriginal) => {
   };
 });
 
+vi.mock('../services/conflict-check.js', () => ({
+  checkForConflicts: vi.fn().mockResolvedValue({
+    hasConflicts: false,
+    conflictingFiles: [],
+    overlapping: [],
+    nonOverlapping: [],
+  }),
+}));
+
 vi.mock('../services/conflict-resolver.js', () => ({
   resolveConflicts: vi.fn().mockResolvedValue({ resolved: true, filesResolved: [] }),
 }));
