@@ -242,6 +242,55 @@ const MISSING_CONTEXT_PATTERNS = [
   /could not find/i,
 ];
 
+// --- Type error detection ---
+
+const TYPE_ERROR_PATTERN = /^(.+?)\(\d+,\d+\):\s*error\s+TS\d+:/;
+
+/** Extract file paths referenced in TypeScript-style error lines (e.g. "src/foo.ts(10,5): error TS2322: ..."). */
+function extractErrorFiles(output: string): string[] {
+  const files = new Set<string>();
+  for (const line of output.split('\n')) {
+    const match = line.trim().match(TYPE_ERROR_PATTERN);
+    if (match?.[1]) {
+      files.add(match[1].trim());
+    }
+  }
+  return [...files];
+}
+
+// --- Early first-failure diagnosis ---
+
+/**
+ * Classify a diagnosis from a single failure output using static analysis.
+ * Returns `undefined` when no confident diagnosis can be made (falls through
+ * to the existing 2-attempt `classifyDiagnosis` logic).
+ */
+export function classifyFirstFailure(output: string, specFiles: string[]): TILoopDiagnosis | undefined {
+  if (!output || output.trim().length === 0) return undefined;
+
+  // 1. Import / module-not-found patterns → MISSING_CONTEXT immediately
+  if (MISSING_CONTEXT_PATTERNS.some((pattern) => pattern.test(output))) {
+    return 'MISSING_CONTEXT';
+  }
+
+  // 2. Check if errors reference files outside the spec's file list → MISSING_CONTEXT
+  const errorFiles = extractErrorFiles(output);
+  if (errorFiles.length > 0 && specFiles.length > 0) {
+    const specSet = new Set(specFiles);
+    const allInScope = errorFiles.every((f) => specSet.has(f));
+
+    if (!allInScope) {
+      return 'MISSING_CONTEXT';
+    }
+
+    // 3. All type errors are in spec-listed files → likely APPROACH_WRONG
+    return 'APPROACH_WRONG';
+  }
+
+  // 4. No confident diagnosis — fall through to existing 2-attempt logic
+  return undefined;
+}
+
 /** Strip timestamps, durations, line numbers, and summary counts so outputs are comparable across runs. */
 export function normalizeTestOutput(output: string): string {
   return output
@@ -430,8 +479,20 @@ export async function runTILoop(config: TILoopConfig): Promise<TILoopResult> {
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     log.info(`[ti-loop] Impl attempt ${attempt + 1}/${maxRetries}`);
 
-    // Classify diagnosis mid-loop to inject escalation hint for APPROACH_WRONG
+    // Classify diagnosis mid-loop to inject escalation hint
     let escalationHint: string | undefined;
+
+    // Early diagnosis after first failure via static analysis (saves 1 retry cycle)
+    if (failureOutputs.length === 1) {
+      const specArtifact = waveResults.spec?.artifact;
+      const specFiles = isSpecResult(specArtifact) ? specArtifact.pieces.flatMap((p) => p.files) : [];
+      const earlyDiagnosis = classifyFirstFailure(failureOutputs[0] as string, specFiles);
+      if (earlyDiagnosis != null) {
+        escalationHint = `Early diagnosis: ${earlyDiagnosis} — detected from first failure output.\n\n### Attempt 1\n\`\`\`\n${failureOutputs[0]}\n\`\`\``;
+      }
+    }
+
+    // Existing 2-failure diagnosis for APPROACH_WRONG
     if (failureOutputs.length >= 2) {
       const midDiagnosis = classifyDiagnosis(failureOutputs);
       if (midDiagnosis === 'APPROACH_WRONG') {
@@ -558,6 +619,16 @@ export async function runPieceTILoop(config: PieceTILoopConfig): Promise<PieceTI
     log.info(`[piece-ti-loop] Piece ${pieceIndex}: impl attempt ${attempt + 1}/${maxRetries}`);
 
     let escalationHint: string | undefined;
+
+    // Early diagnosis after first failure via static analysis (saves 1 retry cycle)
+    if (failureOutputs.length === 1) {
+      const earlyDiagnosis = classifyFirstFailure(failureOutputs[0] as string, piece.files);
+      if (earlyDiagnosis != null) {
+        escalationHint = `Early diagnosis: ${earlyDiagnosis} — detected from first failure output.\n\n### Attempt 1\n\`\`\`\n${failureOutputs[0]}\n\`\`\``;
+      }
+    }
+
+    // Existing 2-failure diagnosis for APPROACH_WRONG
     if (failureOutputs.length >= 2) {
       const midDiagnosis = classifyDiagnosis(failureOutputs);
       if (midDiagnosis === 'APPROACH_WRONG') {
