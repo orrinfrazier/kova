@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import type { SpecPiece } from '../types/index.js';
-import { formatOverlapFeedback, validatePieceFileOwnership } from './spec-validator.js';
+import {
+  formatOverlapFeedback,
+  formatPendingPRConflictFeedback,
+  validatePieceFileOwnership,
+} from './spec-validator.js';
 
 function makePiece(name: string, files: string[], criteria?: string[]): SpecPiece {
   return {
@@ -179,5 +183,104 @@ describe('formatOverlapFeedback', () => {
 
   it('returns empty string for no overlaps', () => {
     expect(formatOverlapFeedback([])).toBe('');
+  });
+});
+
+describe('validatePieceFileOwnership — pending PR conflicts', () => {
+  it('detects overlap between spec piece and pending PR files', () => {
+    const pieces = [makePiece('auth', ['src/auth.ts', 'src/middleware.ts']), makePiece('db', ['src/db.ts'])];
+    const pendingPRFiles = ['src/middleware.ts', 'src/other.ts'];
+    const result = validatePieceFileOwnership(pieces, [[0, 1]], pendingPRFiles);
+
+    expect(result.pendingPRConflicts).toHaveLength(1);
+    expect(result.pendingPRConflicts[0]?.file).toBe('src/middleware.ts');
+    expect(result.pendingPRConflicts[0]?.pieceName).toBe('auth');
+    expect(result.pendingPRConflicts[0]?.pieceIndex).toBe(0);
+    // Piece-to-piece ownership is valid, but pending PR conflict makes it invalid
+    expect(result.valid).toBe(false);
+  });
+
+  it('passes when no spec piece files overlap with pending PR files', () => {
+    const pieces = [makePiece('auth', ['src/auth.ts']), makePiece('db', ['src/db.ts'])];
+    const pendingPRFiles = ['src/other.ts', 'src/unrelated.ts'];
+    const result = validatePieceFileOwnership(pieces, [[0, 1]], pendingPRFiles);
+
+    expect(result.pendingPRConflicts).toHaveLength(0);
+    expect(result.valid).toBe(true);
+  });
+
+  it('detects multiple pieces conflicting with pending PRs', () => {
+    const pieces = [makePiece('auth', ['src/shared.ts']), makePiece('db', ['src/shared.ts', 'src/config.ts'])];
+    const pendingPRFiles = ['src/config.ts'];
+    const result = validatePieceFileOwnership(pieces, [[0, 1]], pendingPRFiles);
+
+    // Piece-to-piece overlap on shared.ts AND pending PR conflict on config.ts
+    expect(result.overlaps).toHaveLength(1);
+    expect(result.pendingPRConflicts).toHaveLength(1);
+    expect(result.pendingPRConflicts[0]?.file).toBe('src/config.ts');
+    expect(result.pendingPRConflicts[0]?.pieceName).toBe('db');
+    expect(result.valid).toBe(false);
+  });
+
+  it('reports all conflicting files for a single piece', () => {
+    const pieces = [makePiece('auth', ['src/a.ts', 'src/b.ts', 'src/c.ts'])];
+    const pendingPRFiles = ['src/a.ts', 'src/c.ts'];
+    const result = validatePieceFileOwnership(pieces, [[0]], pendingPRFiles);
+
+    expect(result.pendingPRConflicts).toHaveLength(2);
+    const files = result.pendingPRConflicts.map((c) => c.file).sort();
+    expect(files).toEqual(['src/a.ts', 'src/c.ts']);
+  });
+
+  it('returns empty pendingPRConflicts when pendingPRFiles is undefined', () => {
+    const pieces = [makePiece('auth', ['src/auth.ts'])];
+    const result = validatePieceFileOwnership(pieces, [[0]]);
+
+    expect(result.pendingPRConflicts).toHaveLength(0);
+  });
+
+  it('returns empty pendingPRConflicts when pendingPRFiles is empty', () => {
+    const pieces = [makePiece('auth', ['src/auth.ts'])];
+    const result = validatePieceFileOwnership(pieces, [[0]], []);
+
+    expect(result.pendingPRConflicts).toHaveLength(0);
+  });
+
+  it('does not affect piece merging behavior', () => {
+    // Pieces overlap with each other AND with pending PRs — merging still works
+    const pieces = [
+      makePiece('auth', ['src/shared.ts', 'src/auth.ts']),
+      makePiece('db', ['src/shared.ts', 'src/db.ts']),
+    ];
+    const pendingPRFiles = ['src/auth.ts'];
+    const result = validatePieceFileOwnership(pieces, [[0, 1]], pendingPRFiles);
+
+    // Piece-to-piece merge still happens
+    expect(result.pieces).toHaveLength(1);
+    expect(result.overlaps).toHaveLength(1);
+    // Pending PR conflict still reported
+    expect(result.pendingPRConflicts).toHaveLength(1);
+    expect(result.pendingPRConflicts[0]?.file).toBe('src/auth.ts');
+  });
+});
+
+describe('formatPendingPRConflictFeedback', () => {
+  it('formats conflicts into feedback message', () => {
+    const conflicts = [
+      { file: 'src/auth.ts', pieceName: 'auth', pieceIndex: 0 },
+      { file: 'src/config.ts', pieceName: 'db', pieceIndex: 1 },
+    ];
+    const msg = formatPendingPRConflictFeedback(conflicts);
+
+    expect(msg).toContain('Pending PR');
+    expect(msg).toContain('src/auth.ts');
+    expect(msg).toContain('src/config.ts');
+    expect(msg).toContain('auth');
+    expect(msg).toContain('db');
+    expect(msg).toContain('avoid');
+  });
+
+  it('returns empty string for no conflicts', () => {
+    expect(formatPendingPRConflictFeedback([])).toBe('');
   });
 });
