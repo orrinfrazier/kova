@@ -199,6 +199,38 @@ export function formatEpisodes(episodes: EpisodeContext[], currentRepo?: string)
   return `## Learnings from similar past issues\n\n${sections.join('\n\n')}`;
 }
 
+/**
+ * Format only failed episodes into a warning section for spec wave injection.
+ * Filters to `outcome: 'failure'`, frames each as an approach to avoid.
+ */
+export function formatFailedEpisodes(episodes: EpisodeContext[], currentRepo?: string): string {
+  const failed = episodes.filter((ep) => ep.outcome === 'failure');
+  if (failed.length === 0) {
+    return '';
+  }
+
+  const sorted = [...failed].sort((a, b) => b.score - a.score);
+
+  const sections = sorted.map((ep) => {
+    const lines = [`### #${ep.issue_number}: ${ep.issue_title}`];
+
+    if (currentRepo && ep.repo) {
+      const tag = ep.repo === currentRepo ? '[same-repo]' : `[cross-repo: ${ep.repo}]`;
+      lines.push(`- **Source:** ${tag}`);
+    }
+
+    lines.push(
+      `- **Approach:** ${ep.approach}`,
+      `- **Outcome:** failed — Avoid this decomposition.`,
+      `- **Learning:** ${ep.learnings}`,
+    );
+
+    return lines.join('\n');
+  });
+
+  return `## Past failed approaches — avoid repeating\n\n${sections.join('\n\n')}`;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Episode recording — REST endpoint (post-fix persistence)           */
 /* ------------------------------------------------------------------ */
@@ -226,7 +258,13 @@ export interface EpisodeRecord {
     description: string;
   }>;
   outcome: 'pr_created' | 'failed' | 'skipped';
+  error_message?: string | undefined;
+  learnings?: string | undefined;
+  failed_wave_output?: string | undefined;
   failed_at_wave: string | null;
+  diagnosis?: 'SPEC_WRONG' | 'APPROACH_WRONG' | 'MISSING_CONTEXT' | 'STUCK' | undefined;
+  thrashing_signal?: 'SAME_FILES' | 'DIFFERENT_FILES' | 'NORMAL' | 'INSUFFICIENT_DATA' | undefined;
+  retry_attempts?: number | undefined;
   total_cost: number;
   total_duration: number;
   total_turns: number;
@@ -261,6 +299,17 @@ export function buildEpisodeRecord(state: FixState): EpisodeRecord {
   }
 
   const failedAtWave = state.status === 'failed' ? lastCompletedOrCurrent(state) : null;
+  const isFailed = outcome === 'failed';
+
+  // Approach fallback chain: spec.summary → assess.reasoning → issue.title
+  const approach = specArtifact?.summary ?? assessArtifact?.reasoning ?? state.issue.title;
+
+  // Failure context — only populated for failed episodes
+  const errorMessage = isFailed ? state.error : undefined;
+
+  const failedWaveOutput = isFailed ? buildFailedWaveOutput(state, failedAtWave) : undefined;
+
+  const learnings = isFailed ? synthesizeLearnings(state) : undefined;
 
   let totalCost = 0;
   let totalDuration = 0;
@@ -278,7 +327,7 @@ export function buildEpisodeRecord(state: FixState): EpisodeRecord {
     issue_title: state.issue.title,
     labels: state.issue.labels,
     repo: state.repo,
-    approach: specArtifact?.summary ?? '',
+    approach,
     files_changed: filesChanged,
     quality_gates: qualityArtifact
       ? {
@@ -297,7 +346,13 @@ export function buildEpisodeRecord(state: FixState): EpisodeRecord {
       description: f.description,
     })),
     outcome,
+    ...(errorMessage != null && { error_message: errorMessage }),
+    ...(learnings != null && { learnings }),
+    ...(failedWaveOutput != null && { failed_wave_output: failedWaveOutput }),
     failed_at_wave: failedAtWave,
+    ...(state.diagnosis != null && { diagnosis: state.diagnosis }),
+    ...(state.thrashingSignal != null && { thrashing_signal: state.thrashingSignal }),
+    ...(state.retryAttempts != null && { retry_attempts: state.retryAttempts }),
     total_cost: totalCost,
     total_duration: totalDuration,
     total_turns: totalTurns,
@@ -312,6 +367,44 @@ function lastCompletedOrCurrent(state: FixState): string | null {
   if (!lastCompleted) return 'assess';
   const idx = WAVE_ORDER.indexOf(lastCompleted);
   return idx < WAVE_ORDER.length - 1 ? (WAVE_ORDER[idx + 1] ?? lastCompleted) : lastCompleted;
+}
+
+const MAX_WAVE_OUTPUT_LENGTH = 500;
+
+function buildFailedWaveOutput(state: FixState, failedAtWave: string | null): string | undefined {
+  if (!failedAtWave) return undefined;
+
+  // Get the last wave that actually ran — either the failed wave itself or the last completed one
+  const waveResult = state.waveResults[failedAtWave as keyof typeof state.waveResults];
+  const lastCompleted = state.completedWaves.at(-1);
+  const targetResult = waveResult ?? (lastCompleted ? state.waveResults[lastCompleted] : undefined);
+
+  if (!targetResult?.artifact) return undefined;
+
+  const raw = JSON.stringify(targetResult.artifact);
+  return raw.length > MAX_WAVE_OUTPUT_LENGTH ? raw.slice(-MAX_WAVE_OUTPUT_LENGTH) : raw;
+}
+
+function synthesizeLearnings(state: FixState): string | undefined {
+  const pieces = state.failedPieces;
+  if (pieces && pieces.length > 0) {
+    return pieces
+      .map((p) => {
+        const diag = p.diagnosis;
+        const failing =
+          diag.tests_still_failing.length > 0 ? ` Tests still failing: ${diag.tests_still_failing.join(', ')}` : '';
+        return `[${diag.category}] ${diag.theory}${failing}`;
+      })
+      .join('; ');
+  }
+
+  // Fallback: use state.error if present
+  if (state.error) {
+    const failedWave = lastCompletedOrCurrent(state);
+    return `Failed at ${failedWave ?? 'unknown'}: ${state.error}`;
+  }
+
+  return undefined;
 }
 
 /**

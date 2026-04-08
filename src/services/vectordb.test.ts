@@ -7,6 +7,7 @@ import {
   type EpisodeContext,
   formatCodeChunks,
   formatEpisodes,
+  formatFailedEpisodes,
   insertEpisode,
   queryCodeContext,
   queryCodeEmbeddings,
@@ -414,6 +415,58 @@ describe('formatEpisodes', () => {
 
     expect(result).not.toContain('[same-repo]');
     expect(result).not.toContain('[cross-repo');
+  });
+});
+
+describe('formatFailedEpisodes', () => {
+  it('returns only failure episodes with avoidance framing', () => {
+    const result = formatFailedEpisodes(sampleEpisodes);
+
+    expect(result).toContain('## Past failed approaches — avoid repeating');
+    expect(result).toContain('#3: Add rate limiting');
+    expect(result).toContain('Avoid this decomposition');
+    expect(result).toContain('Sliding window was too expensive');
+  });
+
+  it('excludes success and partial episodes', () => {
+    const result = formatFailedEpisodes(sampleEpisodes);
+
+    expect(result).not.toContain('#10: Fix token expiry handling');
+    expect(result).not.toContain('#7: Refactor session store');
+  });
+
+  it('returns empty string when no failed episodes', () => {
+    const successOnly: EpisodeContext[] = [
+      { ...(sampleEpisodes[0] as EpisodeContext), outcome: 'success' },
+      { ...(sampleEpisodes[1] as EpisodeContext), outcome: 'partial' },
+    ];
+
+    expect(formatFailedEpisodes(successOnly)).toBe('');
+  });
+
+  it('returns empty string for empty input', () => {
+    expect(formatFailedEpisodes([])).toBe('');
+  });
+
+  it('orders failed episodes by score descending', () => {
+    const failures: EpisodeContext[] = [
+      { issue_number: 1, issue_title: 'Low', approach: 'a', outcome: 'failure', learnings: 'l', score: 0.3 },
+      { issue_number: 2, issue_title: 'High', approach: 'b', outcome: 'failure', learnings: 'l', score: 0.9 },
+    ];
+
+    const result = formatFailedEpisodes(failures);
+    const highIdx = result.indexOf('#2');
+    const lowIdx = result.indexOf('#1');
+
+    expect(highIdx).toBeLessThan(lowIdx);
+  });
+
+  it('includes repo attribution when currentRepo provided', () => {
+    const failures: EpisodeContext[] = [{ ...(sampleEpisodes[2] as EpisodeContext), repo: 'my-repo', score: 0.8 }];
+
+    const result = formatFailedEpisodes(failures, 'my-repo');
+
+    expect(result).toContain('[same-repo]');
   });
 });
 
