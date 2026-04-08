@@ -45,6 +45,8 @@ export type ThrashingSignal = 'SAME_FILES' | 'DIFFERENT_FILES' | 'NORMAL' | 'INS
 
 export type DiffRunner = (workDir: string) => Promise<string[]>;
 
+export type FileReader = (filePath: string) => Promise<string>;
+
 export interface TILoopConfig {
   issue: Issue;
   workDir: string;
@@ -57,6 +59,7 @@ export interface TILoopConfig {
   projectContext?: ProjectContext | undefined;
   testRunner?: TestRunner;
   diffRunner?: DiffRunner;
+  fileReader?: FileReader;
 }
 
 export interface TILoopResult {
@@ -66,6 +69,7 @@ export interface TILoopResult {
   totalCost: number;
   attempts: number;
   diagnosis?: TILoopDiagnosis;
+  shouldRespec?: boolean;
   modifiedFilesPerAttempt: string[][];
   thrashingSignal?: ThrashingSignal;
 }
@@ -141,6 +145,7 @@ export interface ParallelPieceTILoopResult {
   attempts: number;
   pieceResults: PieceTILoopResult[];
   diagnosis?: TILoopDiagnosis;
+  shouldRespec?: boolean;
   modifiedFilesPerAttempt: string[][];
 }
 
@@ -185,6 +190,10 @@ export const defaultTestRunner: TestRunner = async (command, workDir) => {
 };
 
 // --- Default diff runner (git diff --name-only) ---
+
+export const defaultFileReader: FileReader = async (filePath) => {
+  return fs.readFile(filePath, 'utf-8');
+};
 
 export const defaultDiffRunner: DiffRunner = async (workDir) => {
   try {
@@ -347,6 +356,27 @@ export function extractFailingTestNames(output: string): string[] {
   return [...names];
 }
 
+// --- Missing file path extraction ---
+
+const MISSING_PATH_PATTERNS = [
+  /cannot find module '([^']+)'/gi,
+  /no such file or directory,?\s+open\s+'([^']+)'/gi,
+  /module not found:.*?'([^']+)'/gi,
+  /cannot resolve '([^']+)'/gi,
+  /could not find '([^']+)'/gi,
+];
+
+/** Extract file paths referenced in missing-module/file error messages. */
+export function extractMissingFilePaths(output: string): string[] {
+  const paths = new Set<string>();
+  for (const pattern of MISSING_PATH_PATTERNS) {
+    for (const match of output.matchAll(pattern)) {
+      if (match[1]) paths.add(match[1]);
+    }
+  }
+  return [...paths];
+}
+
 // --- Diagnosis classification ---
 
 export function classifyDiagnosis(failureOutputs: string[], thrashingSignal?: ThrashingSignal): TILoopDiagnosis {
@@ -439,6 +469,7 @@ export async function runTILoop(config: TILoopConfig): Promise<TILoopResult> {
     projectContext,
     testRunner = defaultTestRunner,
     diffRunner = defaultDiffRunner,
+    fileReader = defaultFileReader,
   } = config;
 
   if (maxRetries < 1) {
@@ -479,8 +510,10 @@ export async function runTILoop(config: TILoopConfig): Promise<TILoopResult> {
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     log.info(`[ti-loop] Impl attempt ${attempt + 1}/${maxRetries}`);
 
-    // Classify diagnosis mid-loop to inject escalation hint
+    // Classify diagnosis mid-loop to drive strategy per diagnosis type
     let escalationHint: string | undefined;
+    let missingContextHint: string | undefined;
+    let shouldBreakForRespec = false;
 
     // Early diagnosis after first failure via static analysis (saves 1 retry cycle)
     if (failureOutputs.length === 1) {
@@ -492,15 +525,68 @@ export async function runTILoop(config: TILoopConfig): Promise<TILoopResult> {
       }
     }
 
-    // Existing 2-failure diagnosis for APPROACH_WRONG
+    // Diagnosis-driven strategy after 2+ failures
     if (failureOutputs.length >= 2) {
-      const midDiagnosis = classifyDiagnosis(failureOutputs);
-      if (midDiagnosis === 'APPROACH_WRONG') {
-        const prevAttempts = failureOutputs
-          .map((output, i) => `### Attempt ${i + 1}\n\`\`\`\n${output}\n\`\`\``)
-          .join('\n\n');
-        escalationHint = `Diagnosis: APPROACH_WRONG — each attempt fails different tests.\nThe previous approach failed. Try a fundamentally different strategy.\n\n${prevAttempts}`;
+      const midThrashing = detectThrashing(modifiedFilesPerAttempt);
+      const midDiagnosis = classifyDiagnosis(failureOutputs, midThrashing);
+      log.info(
+        `[ti-loop] Mid-loop diagnosis after ${failureOutputs.length} failures: ${midDiagnosis} (thrashing: ${midThrashing})`,
+      );
+
+      switch (midDiagnosis) {
+        case 'APPROACH_WRONG': {
+          // Existing behavior: inject escalation hint with previous attempts
+          const prevAttempts = failureOutputs
+            .map((output, i) => `### Attempt ${i + 1}\n\`\`\`\n${output}\n\`\`\``)
+            .join('\n\n');
+          escalationHint = `Diagnosis: APPROACH_WRONG — each attempt fails different tests.\nThe previous approach failed. Try a fundamentally different strategy.\n\n${prevAttempts}`;
+          break;
+        }
+        case 'SPEC_WRONG': {
+          // Break early — spec needs re-running, no point trying more impl attempts
+          shouldBreakForRespec = true;
+          break;
+        }
+        case 'MISSING_CONTEXT': {
+          // Extract file paths from errors, read them, inject as context
+          const lastOutput = failureOutputs.at(-1) ?? '';
+          const missingPaths = extractMissingFilePaths(lastOutput);
+          if (missingPaths.length > 0) {
+            const fileContents: string[] = [];
+            for (const filePath of missingPaths) {
+              try {
+                const resolvedPath = path.isAbsolute(filePath) ? filePath : path.resolve(workDir, filePath);
+                const content = await fileReader(resolvedPath);
+                fileContents.push(`### ${filePath}\n\`\`\`\n${content}\n\`\`\``);
+              } catch {
+                log.warn(`[ti-loop] Could not read missing file: ${filePath}`);
+              }
+            }
+            if (fileContents.length > 0) {
+              missingContextHint = `## Missing Context — Injected Files\n\nThe previous attempt failed because these files were referenced but not available to you:\n\n${fileContents.join('\n\n')}`;
+            }
+          }
+          break;
+        }
+        case 'STUCK': {
+          // Inject partial-fix hint — focus on passing a subset of tests
+          const lastOutput = failureOutputs.at(-1) ?? '';
+          const failedMatch = lastOutput.match(/(\d+)\s+failed/);
+          const passedMatch = lastOutput.match(/(\d+)\s+passed/);
+          const failedCount = failedMatch?.[1] ? Number.parseInt(failedMatch[1], 10) : 0;
+          const passedCount = passedMatch?.[1] ? Number.parseInt(passedMatch[1], 10) : 0;
+          const countInfo =
+            failedCount > 0 || passedCount > 0 ? ` (${failedCount} failing, ${passedCount} passing)` : '';
+          escalationHint = `Diagnosis: STUCK — repeated attempts have not made progress${countInfo}.\nFocus on a partial fix: keep passing tests green and fix the easiest failing test first. It is acceptable to submit a partial solution that passes a subset of tests.`;
+          break;
+        }
       }
+    }
+
+    // SPEC_WRONG: break early — caller will re-run spec
+    if (shouldBreakForRespec) {
+      log.info('[ti-loop] SPEC_WRONG detected mid-loop — breaking early for re-spec');
+      break;
     }
 
     // Build impl context — fresh each time with spec + test failures only
@@ -509,6 +595,9 @@ export async function runTILoop(config: TILoopConfig): Promise<TILoopResult> {
       ...(codebaseContext != null && { codebaseContext }),
       ...(escalationHint != null && { escalationHint }),
     });
+    if (missingContextHint != null) {
+      implContext += `\n\n${missingContextHint}`;
+    }
     if (failureOutputs.length > 0) {
       const lastFailure = failureOutputs.at(-1) as string;
       implContext += `\n\n## Previous Test Failure Output\n\n\`\`\`\n${lastFailure}\n\`\`\``;
@@ -546,14 +635,16 @@ export async function runTILoop(config: TILoopConfig): Promise<TILoopResult> {
     failureOutputs.push(testRun.output);
   }
 
-  // Step 3: Diagnosis if all attempts exhausted
+  // Step 3: Diagnosis if all attempts exhausted (or broke early for re-spec)
   let diagnosis: TILoopDiagnosis | undefined;
   let thrashingSignal: ThrashingSignal | undefined;
+  let shouldRespec = false;
   if (!testsPassing) {
     thrashingSignal = detectThrashing(modifiedFilesPerAttempt);
     diagnosis = classifyDiagnosis(failureOutputs, thrashingSignal);
+    shouldRespec = diagnosis === 'SPEC_WRONG';
     log.error(
-      `[ti-loop] All ${maxRetries} attempts exhausted — diagnosis: ${diagnosis}, thrashing: ${thrashingSignal}`,
+      `[ti-loop] All ${failureOutputs.length} attempts exhausted — diagnosis: ${diagnosis}, thrashing: ${thrashingSignal}${shouldRespec ? ', will re-spec' : ''}`,
     );
   }
 
@@ -567,6 +658,7 @@ export async function runTILoop(config: TILoopConfig): Promise<TILoopResult> {
     attempts,
     modifiedFilesPerAttempt,
     ...(diagnosis != null && { diagnosis }),
+    ...(shouldRespec && { shouldRespec }),
     ...(thrashingSignal != null && { thrashingSignal }),
   };
 }
@@ -755,6 +847,7 @@ export async function runParallelPieceTILoop(config: ParallelPieceTILoopConfig):
         },
       ],
       ...(tiResult.diagnosis != null && { diagnosis: tiResult.diagnosis }),
+      ...(tiResult.shouldRespec && { shouldRespec: true }),
       modifiedFilesPerAttempt: tiResult.modifiedFilesPerAttempt,
     };
   }
