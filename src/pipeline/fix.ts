@@ -537,7 +537,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
 
         const specContext = buildWaveContext('spec', issue, state.waveResults, {
           prContext,
-          ...(episodicContext != null && { episodicContext }),
+          ...(failedEpisodicContext != null && { episodicContext: failedEpisodicContext }),
           ...(codebaseContext != null && { codebaseContext }),
           ...(repoSearchText != null && { repoSearchText }),
         });
@@ -628,7 +628,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           config,
           buildWaveContext('spec', issue, state.waveResults, {
             prContext,
-            ...(episodicContext != null && { episodicContext }),
+            ...(failedEpisodicContext != null && { episodicContext: failedEpisodicContext }),
             ...(codebaseContext != null && { codebaseContext }),
             ...(repoSearchText != null && { repoSearchText }),
             escalationHint: respecContext,
