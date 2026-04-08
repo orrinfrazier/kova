@@ -3,14 +3,14 @@
 // and explicit handoff context. Returns WaveHandoff<T>.
 // executeWave() is a backward-compat wrapper that resolves model/tools internally.
 
-import { Agent, type AgentMessage, type AgentTool, type ThinkingLevel } from '@mariozechner/pi-agent-core';
+import { Agent, type AgentTool, type ThinkingLevel } from '@mariozechner/pi-agent-core';
 import { type AssistantMessage, streamSimple } from '@mariozechner/pi-ai';
 import { convertToLlm } from '@mariozechner/pi-coding-agent';
 import type { z } from 'zod';
 import type { WaveHandoff, WaveModelConfig, WaveName } from '../types/index.js';
 import { log } from '../utils/logger.js';
 import { classifyError, isSpendingCapBehavior, KovaError } from './errors.js';
-import { isLocalProvider, resolveModelFromString, resolveWaveModel } from './models.js';
+import { resolveModelFromString, resolveWaveModel } from './models.js';
 import { isOllamaProvider, resolveOllamaApiKey } from './ollama.js';
 import { isRouterProvider, resolveRouterApiKey } from './router.js';
 import { type AIWaveName, DEFAULT_THINKING_LEVELS, getWaveTools } from './wave-tools.js';
@@ -85,13 +85,10 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
     contextThreshold: rawThreshold = 0.8,
   } = config;
 
-  const model = resolveModelFromString(modelString);
-  // Local models (Ollama, etc.) are slower — double the timeout to account for
-  // local inference speed + monorepo compile times during tool calls
-  const baseTimeout = explicitTimeout ?? DEFAULT_WAVE_TIMEOUTS[wave];
-  const timeoutMs = baseTimeout != null && isLocalProvider(model.provider) ? baseTimeout * 2 : baseTimeout;
+  const timeoutMs = explicitTimeout ?? DEFAULT_WAVE_TIMEOUTS[wave];
   const thinkingLevel = explicitThinking ?? DEFAULT_THINKING_LEVELS[wave];
   const contextThreshold = Math.max(0.1, Math.min(1, rawThreshold));
+  const model = resolveModelFromString(modelString);
   const startTime = Date.now();
 
   log.info(`[${wave}] Starting wave — model=${model.id}, cwd=${cwd}`);
@@ -112,7 +109,6 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
     streamFn: streamSimple,
     convertToLlm,
     getApiKey: resolveApiKey,
-    transformContext: buildContextCompactor(model.contextWindow, wave),
   });
 
   let turnCount = 0;
@@ -420,8 +416,6 @@ export async function executeWave(options: WaveOptions): Promise<WaveExecutionRe
   } = options;
 
   const model = resolveWaveModel(modelTier);
-  // Preserve provider prefix so spawnWaveAgent can re-resolve correctly
-  const modelString = model.provider !== 'anthropic' ? `${model.provider}:${model.id}` : model.id;
   const toolOptions = customTools || playwright ? { customTools, playwright } : undefined;
   const tools = getWaveTools(wave, cwd, toolOptions);
   const startTime = Date.now();
@@ -429,7 +423,7 @@ export async function executeWave(options: WaveOptions): Promise<WaveExecutionRe
   try {
     const handoff = await spawnWaveAgent({
       wave,
-      model: modelString,
+      model: model.id,
       tools,
       systemPrompt,
       handoffContext: '',
@@ -565,76 +559,4 @@ export function parseStructuredOutput(text: string): unknown | undefined {
 
   // No greedy regex fallback — return undefined if none of the above worked
   return undefined;
-}
-
-// --- Context compaction ---
-
-/** Rough token estimate: ~4 chars per token for English text. */
-function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 4);
-}
-
-/** Extract text content from a message for token estimation. */
-function messageText(msg: AgentMessage): string {
-  if (!('role' in msg)) return '';
-  if (msg.role === 'user') {
-    if (typeof msg.content === 'string') return msg.content;
-    return msg.content.map((c) => ('text' in c ? c.text : '')).join('');
-  }
-  if (msg.role === 'assistant') {
-    return msg.content.map((c) => ('text' in c ? c.text : '')).join('');
-  }
-  if (msg.role === 'toolResult') {
-    return msg.content.map((c) => ('text' in c ? c.text : '')).join('');
-  }
-  return '';
-}
-
-/** Truncate a tool result's text content, keeping first/last lines for context. */
-function truncateToolResult(msg: AgentMessage): AgentMessage {
-  if (!('role' in msg) || msg.role !== 'toolResult') return msg;
-  const truncated = msg.content.map((c) => {
-    if (c.type !== 'text' || !('text' in c)) return c;
-    const text = c.text;
-    if (text.length < 500) return c;
-    const lines = text.split('\n');
-    if (lines.length <= 10) return c;
-    // Keep first 3 and last 5 lines — enough to see the tool name and final output
-    const kept = [...lines.slice(0, 3), `\n[... ${lines.length - 8} lines truncated ...]\n`, ...lines.slice(-5)];
-    return { ...c, text: kept.join('\n') };
-  });
-  return { ...msg, content: truncated };
-}
-
-/** Build a transformContext function that compacts old messages when approaching the context window.
- *  Strategy: when total tokens exceed 50% of context window, truncate tool results from older turns.
- *  Always keeps the most recent 10 messages intact. */
-export function buildContextCompactor(
-  contextWindow: number,
-  wave: WaveName,
-): (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]> {
-  const compactionThreshold = contextWindow * 0.5;
-  const keepRecentCount = 10;
-
-  return async (messages: AgentMessage[]): Promise<AgentMessage[]> => {
-    const totalTokens = messages.reduce((sum, m) => sum + estimateTokens(messageText(m)), 0);
-
-    if (totalTokens <= compactionThreshold) return messages;
-
-    // Split into old (compactable) and recent (keep intact)
-    const splitIndex = Math.max(0, messages.length - keepRecentCount);
-    const oldMessages = messages.slice(0, splitIndex);
-    const recentMessages = messages.slice(splitIndex);
-
-    // Truncate tool results in old messages
-    const compacted = oldMessages.map(truncateToolResult);
-
-    const newTokens = compacted.reduce((sum, m) => sum + estimateTokens(messageText(m)), 0);
-    const recentTokens = recentMessages.reduce((sum, m) => sum + estimateTokens(messageText(m)), 0);
-    log.debug(
-      `[${wave}] Context compaction: ${totalTokens} → ${newTokens + recentTokens} est. tokens (truncated ${oldMessages.length} old messages)`,
-    );
-
-    return [...compacted, ...recentMessages];
-  };
 }
