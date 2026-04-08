@@ -34,6 +34,7 @@ const {
   extractFailingTestNames,
   classifyDiagnosis,
   detectThrashing,
+  extractMissingFilePaths,
 } = await import('./loops.js');
 const { executeWaveWithRetry } = await import('../ai/index.js');
 const { detectTooling } = await import('../services/language-detect.js');
@@ -162,13 +163,13 @@ describe('runTILoop', () => {
   });
 
   it('each impl retry is a fresh agent call (not accumulated context)', async () => {
-    // Use same test name → SPEC_WRONG diagnosis (no escalation hint), isolating the "fresh context" behavior
-    const sameTestFail1 = ' FAIL  src/a.test.ts > suite > test one\n   Error: attempt-1-detail';
-    const sameTestFail2 = ' FAIL  src/a.test.ts > suite > test one\n   Error: attempt-2-detail';
+    // Use different test names → APPROACH_WRONG (no early break), testing fresh context per retry
+    const fail1 = ' FAIL  src/a.test.ts > suite > test one\n   Error: attempt-1-detail';
+    const fail2 = ' FAIL  src/b.test.ts > suite > test two\n   Error: attempt-2-detail';
 
     vi.mocked(mockTestRunner)
-      .mockResolvedValueOnce({ passed: false, output: sameTestFail1, exitCode: 1 })
-      .mockResolvedValueOnce({ passed: false, output: sameTestFail2, exitCode: 1 })
+      .mockResolvedValueOnce({ passed: false, output: fail1, exitCode: 1 })
+      .mockResolvedValueOnce({ passed: false, output: fail2, exitCode: 1 })
       .mockResolvedValueOnce({ passed: true, output: 'ok', exitCode: 0 });
 
     await runTILoop({
@@ -183,11 +184,11 @@ describe('runTILoop', () => {
     const implCalls = mockExecute.mock.calls.filter((c) => c[0].wave === 'impl');
     expect(implCalls).toHaveLength(3);
 
-    // Third impl should only have the LAST failure in "Previous Test Failure Output", not accumulated history
-    const thirdImplMsg = implCalls.at(2)?.[0].userMessage;
-    expect(thirdImplMsg).toContain('attempt-2-detail');
-    // Should not contain the first error (fresh context, only most recent failure)
-    expect(thirdImplMsg).not.toContain('attempt-1-detail');
+    // "Previous Test Failure Output" section should only have the LAST failure
+    const thirdImplMsg = implCalls.at(2)?.[0].userMessage as string;
+    const prevFailSection = thirdImplMsg.slice(thirdImplMsg.indexOf('## Previous Test Failure Output'));
+    expect(prevFailSection).toContain('attempt-2-detail');
+    expect(prevFailSection).not.toContain('attempt-1-detail');
   });
 
   it('runs tests via bash (testRunner), not via agent', async () => {
@@ -211,7 +212,11 @@ describe('runTILoop', () => {
   });
 
   it('defaults to 3 maxRetries', async () => {
-    vi.mocked(mockTestRunner).mockResolvedValue({ passed: false, output: 'fail', exitCode: 1 });
+    // Use different test names per attempt → APPROACH_WRONG (no early break)
+    vi.mocked(mockTestRunner)
+      .mockResolvedValueOnce({ passed: false, output: ' FAIL  a.test.ts > test A\n  Error: fail', exitCode: 1 })
+      .mockResolvedValueOnce({ passed: false, output: ' FAIL  b.test.ts > test B\n  Error: fail', exitCode: 1 })
+      .mockResolvedValueOnce({ passed: false, output: ' FAIL  c.test.ts > test C\n  Error: fail', exitCode: 1 });
 
     const result = await runTILoop({
       issue: makeIssue(),
@@ -570,6 +575,150 @@ describe('runTILoop', () => {
     expect(result.diagnosis).toBe('SPEC_WRONG');
   });
 
+  // --- Diagnosis-driven retry strategies (#215) ---
+
+  it('SPEC_WRONG mid-loop: breaks early and returns shouldRespec=true', async () => {
+    // Same test names fail twice → SPEC_WRONG detected mid-loop → early break
+    const sameFailure = ' FAIL  src/auth.test.ts > AuthService > validates expired tokens\n   Error: fail';
+
+    vi.mocked(mockTestRunner)
+      .mockResolvedValueOnce({ passed: false, output: sameFailure, exitCode: 1 })
+      .mockResolvedValueOnce({ passed: false, output: sameFailure, exitCode: 1 })
+      .mockResolvedValueOnce({ passed: false, output: sameFailure, exitCode: 1 });
+
+    const result = await runTILoop({
+      issue: makeIssue(),
+      workDir: '/tmp/test',
+      repoConfig: makeConfig(),
+      waveResults: {},
+      testRunner: mockTestRunner,
+      testCommand: 'npm test',
+    });
+
+    expect(result.shouldRespec).toBe(true);
+    expect(result.diagnosis).toBe('SPEC_WRONG');
+    // Should break early after mid-loop diagnosis — only 3 impl calls (attempt 3 still runs
+    // because diagnosis requires 2 failures and first detection is at attempt 3)
+    const implCalls = mockExecute.mock.calls.filter((c) => c[0].wave === 'impl');
+    expect(implCalls.length).toBeLessThanOrEqual(3);
+  });
+
+  it('shouldRespec is false for non-SPEC_WRONG diagnoses', async () => {
+    // Different test names fail → APPROACH_WRONG, not SPEC_WRONG
+    const attempt1 = ' FAIL  src/auth.test.ts > AuthService > validates expired tokens\n   Error: fail';
+    const attempt2 = ' FAIL  src/parser.test.ts > Parser > handles nested\n   Error: fail';
+
+    vi.mocked(mockTestRunner)
+      .mockResolvedValueOnce({ passed: false, output: attempt1, exitCode: 1 })
+      .mockResolvedValueOnce({ passed: false, output: attempt2, exitCode: 1 })
+      .mockResolvedValueOnce({ passed: false, output: attempt1, exitCode: 1 });
+
+    const result = await runTILoop({
+      issue: makeIssue(),
+      workDir: '/tmp/test',
+      repoConfig: makeConfig(),
+      waveResults: {},
+      testRunner: mockTestRunner,
+      testCommand: 'npm test',
+    });
+
+    expect(result.shouldRespec).toBeFalsy();
+  });
+
+  it('MISSING_CONTEXT mid-loop: extracts file paths and injects file contents', async () => {
+    const missingFileError =
+      "Error: Cannot find module './services/auth-service'\n" +
+      '  at /tmp/test/src/handler.ts:5:1\n' +
+      "Error: no such file or directory, open '/tmp/test/src/utils/helper.ts'";
+
+    vi.mocked(mockTestRunner)
+      .mockResolvedValueOnce({ passed: false, output: missingFileError, exitCode: 1 })
+      .mockResolvedValueOnce({ passed: false, output: missingFileError, exitCode: 1 })
+      .mockResolvedValueOnce({ passed: true, output: 'ok', exitCode: 0 });
+
+    // Mock fileReader to return file contents
+    const fileReader = vi
+      .fn<(p: string) => Promise<string>>()
+      .mockResolvedValueOnce('export class AuthService {}')
+      .mockResolvedValueOnce('export function helper() {}');
+
+    await runTILoop({
+      issue: makeIssue(),
+      workDir: '/tmp/test',
+      repoConfig: makeConfig(),
+      waveResults: {},
+      testRunner: mockTestRunner,
+      testCommand: 'npm test',
+      fileReader,
+    });
+
+    const implCalls = mockExecute.mock.calls.filter((c) => c[0].wave === 'impl');
+    // Third impl call (after 2 MISSING_CONTEXT failures) should have injected file contents
+    const thirdImplMsg = implCalls.at(2)?.[0].userMessage as string;
+    expect(thirdImplMsg).toContain('Missing Context');
+    expect(thirdImplMsg).toContain('AuthService');
+  });
+
+  it('MISSING_CONTEXT: skips unreadable files gracefully', async () => {
+    const missingFileError = "Error: Cannot find module './nonexistent'\n  at src/handler.ts:5:1";
+
+    vi.mocked(mockTestRunner)
+      .mockResolvedValueOnce({ passed: false, output: missingFileError, exitCode: 1 })
+      .mockResolvedValueOnce({ passed: false, output: missingFileError, exitCode: 1 })
+      .mockResolvedValueOnce({ passed: true, output: 'ok', exitCode: 0 });
+
+    const fileReader = vi.fn<(p: string) => Promise<string>>().mockRejectedValue(new Error('ENOENT'));
+
+    // Should not throw — gracefully skips unreadable files
+    await runTILoop({
+      issue: makeIssue(),
+      workDir: '/tmp/test',
+      repoConfig: makeConfig(),
+      waveResults: {},
+      testRunner: mockTestRunner,
+      testCommand: 'npm test',
+      fileReader,
+    });
+
+    // Just verifies it doesn't crash
+    expect(mockExecute).toHaveBeenCalled();
+  });
+
+  it('STUCK mid-loop: injects partial-fix hint with test counts', async () => {
+    // DIFFERENT_FILES thrashing + 2 failures → STUCK diagnosed mid-loop
+    const stuckOutput =
+      ' FAIL  src/auth.test.ts > AuthService > validates tokens\n   Error: fail\n Tests  1 failed, 5 passed';
+
+    vi.mocked(mockTestRunner)
+      .mockResolvedValueOnce({ passed: false, output: stuckOutput, exitCode: 1 })
+      .mockResolvedValueOnce({ passed: false, output: stuckOutput, exitCode: 1 })
+      .mockResolvedValueOnce({ passed: false, output: stuckOutput, exitCode: 1 });
+
+    // diffRunner returns completely different files per attempt → DIFFERENT_FILES → STUCK
+    let diffCall = 0;
+    const mockDiffRunner = vi.fn(async () => {
+      diffCall++;
+      // Each call returns unique files → 0% overlap → DIFFERENT_FILES thrashing
+      return [`src/file-${diffCall}-a.ts`, `src/file-${diffCall}-b.ts`];
+    });
+
+    const result = await runTILoop({
+      issue: makeIssue(),
+      workDir: '/tmp/test',
+      repoConfig: makeConfig(),
+      waveResults: {},
+      testRunner: mockTestRunner,
+      testCommand: 'npm test',
+      diffRunner: mockDiffRunner,
+    });
+
+    // After 2 failures classified as STUCK (via DIFFERENT_FILES thrashing), 3rd impl should get partial-fix hint
+    const implCalls = mockExecute.mock.calls.filter((c) => c[0].wave === 'impl');
+    const lastImplMsg = implCalls.at(-1)?.[0].userMessage as string;
+    expect(lastImplMsg).toContain('partial');
+    expect(result.diagnosis).toBe('STUCK');
+  });
+
   it('throws when maxRetries is less than 1', async () => {
     await expect(
       runTILoop({
@@ -790,6 +939,42 @@ describe('extractFailingTestNames', () => {
 
     const names = extractFailingTestNames(output);
     expect(names).toEqual(['AuthService > validates expired tokens']);
+  });
+});
+
+// --- extractMissingFilePaths tests ---
+
+describe('extractMissingFilePaths', () => {
+  it('extracts absolute file paths from ENOENT errors', () => {
+    const output = "Error: ENOENT: no such file or directory, open '/tmp/test/src/utils/helper.ts'";
+    const paths = extractMissingFilePaths(output);
+    expect(paths).toContain('/tmp/test/src/utils/helper.ts');
+  });
+
+  it('extracts module paths from cannot-find-module errors', () => {
+    const output = "Cannot find module './services/auth-service' from 'src/handler.ts'";
+    const paths = extractMissingFilePaths(output);
+    expect(paths).toContain('./services/auth-service');
+  });
+
+  it('extracts paths from cannot-resolve errors', () => {
+    const output = "Module not found: Cannot resolve '@/utils/helper' in '/tmp/test/src'";
+    const paths = extractMissingFilePaths(output);
+    expect(paths).toContain('@/utils/helper');
+  });
+
+  it('returns empty array when no file paths found', () => {
+    const output = 'TypeError: cannot read property of undefined';
+    const paths = extractMissingFilePaths(output);
+    expect(paths).toEqual([]);
+  });
+
+  it('deduplicates extracted paths', () => {
+    const output = ["Cannot find module './auth' from 'src/a.ts'", "Cannot find module './auth' from 'src/b.ts'"].join(
+      '\n',
+    );
+    const paths = extractMissingFilePaths(output);
+    expect(paths.filter((p) => p === './auth')).toHaveLength(1);
   });
 });
 
