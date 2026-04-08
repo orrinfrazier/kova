@@ -37,6 +37,15 @@ export {
   resolveOllamaApiKey,
 } from './ollama.js';
 export {
+  createAfterToolCallHook,
+  DEFAULT_HEAD_TOKENS,
+  DEFAULT_TAIL_TOKENS,
+  DEFAULT_TOKEN_BUDGET,
+  estimateTokens,
+  type ToolHookOptions,
+  truncateContent,
+} from './tool-hooks.js';
+export {
   createRouterModel,
   getRouterBaseUrl,
   getRouterDefaultModel,

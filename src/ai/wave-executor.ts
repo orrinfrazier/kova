@@ -13,6 +13,7 @@ import { classifyError, isSpendingCapBehavior, KovaError } from './errors.js';
 import { resolveModelFromString, resolveWaveModel } from './models.js';
 import { isOllamaProvider, resolveOllamaApiKey } from './ollama.js';
 import { isRouterProvider, resolveRouterApiKey } from './router.js';
+import { createAfterToolCallHook, type ToolHookOptions } from './tool-hooks.js';
 import { type AIWaveName, DEFAULT_THINKING_LEVELS, getWaveTools } from './wave-tools.js';
 
 export interface OutputFormat {
@@ -66,6 +67,8 @@ export interface SpawnWaveAgentConfig {
   thinkingLevel?: ThinkingLevel;
   /** Context usage threshold (0-1) — abort if input tokens exceed this fraction of contextWindow. Default: 0.8 */
   contextThreshold?: number;
+  /** Tool result truncation options. Set to configure or `false` to disable. Default: enabled with 8k token budget. */
+  toolResultTruncation?: ToolHookOptions | false;
 }
 
 export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig): Promise<WaveHandoff<T>> {
@@ -83,6 +86,7 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
     maxCostUsd,
     thinkingLevel: explicitThinking,
     contextThreshold: rawThreshold = 0.8,
+    toolResultTruncation,
   } = config;
 
   const timeoutMs = explicitTimeout ?? DEFAULT_WAVE_TIMEOUTS[wave];
@@ -99,6 +103,11 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
 
   const effectiveUserMessage = handoffContext ? `${handoffContext}\n\n---\n\n${userMessage}` : userMessage;
 
+  const afterToolCallHook =
+    toolResultTruncation === false
+      ? undefined
+      : createAfterToolCallHook(toolResultTruncation ?? undefined);
+
   const agent = new Agent({
     initialState: {
       systemPrompt: effectiveSystemPrompt,
@@ -109,6 +118,7 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
     streamFn: streamSimple,
     convertToLlm,
     getApiKey: resolveApiKey,
+    ...(afterToolCallHook && { afterToolCall: afterToolCallHook }),
   });
 
   let turnCount = 0;
