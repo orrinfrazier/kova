@@ -550,7 +550,36 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         specArtifact.dependency_order,
         pendingPRFileList,
       );
-      if (!validation.valid) {
+
+      // If a piece-to-piece merge occurred, persist the merged result back to state.
+      // The TI loop reads from state.waveResults.spec.artifact, so the merge must
+      // be visible there or downstream waves operate on stale, conflicting pieces.
+      const existingSpecResult = state.waveResults.spec;
+      if (validation.merged && existingSpecResult) {
+        const mergedArtifact: SpecResult = {
+          ...specArtifact,
+          pieces: validation.pieces,
+          dependency_order: validation.dependencyOrder,
+        };
+        state.waveResults.spec = {
+          ...existingSpecResult,
+          artifact: mergedArtifact,
+        };
+        await saveCheckpoint(workDir, state);
+        log.info(
+          `[fix] Persisted merged spec to state (${specArtifact.pieces.length} → ${validation.pieces.length} pieces)`,
+        );
+      }
+
+      // Decide whether a spec retry is needed.
+      // Retry is required only when merging cannot resolve the conflict on its own:
+      //   - Pending-PR conflicts: the spec must restructure to avoid the PR files entirely.
+      //   - Piece overlaps that did NOT result in a merge (defensive — shouldn't happen
+      //     in practice since validator always merges what it can).
+      const needsRetry =
+        validation.pendingPRConflicts.length > 0 || (validation.overlaps.length > 0 && !validation.merged);
+
+      if (needsRetry) {
         // Build combined feedback for both overlap types
         const feedbackParts: string[] = [];
         if (validation.overlaps.length > 0) {
@@ -562,7 +591,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         const feedback = feedbackParts.join('\n\n');
 
         log.warn(
-          `[fix] Spec validation failed (${validation.overlaps.length} piece overlap(s), ${validation.pendingPRConflicts.length} pending PR conflict(s)), re-running spec with feedback`,
+          `[fix] Spec retry needed (${validation.overlaps.length} piece overlap(s), ${validation.pendingPRConflicts.length} pending PR conflict(s)), re-running spec with feedback`,
         );
 
         const specContext = buildWaveContext('spec', issue, state.waveResults, {
@@ -599,8 +628,27 @@ export async function fix(options: FixOptions): Promise<FixResult> {
             retryArtifact.dependency_order,
             pendingPRFileList,
           );
+
+          // Persist any merge from the retry as well — same reason as the first pass.
+          const existingRetrySpec = state.waveResults.spec;
+          if (retryValidation.merged && existingRetrySpec) {
+            const mergedRetryArtifact: SpecResult = {
+              ...retryArtifact,
+              pieces: retryValidation.pieces,
+              dependency_order: retryValidation.dependencyOrder,
+            };
+            state.waveResults.spec = {
+              ...existingRetrySpec,
+              artifact: mergedRetryArtifact,
+            };
+            await saveCheckpoint(workDir, state);
+            log.info(
+              `[fix] Persisted merged retry spec to state (${retryArtifact.pieces.length} → ${retryValidation.pieces.length} pieces)`,
+            );
+          }
+
           if (!retryValidation.valid) {
-            if (retryValidation.overlaps.length > 0) {
+            if (retryValidation.overlaps.length > 0 && !retryValidation.merged) {
               log.warn(
                 `[fix] Spec retry still has overlapping files — falling back to serial execution (maxConcurrent: 1)`,
               );
