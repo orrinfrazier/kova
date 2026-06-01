@@ -45,6 +45,7 @@ import {
 import { createWebhookServer } from '../services/webhook-server.js';
 import type { KovaConfig, RepoConfig } from '../types/index.js';
 import { log, setLevel } from '../utils/logger.js';
+import { registerOllamaProvidersFromConfig } from './ollama-wiring.js';
 
 const program = new Command();
 
@@ -126,6 +127,7 @@ program
       const kovaConfig = await tryLoadConfig(program.opts().config);
       const { repoPath, repoName, config } = resolveRepo(opts.repo ?? '.', kovaConfig);
       initMetrics(config.metrics);
+      registerOllamaProvidersFromConfig(config);
 
       if (opts.all) {
         // Loop mode: fix all open issues
@@ -221,6 +223,7 @@ program
       if (opts.repo || !kovaConfig) {
         const { repoPath, repoName, config } = resolveRepo(opts.repo ?? '.', kovaConfig);
         initMetrics(config.metrics);
+        registerOllamaProvidersFromConfig(config);
         const result = await runAuto({
           repoPath,
           repoName,
@@ -241,6 +244,12 @@ program
       // Multi-repo mode: init metrics from first repo with metrics enabled
       const firstRepoConfig = Object.values(kovaConfig.repos).find((r) => r.metrics?.enabled);
       initMetrics(firstRepoConfig?.metrics);
+
+      // Register Ollama providers from every configured repo so the model
+      // registry has every id available before any wave runs.
+      for (const repoConfig of Object.values(kovaConfig.repos)) {
+        registerOllamaProvidersFromConfig(repoConfig);
+      }
 
       // Multi-repo mode: parallel or sequential
       if (opts.parallelRepos) {
@@ -287,6 +296,7 @@ program
   .action(async (opts: { repo?: string; threshold?: string; focus?: string; yes?: boolean }) => {
     const kovaConfig = await tryLoadConfig(program.opts().config);
     const { repoPath, config } = resolveRepo(opts.repo ?? '.', kovaConfig);
+    registerOllamaProvidersFromConfig(config);
     const threshold = Number.parseFloat(opts.threshold ?? '0.7');
     if (Number.isNaN(threshold) || threshold < 0 || threshold > 1) {
       console.error('--threshold must be a number between 0.0 and 1.0');
@@ -352,6 +362,7 @@ program
       const repoName = detectRepoName(repoPath);
       const config = resolveRepoConfig(repoPath);
       initMetrics(config.metrics);
+      registerOllamaProvidersFromConfig(config);
 
       const threshold = opts.threshold ? Number.parseFloat(opts.threshold) : undefined;
       const focus = opts.focus ? opts.focus.split(',').map((s) => s.trim()) : undefined;
@@ -477,6 +488,7 @@ program
     const kovaConfig = await tryLoadConfig(program.opts().config);
     const { repoPath, repoName, config } = resolveRepo(opts.repo ?? '.', kovaConfig);
     initMetrics(config.metrics);
+    registerOllamaProvidersFromConfig(config);
 
     const secret = process.env.GITHUB_WEBHOOK_SECRET;
     if (!secret) {
