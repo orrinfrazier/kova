@@ -16,10 +16,10 @@ import {
   resolveMCPServers,
   resolveThinkingLevel,
   resolveWaveModel,
-  spawnWaveAgentWithFallback,
   startAllMCPServers,
   stopAllMCPServers,
 } from '../ai/index.js';
+import { dispatchSpawnWave, type SandboxContext } from '../sandbox/dispatch.js';
 import { selectVariants, type VariantSelection } from '../services/ab-test.js';
 import { clearCheckpoint, loadCheckpoint, saveCheckpoint } from '../services/checkpoint.js';
 import { checkForConflicts } from '../services/conflict-check.js';
@@ -168,7 +168,13 @@ function waveFallbackModel(
   return getApiFallbackModelString('medium');
 }
 
-/** Spawn a wave agent with automatic local-to-API fallback. Returns handoff + prompt hash. */
+/** Spawn a wave agent with automatic local-to-API fallback. Returns handoff + prompt hash.
+ *
+ * When `sandbox` is provided, the wave is dispatched into the sandbox container via
+ * `dispatchSpawnWave` — the AI runs on `/workspace` inside the container, not on the
+ * host filesystem. Without `sandbox`, the wave runs in-process on the host (the
+ * worktree/none isolation modes).
+ */
 async function spawnWave<T>(
   wave: FixAIWaveName,
   workDir: string,
@@ -181,6 +187,7 @@ async function spawnWave<T>(
   promptsDir?: string,
   projectContext?: ProjectContext,
   abTestVariant?: string,
+  sandbox?: SandboxContext | undefined,
 ): Promise<{ handoff: WaveHandoff<T>; promptHash: string }> {
   const model = resolveWaveModel(config.model[wave]);
   const mcpTools =
@@ -202,18 +209,21 @@ async function spawnWave<T>(
   const thinkingLevel = resolveThinkingLevel(config, wave);
   const modelString = getModelString(model);
   const fallbackModel = waveFallbackModel(config.model[wave], modelString, config.model.fallback);
-  const handoff = await spawnWaveAgentWithFallback<T>({
-    wave,
-    model: modelString,
-    tools,
-    systemPrompt,
-    handoffContext: '',
-    userMessage,
-    cwd: workDir,
-    thinkingLevel,
-    fallbackModel,
-    ...(outputFormat != null && { outputFormat }),
-  });
+  const handoff = await dispatchSpawnWave<T>(
+    {
+      wave,
+      model: modelString,
+      tools,
+      systemPrompt,
+      handoffContext: '',
+      userMessage,
+      cwd: workDir,
+      thinkingLevel,
+      fallbackModel,
+      ...(outputFormat != null && { outputFormat }),
+    },
+    sandbox,
+  );
   return { handoff, promptHash };
 }
 
@@ -294,6 +304,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
   // Docker sandbox: start container with resource limits
   let sandboxContainerId: string | undefined;
   let sandboxContainerName: string | undefined;
+  let sandboxContext: SandboxContext | undefined;
   let sandboxTimeoutHandle: ReturnType<typeof setTimeout> | undefined;
   let sandboxTimedOut = false;
   const sandboxStartTime = Date.now();
@@ -321,6 +332,10 @@ export async function fix(options: FixOptions): Promise<FixResult> {
     });
     sandboxContainerId = sandbox.containerId;
     sandboxContainerName = sandbox.containerName;
+    // Build the SandboxContext that every wave-dispatch site below uses to
+    // route into the container. Without this, the AI would run on the host
+    // and the docker isolation would be a no-op (see issue #319).
+    sandboxContext = { containerName: sandbox.containerName, repoPath: workDir };
 
     // Set up timeout kill
     const timeoutStr = config.sandbox?.timeout ?? DEFAULT_SANDBOX_LIMITS.timeout;
@@ -461,6 +476,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         resolvedPromptsDir,
         projectContext,
         abTestVariants?.assess,
+        sandboxContext,
       );
       await saveHandoff(workDir, handoff);
       promptHashes.assess = promptHash;
@@ -527,6 +543,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         resolvedPromptsDir,
         projectContext,
         abTestVariants?.spec,
+        sandboxContext,
       );
       await saveHandoff(workDir, handoff);
       promptHashes.spec = promptHash;
@@ -614,6 +631,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           resolvedPromptsDir,
           projectContext,
           abTestVariants?.spec,
+          sandboxContext,
         );
 
         await saveHandoff(workDir, retryHandoff);
@@ -705,6 +723,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           resolvedPromptsDir,
           projectContext,
           abTestVariants?.spec,
+          sandboxContext,
         );
 
         await saveHandoff(workDir, emptyRetryHandoff);
@@ -742,6 +761,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         projectContext,
         ...(testRunner != null && { testRunner }),
         ...(serialFallback && { maxConcurrent: 1 }),
+        ...(sandboxContext != null && { sandbox: sandboxContext }),
       });
 
       // Save handoffs for test and impl
@@ -792,6 +812,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           resolvedPromptsDir,
           projectContext,
           abTestVariants?.spec,
+          sandboxContext,
         );
         await saveHandoff(workDir, specHandoff);
         promptHashes.spec = specPromptHash;
@@ -806,6 +827,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           codebaseContext,
           projectContext,
           ...(testRunner != null && { testRunner }),
+          ...(sandboxContext != null && { sandbox: sandboxContext }),
         });
         state.waveResults.test = retryTI.testWaveResult;
         state.waveResults.impl = retryTI.implWaveResult;
@@ -849,6 +871,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         resolvedPromptsDir,
         projectContext,
         abTestVariants?.quality,
+        sandboxContext,
       );
       await saveHandoff(workDir, handoff);
       promptHashes.quality = promptHash;
@@ -867,6 +890,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         waveResults: state.waveResults,
         ...(testRunner != null && { testRunner }),
         projectContext,
+        ...(sandboxContext != null && { sandbox: sandboxContext }),
       });
       if (qualityRetry.retried) {
         state.waveResults.quality = qualityRetry.qualityWaveResult;
@@ -904,6 +928,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         ...(reviewFeedbackContext != null && { reviewFeedbackContext }),
         ...(testRunner != null && { testRunner }),
         playwright: playwrightOption,
+        ...(sandboxContext != null && { sandbox: sandboxContext }),
       });
 
       // Save review handoff
@@ -990,6 +1015,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
             codebaseContext: [codebaseContext, conflictHint].filter(Boolean).join('\n\n'),
             projectContext,
             ...(testRunner != null && { testRunner }),
+            ...(sandboxContext != null && { sandbox: sandboxContext }),
           });
 
           state.waveResults.test = retryTI.testWaveResult;
