@@ -41,15 +41,21 @@ export function isAssistantMessage(msg: unknown): msg is AssistantMessage {
   );
 }
 
-/** Default wall-clock timeouts per wave type (ms). `undefined` means no timeout. */
+/**
+ * Default wall-clock timeouts per wave type (ms). `undefined` means no timeout.
+ *
+ * Sized for large workspaces (e.g. Rust monorepos where `cargo test` compilation
+ * alone takes 2-5 minutes) and local-model inference (15-30s per turn). See
+ * issue #244. Override per-repo via `rules.wave_timeout` in repos.yaml (seconds).
+ */
 export const DEFAULT_WAVE_TIMEOUTS: Record<WaveName, number | undefined> = {
   assess: 5 * 60 * 1000,
   spec: 5 * 60 * 1000,
   review: 5 * 60 * 1000,
   brainstorm: 10 * 60 * 1000,
-  test: 15 * 60 * 1000,
-  impl: 15 * 60 * 1000,
-  quality: 10 * 60 * 1000,
+  test: 30 * 60 * 1000,
+  impl: 30 * 60 * 1000,
+  quality: 20 * 60 * 1000,
   ship: undefined,
 };
 

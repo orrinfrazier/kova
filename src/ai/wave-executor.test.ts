@@ -436,13 +436,34 @@ describe('spawnWaveAgent', () => {
   it('uses default timeout per wave type when timeoutMs not specified', async () => {
     const { DEFAULT_WAVE_TIMEOUTS } = await import('./wave-executor.js');
 
+    // Defaults are sized for large workspaces (e.g. Rust monorepos where
+    // `cargo test` compilation alone can take 2-5 minutes, plus 15-30s
+    // per turn for local model inference). See issue #244.
     expect(DEFAULT_WAVE_TIMEOUTS.assess).toBe(5 * 60 * 1000);
     expect(DEFAULT_WAVE_TIMEOUTS.spec).toBe(5 * 60 * 1000);
     expect(DEFAULT_WAVE_TIMEOUTS.review).toBe(5 * 60 * 1000);
-    expect(DEFAULT_WAVE_TIMEOUTS.test).toBe(15 * 60 * 1000);
-    expect(DEFAULT_WAVE_TIMEOUTS.impl).toBe(15 * 60 * 1000);
-    expect(DEFAULT_WAVE_TIMEOUTS.quality).toBe(10 * 60 * 1000);
+    expect(DEFAULT_WAVE_TIMEOUTS.test).toBe(30 * 60 * 1000);
+    expect(DEFAULT_WAVE_TIMEOUTS.impl).toBe(30 * 60 * 1000);
+    expect(DEFAULT_WAVE_TIMEOUTS.quality).toBe(20 * 60 * 1000);
     expect(DEFAULT_WAVE_TIMEOUTS.ship).toBeUndefined();
+  });
+
+  it('does not timeout a 20-minute wave with new defaults (issue #244)', async () => {
+    const { DEFAULT_WAVE_TIMEOUTS } = await import('./wave-executor.js');
+
+    // A wave running for 20 minutes must NOT timeout with the new defaults
+    // for test/impl waves (which require room for cargo compilation + local
+    // model inference on large workspaces).
+    const twentyMinutesMs = 20 * 60 * 1000;
+    const testDefault = DEFAULT_WAVE_TIMEOUTS.test;
+    const implDefault = DEFAULT_WAVE_TIMEOUTS.impl;
+    expect(testDefault).toBeDefined();
+    expect(implDefault).toBeDefined();
+    if (testDefault == null || implDefault == null) {
+      throw new Error('test/impl defaults must be defined');
+    }
+    expect(testDefault).toBeGreaterThan(twentyMinutesMs);
+    expect(implDefault).toBeGreaterThan(twentyMinutesMs);
   });
 
   it('allows custom timeoutMs to override default', async () => {

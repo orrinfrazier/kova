@@ -209,6 +209,10 @@ async function spawnWave<T>(
   const thinkingLevel = resolveThinkingLevel(config, wave);
   const modelString = getModelString(model);
   const fallbackModel = waveFallbackModel(config.model[wave], modelString, config.model.fallback);
+  // Issue #244: per-repo wave_timeout override (seconds) → ms.
+  // Falls back to DEFAULT_WAVE_TIMEOUTS in spawnWaveAgent when undefined.
+  const timeoutSeconds = config.rules.wave_timeout?.[wave];
+  const timeoutMs = timeoutSeconds != null ? timeoutSeconds * 1000 : undefined;
   const handoff = await dispatchSpawnWave<T>(
     {
       wave,
@@ -221,6 +225,7 @@ async function spawnWave<T>(
       thinkingLevel,
       fallbackModel,
       ...(outputFormat != null && { outputFormat }),
+      ...(timeoutMs != null && { timeoutMs }),
     },
     sandbox,
   );
