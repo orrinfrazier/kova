@@ -103,11 +103,13 @@ describe('IndexResult type', () => {
       chunksUpserted: 128,
       duration: 1500,
       incremental: true,
+      codegraphFilesIndexed: 7,
     };
 
     expect(result.filesIndexed).toBe(42);
     expect(result.chunksUpserted).toBe(128);
     expect(result.duration).toBe(1500);
     expect(result.incremental).toBe(true);
+    expect(result.codegraphFilesIndexed).toBe(7);
   });
 });
