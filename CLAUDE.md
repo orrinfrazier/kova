@@ -17,7 +17,7 @@ npm run build          # Compile TypeScript
 - **Runtime:** Claude Agent SDK `query()` — one call per pipeline wave
 - **CLI:** Commander.js — `kova fix <issue>`, `kova fix --all`
 - **State:** File-based JSON checkpoints in `.kova/state.json` per worktree
-- **Isolation:** Git worktrees for each fix
+- **Isolation:** Git worktrees (default for private repos) or Docker sandbox (default for public/OSS repos — every wave runs via `docker exec` in a `/workspace`-mounted container, see `src/sandbox/dispatch.ts`)
 - **GitHub:** `gh` CLI for issues and PRs
 - **Config:** `repos.yaml` with Zod validation
 
