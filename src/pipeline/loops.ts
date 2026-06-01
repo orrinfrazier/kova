@@ -8,7 +8,8 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { z } from 'zod';
-import { executeWaveWithRetry, type OutputFormat, resolveThinkingLevel } from '../ai/index.js';
+import { type OutputFormat, resolveThinkingLevel } from '../ai/index.js';
+import { dispatchExecuteWave, type SandboxContext } from '../sandbox/dispatch.js';
 import { detectTooling } from '../services/language-detect.js';
 import type { ProjectContext } from '../services/project-context.js';
 import type {
@@ -62,6 +63,12 @@ export interface TILoopConfig {
   testRunner?: TestRunner;
   diffRunner?: DiffRunner;
   fileReader?: FileReader;
+  /**
+   * When set, every wave inside this loop is routed through the docker sandbox
+   * container instead of running in-process on the host. This is the integration
+   * point for `config.isolation === 'docker'` (see issue #319).
+   */
+  sandbox?: SandboxContext | undefined;
 }
 
 export interface TILoopResult {
@@ -91,6 +98,8 @@ export interface ReviewLoopConfig {
   projectContext?: ProjectContext | undefined;
   playwright?: { enabled: boolean } | undefined;
   reviewFeedbackContext?: string;
+  /** Route every wave through the docker sandbox container when set. */
+  sandbox?: SandboxContext | undefined;
 }
 
 export interface ReviewLoopResult {
@@ -113,6 +122,8 @@ export interface PieceTILoopConfig {
   projectContext?: ProjectContext | undefined;
   testRunner?: TestRunner | undefined;
   diffRunner?: DiffRunner | undefined;
+  /** Route every wave through the docker sandbox container when set. */
+  sandbox?: SandboxContext | undefined;
 }
 
 export interface PieceTILoopResult {
@@ -137,6 +148,8 @@ export interface ParallelPieceTILoopConfig {
   prContext?: string | undefined;
   codebaseContext?: string | undefined;
   projectContext?: ProjectContext | undefined;
+  /** Route every wave through the docker sandbox container when set. */
+  sandbox?: SandboxContext | undefined;
 }
 
 export interface ParallelPieceTILoopResult {
@@ -472,6 +485,7 @@ export async function runTILoop(config: TILoopConfig): Promise<TILoopResult> {
     testRunner = defaultTestRunner,
     diffRunner = defaultDiffRunner,
     fileReader = defaultFileReader,
+    sandbox,
   } = config;
 
   if (maxRetries < 1) {
@@ -487,15 +501,18 @@ export async function runTILoop(config: TILoopConfig): Promise<TILoopResult> {
   log.info('[ti-loop] Running test wave (write failing tests)');
   const resolvedPromptsDir = resolvePromptsDir(repoConfig.path, repoConfig.prompts_dir);
   const testSystemPrompt = await loadPrompt('test', repoConfig.tools, projectContext, resolvedPromptsDir);
-  const testExecResult = await executeWaveWithRetry({
-    wave: 'test',
-    systemPrompt: testSystemPrompt,
-    userMessage: buildWaveContext('test', issue, waveResults),
-    cwd: workDir,
-    modelTier: repoConfig.model.test,
-    thinkingLevel: resolveThinkingLevel(repoConfig, 'test'),
-    customTools: repoConfig.tools,
-  });
+  const testExecResult = await dispatchExecuteWave(
+    {
+      wave: 'test',
+      systemPrompt: testSystemPrompt,
+      userMessage: buildWaveContext('test', issue, waveResults),
+      cwd: workDir,
+      modelTier: repoConfig.model.test,
+      thinkingLevel: resolveThinkingLevel(repoConfig, 'test'),
+      customTools: repoConfig.tools,
+    },
+    sandbox,
+  );
 
   const testWaveResult = toWaveResult('test', testExecResult);
   totalCost += testExecResult.cost;
@@ -606,15 +623,18 @@ export async function runTILoop(config: TILoopConfig): Promise<TILoopResult> {
     }
 
     const implSystemPrompt = await loadPrompt('impl', repoConfig.tools, projectContext, resolvedPromptsDir);
-    const implExecResult = await executeWaveWithRetry({
-      wave: 'impl',
-      systemPrompt: implSystemPrompt,
-      userMessage: implContext,
-      cwd: workDir,
-      modelTier: repoConfig.model.impl,
-      thinkingLevel: resolveThinkingLevel(repoConfig, 'impl'),
-      customTools: repoConfig.tools,
-    });
+    const implExecResult = await dispatchExecuteWave(
+      {
+        wave: 'impl',
+        systemPrompt: implSystemPrompt,
+        userMessage: implContext,
+        cwd: workDir,
+        modelTier: repoConfig.model.impl,
+        thinkingLevel: resolveThinkingLevel(repoConfig, 'impl'),
+        customTools: repoConfig.tools,
+      },
+      sandbox,
+    );
 
     implWaveResult = toWaveResult('impl', implExecResult);
     totalCost += implExecResult.cost;
@@ -676,6 +696,7 @@ export async function runPieceTILoop(config: PieceTILoopConfig): Promise<PieceTI
     projectContext,
     maxRetries = 3,
     testRunner = defaultTestRunner,
+    sandbox,
   } = config;
 
   if (maxRetries < 1) {
@@ -691,15 +712,18 @@ export async function runPieceTILoop(config: PieceTILoopConfig): Promise<PieceTI
   log.info(`[piece-ti-loop] Piece ${pieceIndex}: running test wave`);
   const resolvedPromptsDir = resolvePromptsDir(repoConfig.path, repoConfig.prompts_dir);
   const testSystemPrompt = await loadPrompt('test', repoConfig.tools, projectContext, resolvedPromptsDir);
-  const testExecResult = await executeWaveWithRetry({
-    wave: 'test',
-    systemPrompt: testSystemPrompt,
-    userMessage: buildPieceContext('test', piece),
-    cwd: workDir,
-    modelTier: repoConfig.model.test,
-    thinkingLevel: resolveThinkingLevel(repoConfig, 'test'),
-    customTools: repoConfig.tools,
-  });
+  const testExecResult = await dispatchExecuteWave(
+    {
+      wave: 'test',
+      systemPrompt: testSystemPrompt,
+      userMessage: buildPieceContext('test', piece),
+      cwd: workDir,
+      modelTier: repoConfig.model.test,
+      thinkingLevel: resolveThinkingLevel(repoConfig, 'test'),
+      customTools: repoConfig.tools,
+    },
+    sandbox,
+  );
 
   const testWaveResult = toWaveResult('test', testExecResult);
   cost += testExecResult.cost;
@@ -739,15 +763,18 @@ export async function runPieceTILoop(config: PieceTILoopConfig): Promise<PieceTI
     });
 
     const implSystemPrompt = await loadPrompt('impl', repoConfig.tools, projectContext, resolvedPromptsDir);
-    const implExecResult = await executeWaveWithRetry({
-      wave: 'impl',
-      systemPrompt: implSystemPrompt,
-      userMessage: implContext,
-      cwd: workDir,
-      modelTier: repoConfig.model.impl,
-      thinkingLevel: resolveThinkingLevel(repoConfig, 'impl'),
-      customTools: repoConfig.tools,
-    });
+    const implExecResult = await dispatchExecuteWave(
+      {
+        wave: 'impl',
+        systemPrompt: implSystemPrompt,
+        userMessage: implContext,
+        cwd: workDir,
+        modelTier: repoConfig.model.impl,
+        thinkingLevel: resolveThinkingLevel(repoConfig, 'impl'),
+        customTools: repoConfig.tools,
+      },
+      sandbox,
+    );
 
     implWaveResult = toWaveResult('impl', implExecResult);
     cost += implExecResult.cost;
@@ -805,6 +832,7 @@ export async function runParallelPieceTILoop(config: ParallelPieceTILoopConfig):
     prContext,
     codebaseContext,
     projectContext,
+    sandbox,
   } = config;
 
   // Extract spec pieces
@@ -829,6 +857,7 @@ export async function runParallelPieceTILoop(config: ParallelPieceTILoopConfig):
       ...(codebaseContext != null && { codebaseContext }),
       ...(config.diffRunner != null && { diffRunner: config.diffRunner }),
       ...(config.testCommand != null && { testCommand: config.testCommand }),
+      ...(sandbox != null && { sandbox }),
     });
 
     return {
@@ -875,6 +904,7 @@ export async function runParallelPieceTILoop(config: ParallelPieceTILoopConfig):
         projectContext,
         testRunner,
         ...(config.testCommand != null && { testCommand: config.testCommand }),
+        ...(sandbox != null && { sandbox }),
       });
 
       pieceResults.push(result);
@@ -977,6 +1007,7 @@ export async function runReviewLoop(config: ReviewLoopConfig): Promise<ReviewLoo
     reviewFeedbackContext,
     testRunner = defaultTestRunner,
     fileWriter = defaultFileWriter,
+    sandbox,
   } = config;
 
   if (maxIterations < 1) {
@@ -995,19 +1026,22 @@ export async function runReviewLoop(config: ReviewLoopConfig): Promise<ReviewLoo
 
     // Step 1: Fresh review agent — no prior review bias
     const reviewSystemPrompt = await loadPrompt('review', repoConfig.tools, projectContext, resolvedPromptsDir);
-    const reviewExecResult = await executeWaveWithRetry({
-      wave: 'review',
-      systemPrompt: reviewSystemPrompt,
-      userMessage: buildWaveContext('review', issue, waveResults, {
-        ...(reviewFeedbackContext != null && { reviewFeedbackContext }),
-      }),
-      cwd: workDir,
-      modelTier: repoConfig.model.review,
-      outputFormat: reviewOutputFormat(),
-      thinkingLevel: resolveThinkingLevel(repoConfig, 'review'),
-      customTools: repoConfig.tools,
-      playwright: config.playwright,
-    });
+    const reviewExecResult = await dispatchExecuteWave(
+      {
+        wave: 'review',
+        systemPrompt: reviewSystemPrompt,
+        userMessage: buildWaveContext('review', issue, waveResults, {
+          ...(reviewFeedbackContext != null && { reviewFeedbackContext }),
+        }),
+        cwd: workDir,
+        modelTier: repoConfig.model.review,
+        outputFormat: reviewOutputFormat(),
+        thinkingLevel: resolveThinkingLevel(repoConfig, 'review'),
+        customTools: repoConfig.tools,
+        playwright: config.playwright,
+      },
+      sandbox,
+    );
 
     reviewWaveResult = toWaveResult('review', reviewExecResult);
     totalCost += reviewExecResult.cost;
@@ -1052,15 +1086,18 @@ export async function runReviewLoop(config: ReviewLoopConfig): Promise<ReviewLoo
           log.info('[review-loop] Ratchet confirmed — new tests fail, spawning impl agent');
           const implContext = buildNeedsNewTestsImplContext(needsNewTests, testFilesWritten, waveResults, prContext);
           const implSystemPrompt = await loadPrompt('impl', repoConfig.tools, projectContext, resolvedPromptsDir);
-          const implExecResult = await executeWaveWithRetry({
-            wave: 'impl',
-            systemPrompt: implSystemPrompt,
-            userMessage: implContext,
-            cwd: workDir,
-            modelTier: repoConfig.model.impl,
-            thinkingLevel: resolveThinkingLevel(repoConfig, 'impl'),
-            customTools: repoConfig.tools,
-          });
+          const implExecResult = await dispatchExecuteWave(
+            {
+              wave: 'impl',
+              systemPrompt: implSystemPrompt,
+              userMessage: implContext,
+              cwd: workDir,
+              modelTier: repoConfig.model.impl,
+              thinkingLevel: resolveThinkingLevel(repoConfig, 'impl'),
+              customTools: repoConfig.tools,
+            },
+            sandbox,
+          );
           totalCost += implExecResult.cost;
           waveResults.impl = toWaveResult('impl', implExecResult);
 
@@ -1078,15 +1115,18 @@ export async function runReviewLoop(config: ReviewLoopConfig): Promise<ReviewLoo
       log.info(`[review-loop] Applying ${mechanicalFixes.length} mechanical fix(es)`);
       const implContext = buildMechanicalFixImplContext(mechanicalFixes, waveResults, prContext);
       const implSystemPrompt = await loadPrompt('impl', repoConfig.tools, projectContext, resolvedPromptsDir);
-      const implExecResult = await executeWaveWithRetry({
-        wave: 'impl',
-        systemPrompt: implSystemPrompt,
-        userMessage: implContext,
-        cwd: workDir,
-        modelTier: repoConfig.model.impl,
-        thinkingLevel: resolveThinkingLevel(repoConfig, 'impl'),
-        customTools: repoConfig.tools,
-      });
+      const implExecResult = await dispatchExecuteWave(
+        {
+          wave: 'impl',
+          systemPrompt: implSystemPrompt,
+          userMessage: implContext,
+          cwd: workDir,
+          modelTier: repoConfig.model.impl,
+          thinkingLevel: resolveThinkingLevel(repoConfig, 'impl'),
+          customTools: repoConfig.tools,
+        },
+        sandbox,
+      );
       totalCost += implExecResult.cost;
       waveResults.impl = toWaveResult('impl', implExecResult);
 
@@ -1101,17 +1141,20 @@ export async function runReviewLoop(config: ReviewLoopConfig): Promise<ReviewLoo
     // Step 5: Re-run quality gates (only if new code was written or mechanical fixes broke tests)
     if (needQualityRerun) {
       const qualitySystemPrompt = await loadPrompt('quality', repoConfig.tools, projectContext, resolvedPromptsDir);
-      const qualityExecResult = await executeWaveWithRetry({
-        wave: 'quality',
-        systemPrompt: qualitySystemPrompt,
-        userMessage: buildWaveContext('quality', issue, waveResults, {
-          coverageThreshold: repoConfig.rules.coverage,
-        }),
-        cwd: workDir,
-        modelTier: repoConfig.model.quality,
-        thinkingLevel: resolveThinkingLevel(repoConfig, 'quality'),
-        customTools: repoConfig.tools,
-      });
+      const qualityExecResult = await dispatchExecuteWave(
+        {
+          wave: 'quality',
+          systemPrompt: qualitySystemPrompt,
+          userMessage: buildWaveContext('quality', issue, waveResults, {
+            coverageThreshold: repoConfig.rules.coverage,
+          }),
+          cwd: workDir,
+          modelTier: repoConfig.model.quality,
+          thinkingLevel: resolveThinkingLevel(repoConfig, 'quality'),
+          customTools: repoConfig.tools,
+        },
+        sandbox,
+      );
       qualityWaveResult = toWaveResult('quality', qualityExecResult);
       totalCost += qualityExecResult.cost;
       waveResults.quality = qualityWaveResult;
@@ -1206,6 +1249,8 @@ export interface QualityRetryConfig {
   testRunner?: TestRunner;
   testCommand?: string;
   projectContext?: ProjectContext | undefined;
+  /** Route every wave through the docker sandbox container when set. */
+  sandbox?: SandboxContext | undefined;
 }
 
 export interface QualityRetryResult {
@@ -1221,7 +1266,7 @@ export interface QualityRetryResult {
  * Max 1 retry cycle: impl → quality re-run.
  */
 export async function runQualityRetryLoop(config: QualityRetryConfig): Promise<QualityRetryResult> {
-  const { issue, workDir, repoConfig, waveResults, projectContext, testRunner = defaultTestRunner } = config;
+  const { issue, workDir, repoConfig, waveResults, projectContext, testRunner = defaultTestRunner, sandbox } = config;
 
   const qualityWaveResult = waveResults.quality;
   if (!qualityWaveResult) {
@@ -1247,15 +1292,18 @@ export async function runQualityRetryLoop(config: QualityRetryConfig): Promise<Q
   });
 
   const implSystemPrompt = await loadPrompt('impl', repoConfig.tools, projectContext, resolvedPromptsDir);
-  const implExecResult = await executeWaveWithRetry({
-    wave: 'impl',
-    systemPrompt: implSystemPrompt,
-    userMessage: implContext,
-    cwd: workDir,
-    modelTier: repoConfig.model.impl,
-    thinkingLevel: resolveThinkingLevel(repoConfig, 'impl'),
-    customTools: repoConfig.tools,
-  });
+  const implExecResult = await dispatchExecuteWave(
+    {
+      wave: 'impl',
+      systemPrompt: implSystemPrompt,
+      userMessage: implContext,
+      cwd: workDir,
+      modelTier: repoConfig.model.impl,
+      thinkingLevel: resolveThinkingLevel(repoConfig, 'impl'),
+      customTools: repoConfig.tools,
+    },
+    sandbox,
+  );
   totalCost += implExecResult.cost;
   waveResults.impl = toWaveResult('impl', implExecResult);
 
@@ -1267,17 +1315,20 @@ export async function runQualityRetryLoop(config: QualityRetryConfig): Promise<Q
 
   // Step 2: Re-run quality gates
   const qualitySystemPrompt = await loadPrompt('quality', repoConfig.tools, projectContext, resolvedPromptsDir);
-  const qualityExecResult = await executeWaveWithRetry({
-    wave: 'quality',
-    systemPrompt: qualitySystemPrompt,
-    userMessage: buildWaveContext('quality', issue, waveResults, {
-      coverageThreshold: repoConfig.rules.coverage,
-    }),
-    cwd: workDir,
-    modelTier: repoConfig.model.quality,
-    thinkingLevel: resolveThinkingLevel(repoConfig, 'quality'),
-    customTools: repoConfig.tools,
-  });
+  const qualityExecResult = await dispatchExecuteWave(
+    {
+      wave: 'quality',
+      systemPrompt: qualitySystemPrompt,
+      userMessage: buildWaveContext('quality', issue, waveResults, {
+        coverageThreshold: repoConfig.rules.coverage,
+      }),
+      cwd: workDir,
+      modelTier: repoConfig.model.quality,
+      thinkingLevel: resolveThinkingLevel(repoConfig, 'quality'),
+      customTools: repoConfig.tools,
+    },
+    sandbox,
+  );
   totalCost += qualityExecResult.cost;
 
   const updatedQualityResult = toWaveResult('quality', qualityExecResult);

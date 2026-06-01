@@ -11,7 +11,13 @@ import type { SpawnWithFallbackConfig } from '../ai/wave-executor.js';
 import { spawnWaveAgentWithFallback } from '../ai/wave-executor.js';
 import { type AIWaveName, getWaveTools } from '../ai/wave-tools.js';
 import type { WaveName } from '../types/config.js';
-import { AssessResultSchema, SpecResultSchema } from '../types/waves.js';
+import {
+  AssessResultSchema,
+  BrainstormResultSchema,
+  QualityRemediationSchema,
+  ReviewResultSchema,
+  SpecResultSchema,
+} from '../types/waves.js';
 
 // Redirect console.log → stderr so stdout is reserved for result JSON only.
 console.log = (...args: unknown[]) => {
@@ -35,9 +41,21 @@ interface OutputFormat {
   zodSchema?: z.ZodType;
 }
 
+/**
+ * Wave-name → Zod schema registry for in-container structured output validation.
+ *
+ * MUST stay in sync with `WAVE_OUTPUT_SCHEMA_NAMES` in `src/sandbox/dispatch.ts` —
+ * any wave the host orchestrator routes via `outputSchemaName` must have its schema
+ * registered here. Waves that do not return structured JSON (test, impl, ship) are
+ * intentionally absent; the runner falls through to returning the raw assistant
+ * text in that case.
+ */
 const WAVE_SCHEMAS: Record<string, z.ZodType> = {
   assess: AssessResultSchema,
   spec: SpecResultSchema,
+  quality: QualityRemediationSchema,
+  review: ReviewResultSchema,
+  brainstorm: BrainstormResultSchema,
 };
 
 async function main(): Promise<void> {

@@ -149,6 +149,7 @@ src/
 - **Orchestrator is code, not LLM** — the TypeScript orchestrator controls loops, runs tests via bash, decides retries. Agents are stateless workers that receive a prompt and return structured output.
 - **Quality gates inside the agent** — the agent runs lint/test/coverage, reads failures, fixes them, retries. No session-killing gate failures.
 - **Git worktree isolation** — each fix runs in its own worktree. Main branch stays clean.
+- **Docker sandbox isolation** — for OSS / untrusted repositories, `isolation: docker` runs every AI wave (assess, spec, test, impl, quality, review) inside a per-issue Docker container bind-mounted at `/workspace`. The host filesystem is not accessible to the agent. Resource limits (`--cpus`, `--memory`, configurable `timeout`) and optional `restrict_network: true` (`--network none`) further constrain the container. Auto-defaults to `docker` for public hosts (github.com, gitlab.com, etc.); explicit `isolation: worktree` keeps everything on the host for private/trusted repos.
 - **Sequential auto mode** — one fix at a time. Each fix is aware of repo state + open PRs. No merge conflicts.
 - **Multi-model per wave** — opus for reasoning (assess, spec, review), sonnet/local for code gen (test, impl), haiku for mechanical work (quality). Local models via Ollama for free retries.
 
