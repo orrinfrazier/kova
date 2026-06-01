@@ -627,6 +627,59 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       }
     }
 
+    // Gate: if spec produced no pieces (structured output parse failure), retry once
+    // before falling through to the TI loop (which would throw without pieces).
+    // See issue #243 — local models fail JSON parsing intermittently; a single retry
+    // often succeeds since the failure is non-deterministic.
+    // Skip this gate only when the test/impl waves themselves are skipped (e.g. REVIEW_ONLY).
+    if (!(shouldSkip('test') && shouldSkip('impl'))) {
+      const specAfterValidation = state.waveResults.spec?.artifact as SpecResult | undefined;
+      if (!specAfterValidation?.pieces || specAfterValidation.pieces.length === 0) {
+        log.warn('[fix] Spec produced no pieces (likely structured output parse failure), retrying once');
+
+        const emptyRetryContext = buildWaveContext('spec', issue, state.waveResults, {
+          prContext,
+          ...(failedEpisodicContext != null && { episodicContext: failedEpisodicContext }),
+          ...(codebaseContext != null && { codebaseContext }),
+          ...(repoSearchText != null && { repoSearchText }),
+        });
+
+        const { handoff: emptyRetryHandoff, promptHash: emptyRetryPromptHash } = await spawnWave(
+          'spec',
+          workDir,
+          repoPath,
+          config,
+          emptyRetryContext,
+          toOutputFormat(SpecResultSchema),
+          mcpHandles,
+          undefined,
+          resolvedPromptsDir,
+          projectContext,
+          abTestVariants?.spec,
+        );
+
+        await saveHandoff(workDir, emptyRetryHandoff);
+        promptHashes.spec = emptyRetryPromptHash;
+        state.waveResults.spec = handoffToResult(emptyRetryHandoff, waveProvider(config, 'spec'), emptyRetryPromptHash);
+        await saveCheckpoint(workDir, state);
+
+        const specAfterRetry = state.waveResults.spec?.artifact as SpecResult | undefined;
+        if (!specAfterRetry?.pieces || specAfterRetry.pieces.length === 0) {
+          const errorMsg =
+            'Spec wave produced no pieces after retry (likely structured output parse failure). ' +
+            'This usually indicates the model could not produce a valid spec JSON. ' +
+            'Try a different model, simplify the issue, or break it into smaller sub-issues.';
+          flog.error(`[fix] ${errorMsg}`);
+          state.status = 'failed';
+          state.error = errorMsg;
+          await saveCheckpoint(workDir, state);
+          await progress?.failed(errorMsg);
+          metrics.recordIssueFailed();
+          return { success: false, error: errorMsg, state };
+        }
+      }
+    }
+
     // WAVE T + I: Parallel Piece TI Loop (fan-out per piece, backward compat for 1 piece)
     if (!(shouldSkip('test') && shouldSkip('impl'))) {
       const tiWaveStart = Date.now();

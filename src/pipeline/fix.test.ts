@@ -43,7 +43,20 @@ const DEFAULT_ASSESS = {
   should_proceed: true,
 };
 
-const DEFAULT_SPEC = { summary: 'test spec', pieces: [], dependency_order: [], constraints: [] };
+const DEFAULT_SPEC = {
+  summary: 'test spec',
+  pieces: [
+    {
+      name: 'default',
+      description: 'default piece',
+      files: ['src/fix.ts'],
+      acceptance_criteria: ['AC1'],
+      wiring: [],
+    },
+  ],
+  dependency_order: [[0]],
+  constraints: [],
+};
 const DEFAULT_QUALITY = {
   lint: 'pass',
   typecheck: 'pass',
@@ -91,10 +104,12 @@ vi.mock('../ai/index.js', async (importOriginal) => {
 const mockRunTILoop = vi.fn();
 const mockRunParallelPieceTILoop = vi.fn();
 const mockRunReviewLoop = vi.fn();
+const mockRunQualityRetryLoop = vi.fn();
 vi.mock('./loops.js', () => ({
   runTILoop: (...args: unknown[]) => mockRunTILoop(...args),
   runParallelPieceTILoop: (...args: unknown[]) => mockRunParallelPieceTILoop(...args),
   runReviewLoop: (...args: unknown[]) => mockRunReviewLoop(...args),
+  runQualityRetryLoop: (...args: unknown[]) => mockRunQualityRetryLoop(...args),
 }));
 
 vi.mock('../services/github.js', () => ({
@@ -554,6 +569,123 @@ describe('fix — spec piece file ownership pre-validation', () => {
     // TI loop should NOT have maxConcurrent: 1
     const tiConfig = mockRunParallelPieceTILoop.mock.calls[0]?.[0] as Record<string, unknown>;
     expect(tiConfig.maxConcurrent).toBeUndefined();
+  });
+});
+
+// --- Empty-pieces retry tests (issue #243) ---
+
+describe('fix — spec empty-pieces retry', () => {
+  let workDir: string;
+
+  beforeEach(async () => {
+    workDir = await mkdtemp(join(tmpdir(), 'kova-fix-'));
+    vi.clearAllMocks();
+    setupDefaultMocks();
+  });
+
+  afterEach(async () => {
+    await rm(workDir, { recursive: true, force: true });
+  });
+
+  it('retries spec wave once when first attempt returns empty pieces, then succeeds', async () => {
+    const emptySpec = { summary: 'parse fail', pieces: [], dependency_order: [], constraints: [] };
+    const validSpec = {
+      summary: 'ok',
+      pieces: [
+        { name: 'one', description: 'piece one', files: ['src/one.ts'], acceptance_criteria: ['AC1'], wiring: [] },
+      ],
+      dependency_order: [[0]],
+      constraints: [],
+    };
+
+    let specCallCount = 0;
+    mockSpawnWaveAgent.mockImplementation(async (config: { wave: WaveName }) => {
+      if (config.wave === 'spec') {
+        specCallCount++;
+        return makeHandoff('spec', specCallCount === 1 ? emptySpec : validSpec);
+      }
+      const artifacts: Record<string, unknown> = {
+        assess: DEFAULT_ASSESS,
+        quality: DEFAULT_QUALITY,
+      };
+      return makeHandoff(config.wave, artifacts[config.wave] ?? 'done');
+    });
+
+    await fix({ issue: makeIssue(42), repoPath: workDir, repoName: 'test-repo', config: makeConfig() });
+
+    // Spec should have been called twice (original + empty-pieces retry)
+    const specCalls = mockSpawnWaveAgent.mock.calls.filter(
+      (c: unknown[]) => (c[0] as { wave: string }).wave === 'spec',
+    );
+    expect(specCalls).toHaveLength(2);
+
+    // TI loop should have been called once with the valid spec
+    expect(mockRunParallelPieceTILoop).toHaveBeenCalledOnce();
+  });
+
+  it('returns clean failure (not stack trace) when retry also produces empty pieces', async () => {
+    const emptySpec = { summary: 'parse fail', pieces: [], dependency_order: [], constraints: [] };
+
+    mockSpawnWaveAgent.mockImplementation(async (config: { wave: WaveName }) => {
+      if (config.wave === 'spec') return makeHandoff('spec', emptySpec);
+      const artifacts: Record<string, unknown> = {
+        assess: DEFAULT_ASSESS,
+        quality: DEFAULT_QUALITY,
+      };
+      return makeHandoff(config.wave, artifacts[config.wave] ?? 'done');
+    });
+
+    const result = await fix({
+      issue: makeIssue(42),
+      repoPath: workDir,
+      repoName: 'test-repo',
+      config: makeConfig(),
+    });
+
+    // Should fail cleanly
+    expect(result.success).toBe(false);
+    expect(result.error).toBeDefined();
+    expect(result.error).toMatch(/spec.*pieces/i);
+    // Should NOT be the raw stack-trace error from runParallelPieceTILoop
+    expect(result.error).not.toContain('Cannot run parallel piece TI loop without spec pieces');
+
+    // Spec should have been called twice (original + retry)
+    const specCalls = mockSpawnWaveAgent.mock.calls.filter(
+      (c: unknown[]) => (c[0] as { wave: string }).wave === 'spec',
+    );
+    expect(specCalls).toHaveLength(2);
+
+    // TI loop should NOT have been called
+    expect(mockRunParallelPieceTILoop).not.toHaveBeenCalled();
+  });
+
+  it('does not retry spec when first attempt produces valid pieces', async () => {
+    const validSpec = {
+      summary: 'ok',
+      pieces: [
+        { name: 'one', description: 'piece one', files: ['src/one.ts'], acceptance_criteria: ['AC1'], wiring: [] },
+      ],
+      dependency_order: [[0]],
+      constraints: [],
+    };
+
+    mockSpawnWaveAgent.mockImplementation(async (config: { wave: WaveName }) => {
+      if (config.wave === 'spec') return makeHandoff('spec', validSpec);
+      const artifacts: Record<string, unknown> = {
+        assess: DEFAULT_ASSESS,
+        quality: DEFAULT_QUALITY,
+      };
+      return makeHandoff(config.wave, artifacts[config.wave] ?? 'done');
+    });
+
+    await fix({ issue: makeIssue(42), repoPath: workDir, repoName: 'test-repo', config: makeConfig() });
+
+    // Spec should only have been called once
+    const specCalls = mockSpawnWaveAgent.mock.calls.filter(
+      (c: unknown[]) => (c[0] as { wave: string }).wave === 'spec',
+    );
+    expect(specCalls).toHaveLength(1);
+    expect(mockRunParallelPieceTILoop).toHaveBeenCalledOnce();
   });
 });
 
