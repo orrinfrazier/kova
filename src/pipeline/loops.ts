@@ -965,11 +965,33 @@ const defaultFileWriter: FileWriter = async (filePath, content) => {
 
 // --- Review test file writing ---
 
-async function writeReviewTests(findings: ReviewFinding[], workDir: string, writer: FileWriter): Promise<string[]> {
+interface WriteReviewTestsResult {
+  /** Test files that were written to disk (one per finding that had `test_code`). */
+  filesWritten: string[];
+  /** Findings that lacked `test_code` and could not be written — surfaced as known issues. */
+  skipped: ReviewFinding[];
+}
+
+async function writeReviewTests(
+  findings: ReviewFinding[],
+  workDir: string,
+  writer: FileWriter,
+): Promise<WriteReviewTestsResult> {
   const filesWritten: string[] = [];
+  const skipped: ReviewFinding[] = [];
 
   for (const finding of findings) {
-    if (!finding.test_code) continue;
+    if (!finding.test_code) {
+      // Guard, not silent skip: the reviewer prompt REQUIRES test_code for
+      // needs_new_tests findings (see prompts/review.md). When it is missing,
+      // we cannot ratchet-then-impl, so we surface the finding so the
+      // orchestrator can flag it instead of dropping it on the floor.
+      log.warn(
+        `[review-loop] needs_new_tests finding for ${finding.file} is missing test_code — surfacing as known issue (reviewer must emit runnable failing test code)`,
+      );
+      skipped.push(finding);
+      continue;
+    }
 
     const ext = path.extname(finding.file);
     const base = finding.file.replace(ext, '');
@@ -980,7 +1002,12 @@ async function writeReviewTests(findings: ReviewFinding[], workDir: string, writ
     filesWritten.push(testFile);
   }
 
-  return filesWritten;
+  return { filesWritten, skipped };
+}
+
+// Stable key for deduping skipped findings across loop iterations.
+function findingKey(f: ReviewFinding): string {
+  return `${f.category}::${f.file}::${f.line ?? ''}::${f.description}`;
 }
 
 // --- Review output format ---
@@ -1020,6 +1047,10 @@ export async function runReviewLoop(config: ReviewLoopConfig): Promise<ReviewLoo
   let reviewWaveResult: WaveResult | undefined;
   let qualityWaveResult: WaveResult | undefined;
   let lastReview: ReviewResult | undefined;
+  // Accumulates needs_new_tests findings that the reviewer returned without
+  // `test_code` across all iterations. These cannot be ratcheted/impl'd, so
+  // they surface in the final knownIssues — never silently dropped.
+  const skippedSurfacedFindings = new Map<string, ReviewFinding>();
 
   for (let iteration = 0; iteration < maxIterations; iteration++) {
     log.info(`[review-loop] Iteration ${iteration + 1}/${maxIterations}`);
@@ -1049,15 +1080,24 @@ export async function runReviewLoop(config: ReviewLoopConfig): Promise<ReviewLoo
 
     lastReview = reviewExecResult.structuredOutput as ReviewResult | undefined;
 
-    // If review passes, we're done
+    // If review passes, we're done — but still surface any skipped findings
+    // (missing test_code) collected across iterations. A `pass` verdict from
+    // the reviewer does not retroactively mean the unguardable findings were
+    // resolved; the orchestrator must see them.
     if (!lastReview || lastReview.verdict === 'pass') {
       log.info('[review-loop] Review passed');
+      const knownIssues = Array.from(skippedSurfacedFindings.values());
+      if (knownIssues.length > 0) {
+        log.warn(
+          `[review-loop] ${knownIssues.length} needs_new_tests finding(s) surfaced as known issues (missing test_code from reviewer)`,
+        );
+      }
       return {
         reviewWaveResult,
         qualityWaveResult,
         totalCost,
         iterations: iteration + 1,
-        knownIssues: [],
+        knownIssues,
       };
     }
 
@@ -1075,7 +1115,18 @@ export async function runReviewLoop(config: ReviewLoopConfig): Promise<ReviewLoo
 
     // Step 3: Path 1 — NEEDS_NEW_TESTS (ratcheting eval)
     if (needsNewTests.length > 0) {
-      const testFilesWritten = await writeReviewTests(needsNewTests, workDir, fileWriter);
+      const { filesWritten: testFilesWritten, skipped: skippedThisIter } = await writeReviewTests(
+        needsNewTests,
+        workDir,
+        fileWriter,
+      );
+
+      // Surface every skipped finding (missing test_code) so the orchestrator
+      // sees them in knownIssues even if a later iteration's review returns
+      // `pass` and the lastReview-based capture misses them.
+      for (const skipped of skippedThisIter) {
+        skippedSurfacedFindings.set(findingKey(skipped), skipped);
+      }
 
       if (testFilesWritten.length > 0) {
         // Ratchet: verify new tests fail (proving they catch the gap)
@@ -1163,8 +1214,21 @@ export async function runReviewLoop(config: ReviewLoopConfig): Promise<ReviewLoo
     }
   }
 
-  // Max iterations reached — collect remaining findings as known issues
-  const knownIssues = lastReview?.findings ?? [];
+  // Max iterations reached — collect remaining findings as known issues.
+  // Merge lastReview.findings with skipped-because-missing-test_code findings
+  // so the orchestrator sees both categories. Dedup by file+description so
+  // a finding that the reviewer returned in both forms (with and without
+  // test_code across iterations) only counts once.
+  const finalKnown = new Map<string, ReviewFinding>();
+  for (const f of lastReview?.findings ?? []) {
+    finalKnown.set(findingKey(f), f);
+  }
+  for (const [k, f] of skippedSurfacedFindings) {
+    if (!finalKnown.has(k)) {
+      finalKnown.set(k, f);
+    }
+  }
+  const knownIssues = Array.from(finalKnown.values());
   log.warn(`[review-loop] Max iterations (${maxIterations}) reached — ${knownIssues.length} known issue(s) remain`);
 
   return {
