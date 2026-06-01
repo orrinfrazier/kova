@@ -1049,3 +1049,56 @@ describe('fix — metrics instrumentation', () => {
     expect(mockRecordFixCost).toHaveBeenCalledOnce();
   });
 });
+
+/* ------------------------------------------------------------------ */
+/*  fix — wave_timeout config wiring (issue #244)                      */
+/* ------------------------------------------------------------------ */
+
+describe('fix — wave_timeout config wiring', () => {
+  let workDir: string;
+
+  beforeEach(async () => {
+    workDir = await mkdtemp(join(tmpdir(), 'kova-fix-wt-timeout-'));
+    vi.clearAllMocks();
+    setupDefaultMocks();
+  });
+
+  afterEach(async () => {
+    await rm(workDir, { recursive: true, force: true });
+  });
+
+  it('passes config rules.wave_timeout[wave] (seconds) to spawnWaveAgent as timeoutMs (ms)', async () => {
+    const configWithTimeouts = makeConfig({
+      rules: {
+        coverage: 80,
+        auto_merge: false,
+        max_issues_per_run: 10,
+        ci_merge: 'require' as const,
+        concurrency: 1,
+        // 30 min for assess wave (well above the 5min default)
+        wave_timeout: { assess: 1800 },
+      },
+    });
+
+    await fix({ issue: makeIssue(42), repoPath: workDir, repoName: 'test-repo', config: configWithTimeouts });
+
+    // Find the assess call and verify timeoutMs is 1800 * 1000
+    const assessCall = mockSpawnWaveAgent.mock.calls.find(
+      (c: unknown[]) => (c[0] as { wave: string }).wave === 'assess',
+    );
+    expect(assessCall).toBeDefined();
+    const assessConfig = assessCall?.[0] as { timeoutMs?: number };
+    expect(assessConfig.timeoutMs).toBe(1_800_000);
+  });
+
+  it('omits timeoutMs when rules.wave_timeout is not set (relies on DEFAULT_WAVE_TIMEOUTS)', async () => {
+    await fix({ issue: makeIssue(42), repoPath: workDir, repoName: 'test-repo', config: makeConfig() });
+
+    const assessCall = mockSpawnWaveAgent.mock.calls.find(
+      (c: unknown[]) => (c[0] as { wave: string }).wave === 'assess',
+    );
+    expect(assessCall).toBeDefined();
+    const assessConfig = assessCall?.[0] as { timeoutMs?: number };
+    expect(assessConfig.timeoutMs).toBeUndefined();
+  });
+});
