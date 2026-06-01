@@ -296,4 +296,3 @@ function dedupeEdges(edges: SymbolEdge[]): SymbolEdge[] {
   }
   return out;
 }
-

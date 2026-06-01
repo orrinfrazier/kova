@@ -1,4 +1,4 @@
-import { readFile, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -32,9 +32,7 @@ async function setupConflictRepos(opts?: {
   await $`git -C ${local} config user.name "Kova Test"`;
 
   // Initial commit with data.ts on main
-  const baseContent = ['// Section A', 'export const a = 1;', '', '// Section B', 'export const b = 2;', ''].join(
-    '\n',
-  );
+  const baseContent = ['// Section A', 'export const a = 1;', '', '// Section B', 'export const b = 2;', ''].join('\n');
   await writeFile(join(local, 'data.ts'), baseContent);
   await $`git -C ${local} add data.ts`;
 
