@@ -225,6 +225,20 @@ export const RepoConfigSchema = z.object({
       focus: z.array(z.string()).optional(),
       ci_merge: z.enum(['require', 'warn']).default('require'),
       concurrency: z.number().int().positive().default(1),
+      // Per-wave wall-clock timeout overrides (seconds, positive integers).
+      // Issue #244 — large workspaces with local models need 30+ min for T/I.
+      // Defaults live in DEFAULT_WAVE_TIMEOUTS (src/ai/wave-executor.ts).
+      wave_timeout: z
+        .object({
+          assess: z.number().int().positive().optional(),
+          spec: z.number().int().positive().optional(),
+          test: z.number().int().positive().optional(),
+          impl: z.number().int().positive().optional(),
+          quality: z.number().int().positive().optional(),
+          review: z.number().int().positive().optional(),
+          brainstorm: z.number().int().positive().optional(),
+        })
+        .optional(),
     })
     .default(() => ({
       coverage: 80,
