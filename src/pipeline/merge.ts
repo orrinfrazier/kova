@@ -164,9 +164,7 @@ export async function runMerge(options: MergeOptions): Promise<MergeResult> {
                 `[merge] Auto-resolved non-overlapping conflicts for PR #${remaining}: ${resolution.autoResolvedFiles.join(', ')}`,
               );
             } else {
-              log.warn(
-                `[merge] True conflicts in PR #${remaining}: ${resolution.trueConflictFiles.join(', ')}`,
-              );
+              log.warn(`[merge] True conflicts in PR #${remaining}: ${resolution.trueConflictFiles.join(', ')}`);
             }
           } catch (resolveError) {
             log.warn(
