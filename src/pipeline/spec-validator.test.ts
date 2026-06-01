@@ -22,6 +22,7 @@ describe('validatePieceFileOwnership', () => {
     const result = validatePieceFileOwnership(pieces, [[0]]);
 
     expect(result.valid).toBe(true);
+    expect(result.merged).toBe(false);
     expect(result.overlaps).toHaveLength(0);
     expect(result.pieces).toEqual(pieces);
     expect(result.dependencyOrder).toEqual([[0]]);
@@ -36,6 +37,7 @@ describe('validatePieceFileOwnership', () => {
     const result = validatePieceFileOwnership(pieces, [[0, 1], [2]]);
 
     expect(result.valid).toBe(true);
+    expect(result.merged).toBe(false);
     expect(result.overlaps).toHaveLength(0);
     expect(result.pieces).toEqual(pieces);
     expect(result.dependencyOrder).toEqual([[0, 1], [2]]);
@@ -50,6 +52,7 @@ describe('validatePieceFileOwnership', () => {
     const result = validatePieceFileOwnership(pieces, [[0, 1, 2]]);
 
     expect(result.valid).toBe(false);
+    expect(result.merged).toBe(true);
     expect(result.overlaps).toHaveLength(1);
     expect(result.overlaps[0]?.file).toBe('src/shared.ts');
     expect(result.overlaps[0]?.pieceNames).toContain('auth');
@@ -141,9 +144,28 @@ describe('validatePieceFileOwnership', () => {
   it('empty pieces array passes trivially', () => {
     const result = validatePieceFileOwnership([], []);
     expect(result.valid).toBe(true);
+    expect(result.merged).toBe(false);
     expect(result.overlaps).toHaveLength(0);
     expect(result.pieces).toEqual([]);
     expect(result.dependencyOrder).toEqual([]);
+  });
+
+  it('sets merged=true when a piece-to-piece merge occurred', () => {
+    const pieces = [makePiece('a', ['src/shared.ts']), makePiece('b', ['src/shared.ts'])];
+    const result = validatePieceFileOwnership(pieces, [[0, 1]]);
+
+    expect(result.merged).toBe(true);
+    expect(result.pieces).toHaveLength(1);
+  });
+
+  it('sets merged=false when only pending PR conflicts exist (no piece-to-piece overlap)', () => {
+    const pieces = [makePiece('a', ['src/auth.ts']), makePiece('b', ['src/db.ts'])];
+    const pendingPRFiles = ['src/auth.ts'];
+    const result = validatePieceFileOwnership(pieces, [[0, 1]], pendingPRFiles);
+
+    expect(result.merged).toBe(false);
+    expect(result.valid).toBe(false);
+    expect(result.pendingPRConflicts).toHaveLength(1);
   });
 
   it('reports all overlapping files', () => {

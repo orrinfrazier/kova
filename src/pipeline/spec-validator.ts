@@ -15,6 +15,14 @@ export interface PendingPRConflict {
 
 export interface ValidationResult {
   valid: boolean;
+  /**
+   * True iff piece-to-piece overlapping was detected AND merging produced a
+   * different (smaller) piece set than the input. Callers use this to decide
+   * whether to persist the merged result back to the spec artifact and skip
+   * a spec retry. Pending-PR conflicts alone do NOT set this — they require
+   * a real spec re-run.
+   */
+  merged: boolean;
   overlaps: FileOverlap[];
   pendingPRConflicts: PendingPRConflict[];
   pieces: SpecPiece[];
@@ -38,6 +46,7 @@ export function validatePieceFileOwnership(
   if (pieces.length <= 1) {
     return {
       valid: pendingPRConflicts.length === 0,
+      merged: false,
       overlaps: [],
       pendingPRConflicts,
       pieces,
@@ -72,7 +81,14 @@ export function validatePieceFileOwnership(
   }
 
   if (overlaps.length === 0) {
-    return { valid: pendingPRConflicts.length === 0, overlaps: [], pendingPRConflicts, pieces, dependencyOrder };
+    return {
+      valid: pendingPRConflicts.length === 0,
+      merged: false,
+      overlaps: [],
+      pendingPRConflicts,
+      pieces,
+      dependencyOrder,
+    };
   }
 
   // Log warnings
@@ -183,6 +199,7 @@ export function validatePieceFileOwnership(
 
   return {
     valid: false,
+    merged: mergedPieces.length < pieces.length,
     overlaps,
     pendingPRConflicts,
     pieces: mergedPieces,
