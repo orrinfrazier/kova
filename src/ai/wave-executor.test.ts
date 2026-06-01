@@ -1329,6 +1329,178 @@ describe('parseStructuredOutput', () => {
 
     debugSpy.mockRestore();
   });
+
+  it('repairs trailing commas inside <json> tags', async () => {
+    const { parseStructuredOutput } = await import('./wave-executor.js');
+    const input = '<json>{"grade": "A", "files": ["foo.ts",],}</json>';
+    expect(parseStructuredOutput(input)).toEqual({ grade: 'A', files: ['foo.ts'] });
+  });
+
+  it('repairs single-quoted strings inside markdown fence', async () => {
+    const { parseStructuredOutput } = await import('./wave-executor.js');
+    const input = "```json\n{'grade': 'B', 'files': ['a.ts']}\n```";
+    expect(parseStructuredOutput(input)).toEqual({ grade: 'B', files: ['a.ts'] });
+  });
+
+  it('repairs unquoted object keys via direct parse fallback', async () => {
+    const { parseStructuredOutput } = await import('./wave-executor.js');
+    const input = '{grade: "C", should_proceed: true}';
+    expect(parseStructuredOutput(input)).toEqual({ grade: 'C', should_proceed: true });
+  });
+
+  it('repairs JS-style line comments inside <json> tags', async () => {
+    const { parseStructuredOutput } = await import('./wave-executor.js');
+    const input = '<json>{\n  "grade": "A", // this is a grade\n  "files": ["foo.ts"]\n}</json>';
+    expect(parseStructuredOutput(input)).toEqual({ grade: 'A', files: ['foo.ts'] });
+  });
+
+  it('repairs JS-style block comments inside markdown fence', async () => {
+    const { parseStructuredOutput } = await import('./wave-executor.js');
+    const input = '```json\n{\n  /* leading note */\n  "grade": "B"\n}\n```';
+    expect(parseStructuredOutput(input)).toEqual({ grade: 'B' });
+  });
+
+  it('balances unclosed brackets in direct parse', async () => {
+    const { parseStructuredOutput } = await import('./wave-executor.js');
+    const input = '{"grade": "A", "files": ["foo.ts", "bar.ts"';
+    expect(parseStructuredOutput(input)).toEqual({ grade: 'A', files: ['foo.ts', 'bar.ts'] });
+  });
+
+  it('repairs raw control characters inside string literals', async () => {
+    const { parseStructuredOutput } = await import('./wave-executor.js');
+    // Raw newline inside a string is invalid JSON; repair must escape it.
+    const input = '<json>{"summary": "line1\nline2"}</json>';
+    expect(parseStructuredOutput(input)).toEqual({ summary: 'line1\nline2' });
+  });
+
+  it('logs repaired extraction with -repaired suffix', async () => {
+    const { parseStructuredOutput } = await import('./wave-executor.js');
+    const { log } = await import('../utils/logger.js');
+    const debugSpy = vi.spyOn(log, 'debug');
+
+    parseStructuredOutput('<json>{"ok": true,}</json>');
+    expect(debugSpy).toHaveBeenCalledWith(expect.stringContaining('repaired'));
+
+    debugSpy.mockRestore();
+  });
+});
+
+describe('repairJson', () => {
+  it('leaves already-valid JSON unchanged (idempotent)', async () => {
+    const { repairJson } = await import('./wave-executor.js');
+    const input = '{"grade":"A","files":["foo.ts"],"count":3,"flag":true,"none":null}';
+    expect(repairJson(input)).toBe(input);
+  });
+
+  it('removes trailing commas before } and ]', async () => {
+    const { repairJson } = await import('./wave-executor.js');
+    const input = '{"a": 1, "b": [1, 2, 3,],}';
+    expect(JSON.parse(repairJson(input))).toEqual({ a: 1, b: [1, 2, 3] });
+  });
+
+  it('strips JS-style line comments', async () => {
+    const { repairJson } = await import('./wave-executor.js');
+    const input = '{\n  "a": 1, // inline comment\n  "b": 2\n}';
+    expect(JSON.parse(repairJson(input))).toEqual({ a: 1, b: 2 });
+  });
+
+  it('strips JS-style block comments', async () => {
+    const { repairJson } = await import('./wave-executor.js');
+    const input = '{\n  /* block */\n  "a": 1,\n  "b": /* inline */ 2\n}';
+    expect(JSON.parse(repairJson(input))).toEqual({ a: 1, b: 2 });
+  });
+
+  it('does not strip // or /* sequences inside string values', async () => {
+    const { repairJson } = await import('./wave-executor.js');
+    const input = '{"url": "https://example.com/api", "pattern": "/* keep */"}';
+    expect(JSON.parse(repairJson(input))).toEqual({
+      url: 'https://example.com/api',
+      pattern: '/* keep */',
+    });
+  });
+
+  it('converts single-quoted strings to double-quoted', async () => {
+    const { repairJson } = await import('./wave-executor.js');
+    const input = "{'grade': 'A', 'files': ['foo.ts', 'bar.ts']}";
+    expect(JSON.parse(repairJson(input))).toEqual({ grade: 'A', files: ['foo.ts', 'bar.ts'] });
+  });
+
+  it('preserves apostrophes inside double-quoted strings', async () => {
+    const { repairJson } = await import('./wave-executor.js');
+    const input = `{"msg": "it's working"}`;
+    expect(JSON.parse(repairJson(input))).toEqual({ msg: "it's working" });
+  });
+
+  it('quotes unquoted object keys', async () => {
+    const { repairJson } = await import('./wave-executor.js');
+    const input = '{grade: "A", should_proceed: true, count: 3}';
+    expect(JSON.parse(repairJson(input))).toEqual({
+      grade: 'A',
+      should_proceed: true,
+      count: 3,
+    });
+  });
+
+  it('does not quote already-quoted keys', async () => {
+    const { repairJson } = await import('./wave-executor.js');
+    const input = '{"a": 1, "b": 2}';
+    expect(JSON.parse(repairJson(input))).toEqual({ a: 1, b: 2 });
+  });
+
+  it('balances a single missing }', async () => {
+    const { repairJson } = await import('./wave-executor.js');
+    const input = '{"a": 1, "b": 2';
+    expect(JSON.parse(repairJson(input))).toEqual({ a: 1, b: 2 });
+  });
+
+  it('balances missing ] inside an object', async () => {
+    const { repairJson } = await import('./wave-executor.js');
+    const input = '{"files": ["a.ts", "b.ts"';
+    expect(JSON.parse(repairJson(input))).toEqual({ files: ['a.ts', 'b.ts'] });
+  });
+
+  it('balances mixed nested closers in correct order', async () => {
+    const { repairJson } = await import('./wave-executor.js');
+    const input = '{"a": [1, {"b": 2';
+    // Expected: close obj, then arr, then outer obj
+    expect(JSON.parse(repairJson(input))).toEqual({ a: [1, { b: 2 }] });
+  });
+
+  it('escapes raw newlines inside string literals', async () => {
+    const { repairJson } = await import('./wave-executor.js');
+    const input = '{"msg": "line1\nline2"}';
+    expect(JSON.parse(repairJson(input))).toEqual({ msg: 'line1\nline2' });
+  });
+
+  it('escapes raw tabs and carriage returns inside string literals', async () => {
+    const { repairJson } = await import('./wave-executor.js');
+    const input = '{"msg": "col1\tcol2\r\nrow2"}';
+    expect(JSON.parse(repairJson(input))).toEqual({ msg: 'col1\tcol2\r\nrow2' });
+  });
+
+  it('combines multiple repair classes in one input', async () => {
+    const { repairJson } = await import('./wave-executor.js');
+    const input = "{grade: 'A', /* note */ files: ['a.ts',], count: 1,";
+    expect(JSON.parse(repairJson(input))).toEqual({
+      grade: 'A',
+      files: ['a.ts'],
+      count: 1,
+    });
+  });
+
+  it('strips a markdown fence wrapper with leading/trailing text', async () => {
+    const { repairJson } = await import('./wave-executor.js');
+    const input = 'Here you go:\n```json\n{"a": 1}\n```\nDone!';
+    expect(JSON.parse(repairJson(input))).toEqual({ a: 1 });
+  });
+
+  it('returns input as-is when no repairable issues found and parse still fails', async () => {
+    const { repairJson } = await import('./wave-executor.js');
+    // Pure garbage with no { or [ — nothing to repair toward.
+    const input = 'this is not json at all';
+    // We just verify it does not throw; downstream JSON.parse will reject.
+    expect(() => repairJson(input)).not.toThrow();
+  });
 });
 
 describe('buildStructuredOutputInstructions', () => {

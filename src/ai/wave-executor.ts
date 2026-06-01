@@ -587,24 +587,35 @@ export function parseStructuredOutput(text: string): unknown | undefined {
   // 1. Primary: extract from <json>...</json> tags
   const tagMatch = trimmed.match(/<json>([\s\S]*?)<\/json>/);
   if (tagMatch?.[1]) {
+    const inner = tagMatch[1].trim();
     try {
-      const result = JSON.parse(tagMatch[1].trim());
+      const result = JSON.parse(inner);
       log.debug('[parse] Extracted structured output via json-tag');
       return result;
     } catch {
-      // Invalid JSON in tags — fall through to next method
+      // Try repair pass before falling through
+      const repaired = tryRepairParse(inner);
+      if (repaired !== undefined) {
+        log.debug('[parse] Extracted structured output via json-tag-repaired');
+        return repaired;
+      }
     }
   }
 
   // 2. Secondary: extract from markdown code fences
   const fenceMatch = trimmed.match(/```(?:json)?\s*\n?([\s\S]*?)\n?\s*```/);
   if (fenceMatch?.[1]) {
+    const inner = fenceMatch[1].trim();
     try {
-      const result = JSON.parse(fenceMatch[1].trim());
+      const result = JSON.parse(inner);
       log.debug('[parse] Extracted structured output via markdown-fence');
       return result;
     } catch {
-      // Invalid JSON in fence — fall through
+      const repaired = tryRepairParse(inner);
+      if (repaired !== undefined) {
+        log.debug('[parse] Extracted structured output via markdown-fence-repaired');
+        return repaired;
+      }
     }
   }
 
@@ -614,9 +625,363 @@ export function parseStructuredOutput(text: string): unknown | undefined {
     log.debug('[parse] Extracted structured output via direct-parse');
     return result;
   } catch {
-    // Not pure JSON
+    const repaired = tryRepairParse(trimmed);
+    if (repaired !== undefined) {
+      log.debug('[parse] Extracted structured output via direct-parse-repaired');
+      return repaired;
+    }
   }
 
   // No greedy regex fallback — return undefined if none of the above worked
   return undefined;
+}
+
+/** Attempt to repair `input` then JSON.parse it. Returns undefined if still unparseable. */
+function tryRepairParse(input: string): unknown | undefined {
+  try {
+    const repaired = repairJson(input);
+    return JSON.parse(repaired);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Best-effort fuzzy repair for JSON-like text produced by local LLMs.
+ *
+ * Repairs (in order):
+ *   1. Strip markdown fence wrappers (``` or ```json with surrounding text).
+ *   2. Strip JS-style `// line` and block comments outside string literals.
+ *   3. Convert single-quoted strings to double-quoted (preserves apostrophes
+ *      that appear inside already-double-quoted strings).
+ *   4. Quote unquoted object keys (e.g. `{grade: "A"}` -> `{"grade": "A"}`).
+ *   5. Remove trailing commas before `}` and `]`.
+ *   6. Escape raw control characters (newline, tab, etc.) appearing inside
+ *      string literals so JSON.parse will accept them.
+ *   7. Balance unclosed `{` and `[` by appending closers in correct stack order.
+ *
+ * Idempotent on already-valid JSON. Pure function (no I/O, no throws).
+ *
+ * This is a fallback for malformed LLM output -- Zod validation downstream is
+ * still the safety net. The repair is best-effort and may produce output that
+ * JSON.parse still rejects; callers should handle that case.
+ */
+export function repairJson(input: string): string {
+  let s = input;
+
+  // 1. Strip markdown fence wrappers with optional surrounding text.
+  //    Only applied when there is no <json>...</json> tag (callers handle that case).
+  const fenceMatch = s.match(/```(?:json)?\s*\n?([\s\S]*?)\n?\s*```/);
+  if (fenceMatch?.[1]) {
+    s = fenceMatch[1].trim();
+  }
+
+  // 2. Strip JS-style comments outside string literals.
+  s = stripJsCommentsOutsideStrings(s);
+
+  // 3. Convert single-quoted strings to double-quoted (outside existing double-quoted strings).
+  s = convertSingleQuotedStringsOutsideDoubleQuoted(s);
+
+  // 4. Quote unquoted object keys.
+  s = quoteUnquotedKeys(s);
+
+  // 5. Remove trailing commas before } or ].
+  s = removeTrailingCommas(s);
+
+  // 6. Escape raw control characters appearing inside string literals.
+  s = escapeRawControlCharsInStrings(s);
+
+  // 7. Balance unclosed { and [ by appending closers in stack order.
+  s = balanceBrackets(s);
+
+  return s;
+}
+
+/** Strip `// line` and block comments outside JSON string literals. */
+function stripJsCommentsOutsideStrings(input: string): string {
+  let out = '';
+  let i = 0;
+  const n = input.length;
+  while (i < n) {
+    const ch = input[i];
+    // Skip string literals verbatim (handle both " and ' for robustness).
+    if (ch === '"' || ch === "'") {
+      const quote = ch;
+      out += ch;
+      i++;
+      while (i < n) {
+        const c = input[i];
+        out += c;
+        if (c === '\\' && i + 1 < n) {
+          out += input[i + 1];
+          i += 2;
+          continue;
+        }
+        i++;
+        if (c === quote) break;
+      }
+      continue;
+    }
+    if (ch === '/' && i + 1 < n) {
+      const next = input[i + 1];
+      if (next === '/') {
+        // Line comment: skip until newline (newline retained).
+        i += 2;
+        while (i < n && input[i] !== '\n') i++;
+        continue;
+      }
+      if (next === '*') {
+        // Block comment: skip until */.
+        i += 2;
+        while (i + 1 < n && !(input[i] === '*' && input[i + 1] === '/')) i++;
+        i = Math.min(n, i + 2);
+        continue;
+      }
+    }
+    out += ch;
+    i++;
+  }
+  return out;
+}
+
+/** Convert single-quoted string literals to double-quoted, preserving content inside existing double-quoted strings. */
+function convertSingleQuotedStringsOutsideDoubleQuoted(input: string): string {
+  let out = '';
+  let i = 0;
+  const n = input.length;
+  while (i < n) {
+    const ch = input[i];
+    if (ch === '"') {
+      // Pass through existing double-quoted string as-is.
+      out += ch;
+      i++;
+      while (i < n) {
+        const c = input[i];
+        out += c;
+        if (c === '\\' && i + 1 < n) {
+          out += input[i + 1];
+          i += 2;
+          continue;
+        }
+        i++;
+        if (c === '"') break;
+      }
+      continue;
+    }
+    if (ch === "'") {
+      // Convert single-quoted string to double-quoted.
+      // Escape any " or unescaped \ in the content; unescape \'.
+      out += '"';
+      i++;
+      while (i < n) {
+        const c = input[i];
+        if (c === '\\' && i + 1 < n) {
+          const escNext = input[i + 1];
+          if (escNext === "'") {
+            // \' -> '
+            out += "'";
+          } else if (escNext === '"') {
+            // \" stays as \"
+            out += '\\"';
+          } else {
+            out += `\\${escNext}`;
+          }
+          i += 2;
+          continue;
+        }
+        if (c === '"') {
+          // Bare double-quote inside single-quoted string -- escape it.
+          out += '\\"';
+          i++;
+          continue;
+        }
+        if (c === "'") {
+          // End of single-quoted string.
+          out += '"';
+          i++;
+          break;
+        }
+        out += c;
+        i++;
+      }
+      continue;
+    }
+    out += ch;
+    i++;
+  }
+  return out;
+}
+
+/** Quote unquoted object keys: `{foo: 1}` -> `{"foo": 1}`. Skips already-quoted keys and string literals. */
+function quoteUnquotedKeys(input: string): string {
+  // Match identifier-shaped tokens that appear immediately after `{` or `,` (with optional whitespace)
+  // and are followed by `:`. Use a tokenizer that respects string literals.
+  let out = '';
+  let i = 0;
+  const n = input.length;
+  while (i < n) {
+    const ch = input[i];
+    if (ch === '"') {
+      out += ch;
+      i++;
+      while (i < n) {
+        const c = input[i];
+        out += c;
+        if (c === '\\' && i + 1 < n) {
+          out += input[i + 1];
+          i += 2;
+          continue;
+        }
+        i++;
+        if (c === '"') break;
+      }
+      continue;
+    }
+    if (ch === '{' || ch === ',') {
+      out += ch;
+      i++;
+      // Skip whitespace
+      let j = i;
+      while (j < n && /\s/.test(input[j] ?? '')) j++;
+      // Check for an unquoted identifier followed by `:` (allow $ and _).
+      const idMatch = input.slice(j).match(/^([A-Za-z_$][A-Za-z0-9_$]*)\s*:/);
+      if (idMatch) {
+        // Emit whitespace, then quoted key, then advance past the identifier.
+        out += input.slice(i, j);
+        out += `"${idMatch[1]}"`;
+        i = j + (idMatch[1]?.length ?? 0);
+      }
+      continue;
+    }
+    out += ch;
+    i++;
+  }
+  return out;
+}
+
+/** Remove trailing commas immediately before `}` or `]` (outside string literals). */
+function removeTrailingCommas(input: string): string {
+  let out = '';
+  let i = 0;
+  const n = input.length;
+  while (i < n) {
+    const ch = input[i];
+    if (ch === '"') {
+      out += ch;
+      i++;
+      while (i < n) {
+        const c = input[i];
+        out += c;
+        if (c === '\\' && i + 1 < n) {
+          out += input[i + 1];
+          i += 2;
+          continue;
+        }
+        i++;
+        if (c === '"') break;
+      }
+      continue;
+    }
+    if (ch === ',') {
+      // Look ahead past whitespace for } or ].
+      let j = i + 1;
+      while (j < n && /\s/.test(input[j] ?? '')) j++;
+      if (j < n && (input[j] === '}' || input[j] === ']')) {
+        // Drop the comma; emit the whitespace verbatim.
+        out += input.slice(i + 1, j);
+        i = j;
+        continue;
+      }
+    }
+    out += ch;
+    i++;
+  }
+  return out;
+}
+
+/** Escape raw control characters appearing inside double-quoted string literals. */
+function escapeRawControlCharsInStrings(input: string): string {
+  let out = '';
+  let i = 0;
+  const n = input.length;
+  while (i < n) {
+    const ch = input[i];
+    if (ch === '"') {
+      out += ch;
+      i++;
+      while (i < n) {
+        const c = input[i];
+        if (c === '\\' && i + 1 < n) {
+          out += c + input[i + 1];
+          i += 2;
+          continue;
+        }
+        if (c === '"') {
+          out += c;
+          i++;
+          break;
+        }
+        // Escape raw control chars.
+        if (c === '\n') {
+          out += '\\n';
+        } else if (c === '\r') {
+          out += '\\r';
+        } else if (c === '\t') {
+          out += '\\t';
+        } else if (c === '\b') {
+          out += '\\b';
+        } else if (c === '\f') {
+          out += '\\f';
+        } else if (c !== undefined && c.charCodeAt(0) < 0x20) {
+          // Other ASCII control chars -> \uXXXX.
+          out += `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`;
+        } else {
+          out += c;
+        }
+        i++;
+      }
+      continue;
+    }
+    out += ch;
+    i++;
+  }
+  return out;
+}
+
+/** Append matching closers for any unclosed `{` / `[` in stack order. Respects string literals. */
+function balanceBrackets(input: string): string {
+  const stack: Array<'}' | ']'> = [];
+  let i = 0;
+  const n = input.length;
+  while (i < n) {
+    const ch = input[i];
+    if (ch === '"') {
+      i++;
+      while (i < n) {
+        const c = input[i];
+        if (c === '\\' && i + 1 < n) {
+          i += 2;
+          continue;
+        }
+        i++;
+        if (c === '"') break;
+      }
+      continue;
+    }
+    if (ch === '{') stack.push('}');
+    else if (ch === '[') stack.push(']');
+    else if (ch === '}' || ch === ']') {
+      // Only pop if the top matches; otherwise leave the input alone (don't try to be clever).
+      if (stack[stack.length - 1] === ch) stack.pop();
+    }
+    i++;
+  }
+  if (stack.length === 0) return input;
+  // Trim trailing comma+whitespace before appending closers -- common LLM artifact.
+  let trimmed = input.replace(/[\s,]+$/, '');
+  while (stack.length > 0) {
+    const closer = stack.pop();
+    if (closer !== undefined) trimmed += closer;
+  }
+  return trimmed;
 }
