@@ -1368,15 +1368,20 @@ describe('runReviewLoop', () => {
     expect(result.knownIssues).toHaveLength(0);
   });
 
-  it('skips needs_new_tests findings without test_code', async () => {
+  it('surfaces needs_new_tests findings without test_code as known issues even when review later passes (guard, not silent skip)', async () => {
+    // Critical case: iteration 1 has a finding with no test_code. The current
+    // silent `continue` would drop it. If iteration 2's review then returns
+    // `pass`, the loop exits with knownIssues=[] — and the orchestrator never
+    // hears about the gap. The guard must surface it on the iteration where
+    // it was skipped, not rely on the final `lastReview.findings` capture.
     const findingWithoutCode = { ...needsNewTestsFinding, test_code: undefined };
     mockExecute.mockResolvedValueOnce(reviewExecResult('needs_fixes', [findingWithoutCode]));
-    // Quality gates
+    // Quality re-runs (needs_new_tests path)
     mockExecute.mockResolvedValueOnce(qualityExecResult());
-    // Second review
+    // Iteration 2: review passes (e.g. reviewer dropped the finding)
     mockExecute.mockResolvedValueOnce(reviewExecResult('pass'));
 
-    await runReviewLoop({
+    const result = await runReviewLoop({
       issue: makeIssue(),
       workDir: '/tmp/test',
       repoConfig: makeConfig(),
@@ -1386,9 +1391,94 @@ describe('runReviewLoop', () => {
       testCommand: 'npm test',
     });
 
-    // No files written, no ratchet check, no impl
+    // No files written and no ratchet/impl ran (can't ratchet without test_code)
     expect(mockFileWriter).not.toHaveBeenCalled();
     expect(mockTestRunner).not.toHaveBeenCalled();
+
+    // GUARD: even though review eventually passed, the missing-test_code
+    // finding must surface so the orchestrator can flag it (instead of a
+    // silent skip that hides a behavioral gap).
+    expect(result.knownIssues).toHaveLength(1);
+    expect(result.knownIssues[0]).toMatchObject({
+      category: 'needs_new_tests',
+      file: 'src/auth.ts',
+    });
+    expect(result.knownIssues[0]?.test_code).toBeUndefined();
+  });
+
+  it('still writes the test file when test_code IS present', async () => {
+    // Sanity test: the guard does not break the happy path.
+    mockExecute.mockResolvedValueOnce(reviewExecResult('needs_fixes', [needsNewTestsFinding]));
+    mockExecute.mockResolvedValueOnce(implWaveExecResult());
+    mockExecute.mockResolvedValueOnce(qualityExecResult());
+    mockExecute.mockResolvedValueOnce(reviewExecResult('pass'));
+
+    vi.mocked(mockTestRunner)
+      .mockResolvedValueOnce({ passed: false, output: 'FAIL', exitCode: 1 })
+      .mockResolvedValueOnce({ passed: true, output: 'ok', exitCode: 0 });
+
+    const result = await runReviewLoop({
+      issue: makeIssue(),
+      workDir: '/tmp/test',
+      repoConfig: makeConfig(),
+      waveResults: {},
+      testRunner: mockTestRunner,
+      fileWriter: mockFileWriter,
+      testCommand: 'npm test',
+    });
+
+    // File writer was called with the test_code from the finding
+    expect(mockFileWriter).toHaveBeenCalledTimes(1);
+    const writerCall = vi.mocked(mockFileWriter).mock.calls[0];
+    expect(writerCall?.[1]).toContain('expired token');
+
+    // Happy path: review eventually passes, no known issues
+    expect(result.iterations).toBe(2);
+    expect(result.knownIssues).toHaveLength(0);
+  });
+
+  it('mixes guarded (no test_code) and writable (with test_code) findings in one iteration', async () => {
+    // One finding has test_code (writable), one doesn't (guarded).
+    const guardedFinding = {
+      category: 'needs_new_tests' as const,
+      file: 'src/handler.ts',
+      description: 'Missing test for null input',
+      severity: 'medium' as const,
+      // test_code intentionally omitted
+    };
+
+    mockExecute.mockResolvedValueOnce(reviewExecResult('needs_fixes', [needsNewTestsFinding, guardedFinding]));
+    // Impl agent for needs_new_tests (only one writable test)
+    mockExecute.mockResolvedValueOnce(implWaveExecResult());
+    mockExecute.mockResolvedValueOnce(qualityExecResult());
+    // Iteration 2: review now passes (writable finding fixed). The guarded
+    // one must still surface in knownIssues.
+    mockExecute.mockResolvedValueOnce(reviewExecResult('pass'));
+
+    vi.mocked(mockTestRunner)
+      .mockResolvedValueOnce({ passed: false, output: 'FAIL', exitCode: 1 })
+      .mockResolvedValueOnce({ passed: true, output: 'ok', exitCode: 0 });
+
+    const result = await runReviewLoop({
+      issue: makeIssue(),
+      workDir: '/tmp/test',
+      repoConfig: makeConfig(),
+      waveResults: {},
+      testRunner: mockTestRunner,
+      fileWriter: mockFileWriter,
+      testCommand: 'npm test',
+    });
+
+    // Exactly one file written (for the writable finding)
+    expect(mockFileWriter).toHaveBeenCalledTimes(1);
+
+    // The unguardable finding surfaces as a known issue even though review
+    // returned pass — the silent skip must not hide it.
+    expect(result.knownIssues).toHaveLength(1);
+    expect(result.knownIssues[0]).toMatchObject({
+      category: 'needs_new_tests',
+      file: 'src/handler.ts',
+    });
   });
 
   it('throws when maxIterations is less than 1', async () => {
