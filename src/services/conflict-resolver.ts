@@ -263,8 +263,7 @@ export async function resolveNonOverlappingConflicts(
     await $`git -C ${repoPath} fetch origin`;
 
     // Files the PR actually modified (net change from merge-base to branch tip)
-    const prModifiedResult =
-      await $`git -C ${repoPath} diff --name-only origin/${defaultBranch}...origin/${branch}`;
+    const prModifiedResult = await $`git -C ${repoPath} diff --name-only origin/${defaultBranch}...origin/${branch}`;
     const prModifiedFiles = new Set(prModifiedResult.stdout.trim().split('\n').filter(Boolean));
 
     // Checkout PR branch locally
