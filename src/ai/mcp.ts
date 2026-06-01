@@ -26,17 +26,27 @@ export interface MCPServerHandle {
 }
 
 /** Default MCP server assignment per wave.
- *  - Read-only waves get repo-intel for code search/context.
+ *  - Reasoning waves (assess/spec/review/brainstorm) get repo-intel for code
+ *    search/context AND codegraph for cheap, structured navigation
+ *    (context/trace/explore/callers/callees/impact — see codegraph's MCP server).
+ *    Steering these waves toward codegraph-first exploration cuts tool-call cost
+ *    significantly vs re-deriving structure with grep/find each run.
  *  - Impl gets shadcn for component generation + repo-intel.
- *  - Quality/test get no MCP tools by default (they run checks). */
+ *  - Quality/test get no MCP tools by default (they run checks and edit code,
+ *    not navigate structure). Codegraph is intentionally NOT here.
+ *
+ *  Codegraph is consumed via stdio MCP (e.g. `codegraph serve --mcp`). If the
+ *  user has not configured a `codegraph` entry in repos.yaml or settings.json,
+ *  startup-time MCP resolution silently drops it and `getMCPToolsForWave` skips
+ *  the missing handle — the pipeline keeps working with the remaining servers. */
 export const WAVE_MCP_DEFAULTS: Record<AIWaveName, string[]> = {
-  assess: ['repo-intel'],
-  spec: ['repo-intel'],
+  assess: ['repo-intel', 'codegraph'],
+  spec: ['repo-intel', 'codegraph'],
   test: [],
   impl: ['repo-intel', 'shadcn'],
   quality: [],
-  review: ['repo-intel'],
-  brainstorm: ['repo-intel'],
+  review: ['repo-intel', 'codegraph'],
+  brainstorm: ['repo-intel', 'codegraph'],
 };
 
 /** Default path to Claude Code user settings. */

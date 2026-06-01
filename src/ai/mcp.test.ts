@@ -279,6 +279,23 @@ describe('WAVE_MCP_DEFAULTS', () => {
   it('impl wave includes shadcn for component generation', () => {
     expect(WAVE_MCP_DEFAULTS.impl).toContain('shadcn');
   });
+
+  it('reasoning waves include codegraph for cheap structural context', () => {
+    // codegraph exposes read-only structural tools (context/trace/explore/callers/...)
+    // — much cheaper than re-grepping the repo. It belongs in the 4 reasoning waves.
+    expect(WAVE_MCP_DEFAULTS.assess).toContain('codegraph');
+    expect(WAVE_MCP_DEFAULTS.spec).toContain('codegraph');
+    expect(WAVE_MCP_DEFAULTS.review).toContain('codegraph');
+    expect(WAVE_MCP_DEFAULTS.brainstorm).toContain('codegraph');
+  });
+
+  it('execution waves (test/impl/quality) do NOT include codegraph', () => {
+    // codegraph is for reasoning, not execution — test/impl/quality run checks
+    // and edit code, not navigate structure.
+    expect(WAVE_MCP_DEFAULTS.test).not.toContain('codegraph');
+    expect(WAVE_MCP_DEFAULTS.impl).not.toContain('codegraph');
+    expect(WAVE_MCP_DEFAULTS.quality).not.toContain('codegraph');
+  });
 });
 
 /* ------------------------------------------------------------------ */
@@ -339,5 +356,17 @@ describe('getMCPToolsForWave', () => {
     // repo-intel is in defaults for assess but not in handles
     const tools = getMCPToolsForWave('assess', handles);
     expect(tools.length).toBe(0);
+  });
+
+  it('reasoning wave still works when codegraph handle is absent (graceful degradation)', () => {
+    // codegraph is in WAVE_MCP_DEFAULTS for assess, but only repo-intel is running.
+    // Pipeline must keep working — codegraph is dropped silently, repo-intel tools surface.
+    const handles = new Map<string, MCPServerHandle>();
+    handles.set('repo-intel', mockHandle('repo-intel', ['search', 'context']));
+    // Intentionally NOT registering 'codegraph' — simulating "codegraph not installed"
+
+    const tools = getMCPToolsForWave('assess', handles);
+    // Should return only the repo-intel tools; no error thrown.
+    expect(tools.map((t) => t.name)).toEqual(['mcp__repo-intel__search', 'mcp__repo-intel__context']);
   });
 });

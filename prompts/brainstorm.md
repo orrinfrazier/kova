@@ -12,7 +12,9 @@ You are analyzing a codebase to identify improvements and generate a structured 
 
 ### 2. Explore the Codebase
 
-Use file search and content search to systematically explore:
+**If codegraph MCP tools are available** (`mcp__codegraph__context`, `mcp__codegraph__trace`, `mcp__codegraph__callers`, `mcp__codegraph__callees`, `mcp__codegraph__impact`, `mcp__codegraph__explore`), call them FIRST to map the codebase structure — `mcp__codegraph__explore` for entry-point discovery, `mcp__codegraph__callers`/`mcp__codegraph__callees` for hot-path analysis, `mcp__codegraph__impact` to spot high-fan-out symbols that warrant brainstorm attention. This is ~70% fewer tool calls than re-deriving structure with grep/find.
+
+Fall back to file search and content search when codegraph is unavailable (graceful degradation). Either way, systematically explore:
 - Entry points (main, index, CLI)
 - Core business logic modules
 - API endpoints and handlers
