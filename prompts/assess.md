@@ -7,7 +7,8 @@ You are assessing a GitHub issue for feasibility. Your job is to analyze the iss
 ### 1. Gather Context
 
 - Read all files referenced in the issue body
-- Use file search and content search to find related code (imports, usages, tests)
+- **If codegraph MCP tools are available** (`mcp__codegraph__context`, `mcp__codegraph__trace`, `mcp__codegraph__callers`, `mcp__codegraph__callees`, `mcp__codegraph__impact`, `mcp__codegraph__explore`), call them FIRST to map structure cheaply — these read pre-indexed symbol/call graphs and are ~70% fewer tool calls than re-deriving structure with grep/find. Use grep/find only to fill gaps codegraph cannot answer (e.g. comments, string literals, config).
+- If codegraph is not configured for this repo, fall back to file search and content search to find related code (imports, usages, tests) — the pipeline works either way (graceful degradation).
 
 ### 2. Surface Area
 

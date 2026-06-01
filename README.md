@@ -112,6 +112,37 @@ repos:
 | `KOVA_LARGE_MODEL` | Override large model (default: opus) |
 | `KOVA_LOG_LEVEL` | Log level: debug, info, warn, error |
 
+### MCP servers
+
+Kova spawns stdio-based MCP servers per run and exposes their tools to specific waves. Each wave gets a fixed default server set (see `WAVE_MCP_DEFAULTS` in `src/ai/mcp.ts`); per-wave overrides can be set in `repos.yaml`. Missing servers are dropped silently — pipeline degrades gracefully.
+
+| Wave | Default servers | Why |
+|------|-----------------|-----|
+| assess, spec, review, brainstorm | `repo-intel`, `codegraph` | Reasoning waves benefit from cheap, structured code navigation |
+| impl | `repo-intel`, `shadcn` | Implementation needs code search + UI component generation |
+| test, quality | — | Execution waves run checks; no MCP tools needed |
+
+#### codegraph (reasoning waves)
+
+[codegraph](https://github.com/cgtools/codegraph) (MIT, 100% local) exposes read-only structural tools — `context`, `trace`, `explore`, `callers`, `callees`, `impact`, etc. — via `codegraph serve --mcp`. Reasoning-wave prompts (assess/spec/review/brainstorm) are steered to call codegraph's structural tools FIRST and fall back to grep/find only when codegraph cannot answer the question (~70% fewer tool calls in practice).
+
+Configure in `repos.yaml`:
+
+```yaml
+repos:
+  my-project:
+    path: ~/dev/my-project
+    mcp:
+      servers:
+        codegraph:
+          command: codegraph
+          args: ["serve", "--mcp", "--repo", "."]
+        # repo-intel and shadcn typically live in ~/.claude/settings.json
+        # and are auto-loaded — only override here if you need a custom command.
+```
+
+If `codegraph` is not present in `mcp.servers` (or the binary is missing), startup logs a warning and continues — the reasoning waves still run, just without the cheap structural shortcut. No per-wave config change is needed to enable or disable it.
+
 ## Architecture
 
 ```

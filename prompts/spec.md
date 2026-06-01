@@ -7,7 +7,8 @@ You are decomposing a GitHub issue into independently testable pieces with concr
 ### 1. Gather Context
 
 - Read all files referenced in the issue body
-- Use file search and content search to find related code (imports, usages, tests)
+- **If codegraph MCP tools are available** (`mcp__codegraph__context`, `mcp__codegraph__trace`, `mcp__codegraph__callers`, `mcp__codegraph__callees`, `mcp__codegraph__impact`, `mcp__codegraph__explore`), call them FIRST to identify call graphs and impact radius — much cheaper than re-grepping the repo. Use `mcp__codegraph__impact` to size the blast radius of each piece you decompose.
+- Fall back to file search and content search (grep/find) when codegraph is unavailable or for non-structural queries (comments, string literals, config) — the pipeline works either way (graceful degradation).
 - Identify the root cause or feature gap
 - Check the "Pending PRs" section (if present) for open PRs and their changed files — design your spec to avoid modifying the same files where possible
 

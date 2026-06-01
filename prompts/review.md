@@ -8,6 +8,8 @@ You are reviewing code changes for quality, security, and correctness. Review th
 
 - Read the spec (provided in the user message) to understand the intended changes
 - Read ALL changed files (use `git diff` to identify them)
+- **If codegraph MCP tools are available** (`mcp__codegraph__context`, `mcp__codegraph__trace`, `mcp__codegraph__callers`, `mcp__codegraph__callees`, `mcp__codegraph__impact`), call them FIRST to surface callers, callees, and impact radius of each changed symbol — this catches subtle integration regressions that local diff review misses, with ~70% fewer tool calls than re-grepping. `mcp__codegraph__impact` on the changed symbols is especially load-bearing for security-sensitive changes.
+- Fall back to grep/find when codegraph is unavailable (graceful degradation — review still runs, just relies more on local diff context).
 - Read surrounding code for context on how changes integrate
 - If past human reviewer feedback is provided, use it to calibrate your review — pay extra attention to patterns that reviewers have flagged before
 
