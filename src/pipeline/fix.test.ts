@@ -418,7 +418,7 @@ describe('fix — spec piece file ownership pre-validation', () => {
     await rm(workDir, { recursive: true, force: true });
   });
 
-  it('re-runs spec when pieces have overlapping files', async () => {
+  it('merges overlapping pieces without re-running spec, persists merged spec to state', async () => {
     const overlappingSpec = {
       summary: 'overlapping spec',
       pieces: [
@@ -441,28 +441,9 @@ describe('fix — spec piece file ownership pre-validation', () => {
       constraints: [],
     };
 
-    const fixedSpec = {
-      summary: 'fixed spec',
-      pieces: [
-        {
-          name: 'auth',
-          description: 'auth piece',
-          files: ['src/auth.ts', 'src/shared.ts'],
-          acceptance_criteria: ['AC1'],
-          wiring: [],
-        },
-        { name: 'db', description: 'db piece', files: ['src/db.ts'], acceptance_criteria: ['AC2'], wiring: [] },
-      ],
-      dependency_order: [[0, 1]],
-      constraints: [],
-    };
-
-    // First spec call returns overlapping pieces, second returns fixed
-    let specCallCount = 0;
     mockSpawnWaveAgent.mockImplementation(async (config: { wave: WaveName }) => {
       if (config.wave === 'spec') {
-        specCallCount++;
-        return makeHandoff('spec', specCallCount === 1 ? overlappingSpec : fixedSpec);
+        return makeHandoff('spec', overlappingSpec);
       }
       const artifacts: Record<string, unknown> = {
         assess: DEFAULT_ASSESS,
@@ -473,16 +454,28 @@ describe('fix — spec piece file ownership pre-validation', () => {
 
     await fix({ issue: makeIssue(42), repoPath: workDir, repoName: 'test-repo', config: makeConfig() });
 
-    // Spec should have been called twice (original + retry)
+    // Spec should have been called ONCE — merge resolved overlaps, no retry needed
     const specCalls = mockSpawnWaveAgent.mock.calls.filter(
       (c: unknown[]) => (c[0] as { wave: string }).wave === 'spec',
     );
-    expect(specCalls).toHaveLength(2);
+    expect(specCalls).toHaveLength(1);
+
+    // TI loop should be invoked with the merged spec (1 piece, not 2)
+    expect(mockRunParallelPieceTILoop).toHaveBeenCalledOnce();
+    const tiConfig = mockRunParallelPieceTILoop.mock.calls[0]?.[0] as {
+      waveResults: { spec?: { artifact: { pieces: unknown[]; dependency_order: number[][] } } };
+      maxConcurrent?: number;
+    };
+    const mergedPieces = tiConfig.waveResults.spec?.artifact.pieces ?? [];
+    expect(mergedPieces).toHaveLength(1);
+    expect(tiConfig.waveResults.spec?.artifact.dependency_order).toEqual([[0]]);
+    // Serial fallback NOT engaged when merge succeeds
+    expect(tiConfig.maxConcurrent).toBeUndefined();
   });
 
-  it('falls back to serial execution when retry still has overlaps', async () => {
+  it('re-runs spec when pending PR conflicts exist even if merge resolves piece overlaps', async () => {
     const overlappingSpec = {
-      summary: 'persistently overlapping',
+      summary: 'overlapping spec with PR conflict',
       pieces: [
         {
           name: 'auth',
@@ -503,7 +496,55 @@ describe('fix — spec piece file ownership pre-validation', () => {
       constraints: [],
     };
 
-    // Both spec calls return overlapping pieces
+    mockSpawnWaveAgent.mockImplementation(async (config: { wave: WaveName }) => {
+      if (config.wave === 'spec') {
+        return makeHandoff('spec', overlappingSpec);
+      }
+      const artifacts: Record<string, unknown> = {
+        assess: DEFAULT_ASSESS,
+        quality: DEFAULT_QUALITY,
+      };
+      return makeHandoff(config.wave, artifacts[config.wave] ?? 'done');
+    });
+
+    await fix({
+      issue: makeIssue(42),
+      repoPath: workDir,
+      repoName: 'test-repo',
+      config: makeConfig(),
+      pendingPRs: [{ number: 99, title: 'other PR', branch: 'feat/other', files: ['src/auth.ts'] }],
+    });
+
+    // Spec should have been called twice — PR conflict forces the retry
+    const specCalls = mockSpawnWaveAgent.mock.calls.filter(
+      (c: unknown[]) => (c[0] as { wave: string }).wave === 'spec',
+    );
+    expect(specCalls).toHaveLength(2);
+  });
+
+  it('does NOT fall back to serial execution when overlaps merge cleanly (no PR conflicts)', async () => {
+    const overlappingSpec = {
+      summary: 'overlapping but mergeable',
+      pieces: [
+        {
+          name: 'auth',
+          description: 'auth piece',
+          files: ['src/auth.ts', 'src/shared.ts'],
+          acceptance_criteria: ['AC1'],
+          wiring: [],
+        },
+        {
+          name: 'db',
+          description: 'db piece',
+          files: ['src/db.ts', 'src/shared.ts'],
+          acceptance_criteria: ['AC2'],
+          wiring: [],
+        },
+      ],
+      dependency_order: [[0, 1]],
+      constraints: [],
+    };
+
     mockSpawnWaveAgent.mockImplementation(async (config: { wave: WaveName }) => {
       if (config.wave === 'spec') {
         return makeHandoff('spec', overlappingSpec);
@@ -517,10 +558,10 @@ describe('fix — spec piece file ownership pre-validation', () => {
 
     await fix({ issue: makeIssue(42), repoPath: workDir, repoName: 'test-repo', config: makeConfig() });
 
-    // TI loop should be called with maxConcurrent: 1
+    // TI loop called with merged spec, maxConcurrent NOT set to 1 (merge resolved the conflict)
     expect(mockRunParallelPieceTILoop).toHaveBeenCalledOnce();
     const tiConfig = mockRunParallelPieceTILoop.mock.calls[0]?.[0] as Record<string, unknown>;
-    expect(tiConfig.maxConcurrent).toBe(1);
+    expect(tiConfig.maxConcurrent).toBeUndefined();
   });
 
   it('does not re-run spec when pieces have no overlaps', async () => {
