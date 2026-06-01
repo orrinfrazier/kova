@@ -10,6 +10,7 @@ vi.mock('../ai/index.js', () => ({
   spawnWaveAgent: (...args: unknown[]) => mockSpawnWaveAgent(...args),
   getWaveTools: vi.fn().mockReturnValue([]),
   resolveThinkingLevel: vi.fn().mockReturnValue('medium'),
+  getModelString: (model: { provider: string; id: string }) => `${model.provider}:${model.id}`,
 }));
 
 vi.mock('./prompts.js', () => ({

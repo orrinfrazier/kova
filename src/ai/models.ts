@@ -173,6 +173,18 @@ export function resolveWaveModel(config: WaveModelConfig): Model<string> {
   return resolveModelFromString(`${config.provider}:${config.model}`);
 }
 
+/** Return a round-trip-safe identifier for a resolved Model.
+ *
+ *  `model.id` alone is NOT round-trip-safe: for any provider where the model's
+ *  bare id does not match its canonical resolution path (Ollama, OpenAI, Google,
+ *  router, …), passing `model.id` back through `resolveModelFromString` silently
+ *  defaults to anthropic. Always emit `${provider}:${id}` so downstream code can
+ *  re-resolve to the same model. See orrinfrazier/kova#239.
+ */
+export function getModelString(model: Model<string>): string {
+  return `${model.provider}:${model.id}`;
+}
+
 /** Returns true if the provider runs locally (no API cost). */
 export function isLocalProvider(provider: string): boolean {
   return LOCAL_PROVIDERS.has(provider);
