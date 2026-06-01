@@ -15,6 +15,7 @@ export {
 export {
   clearCustomModels,
   getApiFallbackModelString,
+  getModelString,
   isLocalModel,
   isLocalProvider,
   type ModelSpec,

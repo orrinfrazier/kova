@@ -3,6 +3,7 @@
 
 import { z } from 'zod';
 import {
+  getModelString,
   getWaveTools,
   type OutputFormat,
   resolveThinkingLevel,
@@ -86,7 +87,7 @@ export async function brainstorm(options: BrainstormOptions): Promise<Brainstorm
   try {
     const handoff = await spawnWaveAgent<BrainstormResult>({
       wave: 'brainstorm',
-      model: model.id,
+      model: getModelString(model),
       tools,
       systemPrompt,
       handoffContext: '',
@@ -140,7 +141,7 @@ export async function brainstorm(options: BrainstormOptions): Promise<Brainstorm
       issues: [],
       filtered: [],
       cost: 0,
-      model: model.id,
+      model: getModelString(model),
       error: message,
     };
   }

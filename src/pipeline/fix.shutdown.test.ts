@@ -54,6 +54,7 @@ vi.mock('../ai/index.js', async (importOriginal) => {
     spawnWaveAgentWithFallback: (...args: unknown[]) => mockSpawnWaveAgent(...args),
     isLocalModel: vi.fn().mockReturnValue(false),
     getApiFallbackModelString: vi.fn().mockReturnValue('claude-sonnet-4-6'),
+    getModelString: actual.getModelString,
     getWaveTools: vi.fn().mockReturnValue([]),
     resolveThinkingLevel: actual.resolveThinkingLevel,
   };

@@ -8,6 +8,7 @@ import {
   type FixAIWaveName,
   getApiFallbackModelString,
   getMCPToolsForWave,
+  getModelString,
   getWaveTools,
   isLocalModel,
   type MCPServerHandle,
@@ -199,7 +200,7 @@ async function spawnWave<T>(
   }
   await recordPromptVersion(repoPath, wave, systemPrompt).catch(() => {});
   const thinkingLevel = resolveThinkingLevel(config, wave);
-  const modelString = model.id;
+  const modelString = getModelString(model);
   const fallbackModel = waveFallbackModel(config.model[wave], modelString, config.model.fallback);
   const handoff = await spawnWaveAgentWithFallback<T>({
     wave,
