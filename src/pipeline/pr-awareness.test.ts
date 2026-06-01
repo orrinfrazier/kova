@@ -193,7 +193,20 @@ describe('fix — PR context injection', () => {
               should_proceed: true,
             }
           : config.wave === 'spec'
-            ? { summary: 'spec', pieces: [], dependency_order: [], constraints: [] }
+            ? {
+                summary: 'spec',
+                pieces: [
+                  {
+                    name: 'default',
+                    description: 'default piece',
+                    files: ['src/fix.ts'],
+                    acceptance_criteria: ['AC1'],
+                    wiring: [],
+                  },
+                ],
+                dependency_order: [[0]],
+                constraints: [],
+              }
             : { lint: 'pass', typecheck: 'pass', tests: 'pass', coverage: 90, audit: 'pass', all_passing: true },
       approach_notes: '',
     }));
