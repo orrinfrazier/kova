@@ -11,7 +11,7 @@ import type { WaveHandoff, WaveModelConfig, WaveName } from '../types/index.js';
 import { log } from '../utils/logger.js';
 import { createTransformContext } from './context-transform.js';
 import { classifyError, isSpendingCapBehavior, KovaError } from './errors.js';
-import { resolveModelFromString, resolveWaveModel } from './models.js';
+import { getModelString, resolveModelFromString, resolveWaveModel } from './models.js';
 import { isOllamaProvider, resolveOllamaApiKey } from './ollama.js';
 import { isRouterProvider, resolveRouterApiKey } from './router.js';
 import { createAfterToolCallHook, type ToolHookOptions } from './tool-hooks.js';
@@ -468,7 +468,7 @@ export async function executeWave(options: WaveOptions): Promise<WaveExecutionRe
   try {
     const handoff = await spawnWaveAgent({
       wave,
-      model: model.id,
+      model: getModelString(model),
       tools,
       systemPrompt,
       handoffContext: '',

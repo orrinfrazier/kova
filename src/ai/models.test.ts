@@ -685,4 +685,78 @@ describe('models', () => {
       expect(model.provider).toBe('anthropic');
     });
   });
+
+  describe('getModelString — round-trip-safe model identifier', () => {
+    it('emits provider:id form for ollama models so re-resolution preserves provider', async () => {
+      const { resolveModelFromString, getModelString } = await import('./models.js');
+
+      const model = resolveModelFromString('ollama:gemma4:26b');
+      const s = getModelString(model);
+      expect(s).toBe('ollama:gemma4:26b');
+
+      // Round trip must NOT silently downgrade to anthropic
+      const reresolved = resolveModelFromString(s);
+      expect(reresolved.provider).toBe('ollama');
+      expect(reresolved.id).toBe('gemma4:26b');
+    });
+
+    it('emits provider:id form for openai models so re-resolution preserves provider', async () => {
+      const { resolveModelFromString, getModelString } = await import('./models.js');
+
+      const model = resolveModelFromString('openai:gpt-4o');
+      const s = getModelString(model);
+      expect(s).toBe('openai:gpt-4o');
+
+      const reresolved = resolveModelFromString(s);
+      expect(reresolved.provider).toBe('openai');
+      expect(reresolved.id).toBe('gpt-4o');
+    });
+
+    it('emits provider:id form for anthropic models (round-trip-safe)', async () => {
+      const { resolveModelFromString, getModelString } = await import('./models.js');
+
+      const model = resolveModelFromString('claude-sonnet-4-6');
+      const s = getModelString(model);
+      expect(s).toBe('anthropic:claude-sonnet-4-6');
+
+      const reresolved = resolveModelFromString(s);
+      expect(reresolved.provider).toBe('anthropic');
+      expect(reresolved.id).toBe('claude-sonnet-4-6');
+    });
+
+    it('emits provider:id form for router models', async () => {
+      process.env.ANTHROPIC_BASE_URL = 'http://router.example.com';
+      const { resolveModelFromString, getModelString } = await import('./models.js');
+
+      const model = resolveModelFromString('router:claude-sonnet-4-6');
+      const s = getModelString(model);
+      expect(s).toBe('router:claude-sonnet-4-6');
+
+      const reresolved = resolveModelFromString(s);
+      expect(reresolved.provider).toBe('router');
+    });
+
+    it('round-trip survives repeated resolve→getModelString→resolve cycles', async () => {
+      const { resolveModelFromString, getModelString } = await import('./models.js');
+
+      let model = resolveModelFromString('ollama:gemma4:26b');
+      for (let i = 0; i < 3; i++) {
+        const s = getModelString(model);
+        model = resolveModelFromString(s);
+      }
+      expect(model.provider).toBe('ollama');
+      expect(model.id).toBe('gemma4:26b');
+    });
+
+    it('handles google provider correctly', async () => {
+      const { resolveModelFromString, getModelString } = await import('./models.js');
+
+      const model = resolveModelFromString('google:gemini-2.5-pro');
+      const s = getModelString(model);
+      expect(s).toBe('google:gemini-2.5-pro');
+
+      const reresolved = resolveModelFromString(s);
+      expect(reresolved.provider).toBe('google');
+    });
+  });
 });
