@@ -59,6 +59,13 @@ export interface TILoopConfig {
   repoConfig: RepoConfig;
   waveResults: Partial<Record<WaveName, WaveResult>>;
   maxRetries?: number;
+  /**
+   * Extra impl attempts granted on top of the default budget (issue #282
+   * explore-mode plumbing). Same semantics as `PieceTILoopConfig.extraImplAttempts`:
+   * raises `maxRetries` from 3 to `3 + extraImplAttempts`, unless `maxRetries`
+   * is explicitly set (explicit wins).
+   */
+  extraImplAttempts?: number;
   testCommand?: string;
   prContext?: string;
   codebaseContext?: string;
@@ -171,6 +178,13 @@ export interface PieceTILoopConfig {
   workDir: string;
   repoConfig: RepoConfig;
   maxRetries?: number | undefined;
+  /**
+   * Extra impl attempts granted on top of the default budget (issue #282
+   * explore-mode plumbing). Increases `maxRetries` from the default 3 to
+   * `3 + extraImplAttempts`. Ignored when `maxRetries` is explicitly set —
+   * explicit `maxRetries` always wins so callers can override unconditionally.
+   */
+  extraImplAttempts?: number | undefined;
   testCommand?: string | undefined;
   projectContext?: ProjectContext | undefined;
   testRunner?: TestRunner | undefined;
@@ -254,6 +268,12 @@ export interface ParallelPieceTILoopConfig {
    * pipeline-scope TEST_ONLY.
    */
   skipImplPhase?: boolean | undefined;
+  /**
+   * Extra impl attempts granted per piece on top of the default budget
+   * (issue #282 explore-mode plumbing). Forwarded to every `runPieceTILoop`
+   * call and to the 1-piece `runTILoop` shortcut. Default 0.
+   */
+  extraImplAttempts?: number | undefined;
 }
 
 export interface ParallelPieceTILoopResult {
@@ -691,7 +711,6 @@ export async function runTILoop(config: TILoopConfig): Promise<TILoopResult> {
     workDir,
     repoConfig,
     waveResults,
-    maxRetries = 3,
     prContext,
     codebaseContext,
     projectContext,
@@ -702,7 +721,12 @@ export async function runTILoop(config: TILoopConfig): Promise<TILoopResult> {
     cacheContext,
     skipTestPhase = false,
     skipImplPhase = false,
+    extraImplAttempts,
   } = config;
+  // Issue #282 explore-mode plumbing: explicit `maxRetries` wins; otherwise
+  // raise the default 3-attempt budget by `extraImplAttempts` (0 by default).
+  const maxRetries =
+    config.maxRetries ?? (extraImplAttempts != null && extraImplAttempts > 0 ? 3 + extraImplAttempts : 3);
   // Issue #297: build per-wave sessionIds once so every dispatched call gets
   // a stable cache-affinity key without re-deriving the slug on each turn.
   const testSessionId = cacheContext != null ? buildWaveSessionId({ ...cacheContext, wave: 'test' }) : undefined;
@@ -913,7 +937,6 @@ export async function runPieceTILoop(config: PieceTILoopConfig): Promise<PieceTI
     workDir,
     repoConfig,
     projectContext,
-    maxRetries = 3,
     testRunner = defaultTestRunner,
     diffRunner = defaultDiffRunner,
     fileReader = defaultFileReader,
@@ -921,7 +944,15 @@ export async function runPieceTILoop(config: PieceTILoopConfig): Promise<PieceTI
     cacheContext,
     skipTestPhase = false,
     skipImplPhase = false,
+    extraImplAttempts,
   } = config;
+
+  // Issue #282 explore-mode plumbing: explicit `maxRetries` always wins so
+  // existing callers stay deterministic. When `maxRetries` is omitted and
+  // `extraImplAttempts > 0`, raise the default 3-attempt budget by that
+  // amount — every other case keeps the default 3.
+  const maxRetries =
+    config.maxRetries ?? (extraImplAttempts != null && extraImplAttempts > 0 ? 3 + extraImplAttempts : 3);
 
   if (maxRetries < 1) {
     throw new Error('maxRetries must be at least 1');
@@ -1146,6 +1177,7 @@ export async function runParallelPieceTILoop(config: ParallelPieceTILoopConfig):
     cacheContext,
     skipTestPhase = false,
     skipImplPhase = false,
+    extraImplAttempts,
   } = config;
 
   // Extract spec pieces
@@ -1174,6 +1206,7 @@ export async function runParallelPieceTILoop(config: ParallelPieceTILoopConfig):
       ...(cacheContext != null && { cacheContext }),
       ...(skipTestPhase && { skipTestPhase: true }),
       ...(skipImplPhase && { skipImplPhase: true }),
+      ...(extraImplAttempts != null && { extraImplAttempts }),
     });
 
     return {
@@ -1227,6 +1260,7 @@ export async function runParallelPieceTILoop(config: ParallelPieceTILoopConfig):
         ...(cacheContext != null && { cacheContext }),
         ...(skipTestPhase && { skipTestPhase: true }),
         ...(skipImplPhase && { skipImplPhase: true }),
+        ...(extraImplAttempts != null && { extraImplAttempts }),
       });
 
       pieceResults.push(result);

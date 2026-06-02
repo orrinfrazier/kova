@@ -21,6 +21,7 @@ import { fix } from '../pipeline/fix.js';
 import { indexCodebase } from '../pipeline/index-codebase.js';
 import { fixLoop } from '../pipeline/loop.js';
 import { runMerge } from '../pipeline/merge.js';
+import { PIPELINE_MODES } from '../pipeline/mode.js';
 import { exportPrompts } from '../pipeline/prompts.js';
 import { gatherStatus, printStatusDashboard } from '../pipeline/status.js';
 import { runSupervised } from '../pipeline/supervised.js';
@@ -45,9 +46,21 @@ import {
   shutdownRequested,
 } from '../services/shutdown.js';
 import { createWebhookServer } from '../services/webhook-server.js';
-import type { KovaConfig, RepoConfig } from '../types/index.js';
+import type { KovaConfig, PipelineMode, RepoConfig } from '../types/index.js';
 import { log, setLevel } from '../utils/logger.js';
 import { registerOllamaProvidersFromConfig } from './ollama-wiring.js';
+
+/** Parse the `--mode` flag value into a `PipelineMode`, exiting on invalid input.
+ *  Returns `undefined` when the flag is absent (caller decides whether to
+ *  auto-select). Issue #282. */
+function parsePipelineMode(value: string | undefined): PipelineMode | undefined {
+  if (value == null) return undefined;
+  if ((PIPELINE_MODES as readonly string[]).includes(value)) {
+    return value as PipelineMode;
+  }
+  console.error(`Invalid --mode value: "${value}". Expected one of: ${PIPELINE_MODES.join(', ')}.`);
+  process.exit(1);
+}
 
 const program = new Command();
 
@@ -112,6 +125,10 @@ program
   .option('--fresh', 'Force restart — delete checkpoint and worktree')
   .option('--force', 'Override skip — re-fix issues with existing branches/PRs')
   .option('--budget <usd>', 'Maximum USD budget for fix loop')
+  .option(
+    '--mode <mode>',
+    'Pipeline mode: simple | standard | economy | explore. When omitted, auto-selected from the WAVE A grade.',
+  )
   .option('--no-comment', 'Suppress GitHub comment on grade D/F skip')
   .action(
     async (
@@ -126,6 +143,7 @@ program
         fresh?: boolean;
         force?: boolean;
         comment?: boolean;
+        mode?: string;
       },
     ) => {
       const kovaConfig = await tryLoadConfig(program.opts().config);
@@ -182,6 +200,11 @@ program
         }
       }
 
+      // Validate --mode (issue #282). Commander accepts any string for value
+      // options — we enforce the enum here so a typo doesn't silently become
+      // "standard" behavior at the fix() entry point.
+      const mode = parsePipelineMode(opts.mode);
+
       const issue = await fetchIssue(repoPath, issueNumber);
       const result = await fix({
         issue,
@@ -190,6 +213,7 @@ program
         config,
         fresh: opts.fresh,
         noComment: opts.comment === false,
+        mode: opts.mode != null ? mode : undefined,
       });
 
       shutdownMetrics();
