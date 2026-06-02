@@ -1,5 +1,12 @@
 import { getModel, getProviders, type Model, registerBuiltInApiProviders } from '@mariozechner/pi-ai';
-import type { ModelTier, OllamaProvider, RepoConfig, WaveModelConfig } from '../types/index.js';
+import type {
+  ModelTier,
+  OllamaProvider,
+  RepoConfig,
+  WaveConsensusConfig,
+  WaveModelConfig,
+  WaveSingleModelConfig,
+} from '../types/index.js';
 import { KovaError } from './errors.js';
 import { createOllamaModel, isOllamaProvider } from './ollama.js';
 import { createRouterModel, isRouterEnabled, isRouterProvider } from './router.js';
@@ -162,8 +169,25 @@ function resolveModelString(tier: ModelTier): string {
 
 const MODEL_TIERS: ReadonlySet<string> = new Set(['small', 'medium', 'large']);
 
-/** Resolve a WaveModelConfig (tier string, bare model string, or {provider, model} override) to a Model. */
-export function resolveWaveModel(config: WaveModelConfig): Model<string> {
+/** Type guard: true when a wave model config is a consensus pool (object with `pool` array).
+ *  Accepts a broader input type than `WaveModelConfig` so that callers holding the raw
+ *  pre-parse input (where `adjudicator` is still optional) can also use this guard. */
+export function isConsensusPool(
+  config: WaveModelConfig | { pool: WaveSingleModelConfig[]; adjudicator?: WaveSingleModelConfig },
+): config is WaveConsensusConfig {
+  return (
+    typeof config === 'object' &&
+    config !== null &&
+    'pool' in config &&
+    Array.isArray((config as { pool: unknown }).pool)
+  );
+}
+
+/** Resolve a single-model wave config (tier, bare string, or {provider, model}) to a Model.
+ *  Internal helper — callers handling a `WaveModelConfig` should branch on `isConsensusPool`
+ *  first, then call `resolveSingleWaveModel` for the single-model case or `resolveConsensusPool`
+ *  for the pool case. Exposed via `resolveWaveModel` for the common single-model path. */
+function resolveSingleWaveModel(config: WaveSingleModelConfig): Model<string> {
   if (typeof config === 'string') {
     if (MODEL_TIERS.has(config)) {
       return resolveModel(config as ModelTier);
@@ -171,6 +195,35 @@ export function resolveWaveModel(config: WaveModelConfig): Model<string> {
     return resolveModelFromString(config);
   }
   return resolveModelFromString(`${config.provider}:${config.model}`);
+}
+
+/** Resolve a WaveModelConfig (tier string, bare model string, or {provider, model} override) to a Model.
+ *  Throws if called with a consensus pool config — callers handling pools must call
+ *  `resolveConsensusPool` explicitly instead of silently collapsing to the first member. */
+export function resolveWaveModel(config: WaveModelConfig): Model<string> {
+  if (isConsensusPool(config)) {
+    throw new KovaError(
+      'resolveWaveModel called on a consensus pool config — use resolveConsensusPool instead.',
+      'config',
+      false,
+    );
+  }
+  return resolveSingleWaveModel(config);
+}
+
+/** Resolve a consensus pool: every pool member + the adjudicator (defaults to `large`).
+ *  Returns models in pool-config order, so callers can map results back to their config.
+ *  Accepts either a parsed `WaveConsensusConfig` (adjudicator always present) or the raw
+ *  input shape where adjudicator may be omitted — the `'large'` default is re-applied
+ *  here defensively so direct callers don't need to round-trip through Zod. */
+export function resolveConsensusPool(
+  config: WaveConsensusConfig | { pool: WaveSingleModelConfig[]; adjudicator?: WaveSingleModelConfig },
+): { pool: Model<string>[]; adjudicator: Model<string> } {
+  const adjudicator = config.adjudicator ?? 'large';
+  return {
+    pool: config.pool.map(resolveSingleWaveModel),
+    adjudicator: resolveSingleWaveModel(adjudicator),
+  };
 }
 
 /** Return a round-trip-safe identifier for a resolved Model.
@@ -249,19 +302,20 @@ function describeApiKeyEnv(provider: string): string {
 const WAVE_NAMES = ['assess', 'spec', 'test', 'impl', 'quality', 'review', 'brainstorm'] as const;
 
 /** Validate that all configured models are resolvable and have API keys present.
- *  Call at startup before the pipeline begins to fail fast on config errors. */
+ *  Call at startup before the pipeline begins to fail fast on config errors.
+ *  Pool members and adjudicators are validated individually, with errors naming
+ *  the wave and pool index (or `adjudicator`) so misconfiguration is easy to pinpoint. */
 export function validateModelConfig(config: RepoConfig): void {
   for (const wave of WAVE_NAMES) {
     const waveConfig = config.model[wave];
+    if (isConsensusPool(waveConfig)) {
+      validatePoolMember(wave, 'pool', waveConfig.pool);
+      validatePoolMember(wave, 'adjudicator', [waveConfig.adjudicator]);
+      continue;
+    }
     try {
       const model = resolveWaveModel(waveConfig);
-      if (!isLocalProvider(model.provider) && !hasApiKey(model.provider)) {
-        throw new KovaError(
-          `Wave "${wave}" uses provider "${model.provider}" (model: ${model.id}) but no API key is set — set ${describeApiKeyEnv(model.provider)}.`,
-          'config',
-          false,
-        );
-      }
+      assertHasApiKey(wave, model);
     } catch (e) {
       if (e instanceof KovaError) throw e;
       throw new KovaError(
@@ -271,4 +325,35 @@ export function validateModelConfig(config: RepoConfig): void {
       );
     }
   }
+}
+
+/** Throw a KovaError naming wave + member when a model lacks its provider's API key.
+ *  Uses `describeApiKeyEnv` so multi-key providers (e.g. google = GEMINI_API_KEY or
+ *  GOOGLE_API_KEY) get an accurate "set X or Y" hint. */
+function assertHasApiKey(wave: string, model: Model<string>, locator?: string): void {
+  if (isLocalProvider(model.provider) || hasApiKey(model.provider)) return;
+  const envHint = describeApiKeyEnv(model.provider);
+  const where = locator ? `Wave "${wave}" ${locator}` : `Wave "${wave}"`;
+  throw new KovaError(
+    `${where} uses provider "${model.provider}" (model: ${model.id}) but no API key is set — set ${envHint}.`,
+    'config',
+    false,
+  );
+}
+
+/** Validate each member in a pool (or the single-element adjudicator array). Errors include
+ *  the wave name and locator (e.g. `pool[1]` / `adjudicator`) so misconfig is easy to find. */
+function validatePoolMember(wave: string, kind: 'pool' | 'adjudicator', members: WaveSingleModelConfig[]): void {
+  members.forEach((member, idx) => {
+    const locator = kind === 'pool' ? `pool[${idx}]` : 'adjudicator';
+    let model: Model<string>;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-use-before-define -- internal helper
+      model = resolveSingleWaveModel(member);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      throw new KovaError(`Model validation failed for wave "${wave}" ${locator}: ${message}`, 'config', false);
+    }
+    assertHasApiKey(wave, model, locator);
+  });
 }
