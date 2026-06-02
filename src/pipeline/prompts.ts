@@ -2,10 +2,12 @@
 // Prompts are markdown files, one per wave.
 // Custom tools are appended to impl/quality prompts when configured.
 // Per-repo custom prompts override defaults when prompts_dir is configured.
+// Skills (issue #298) are appended via formatSkillsForPrompt, gated per wave.
 
+import { formatSkillsForPrompt, type Skill } from '@earendil-works/pi-coding-agent';
 import { fs, path } from 'zx';
 import type { ProjectContext } from '../services/project-context.js';
-import type { CustomTool } from '../types/index.js';
+import type { CustomTool, SkillWaveName } from '../types/index.js';
 
 const PROMPTS_DIR = path.join(import.meta.dirname, '..', '..', 'prompts');
 
@@ -120,9 +122,37 @@ async function loadDefaultPrompt(wave: string): Promise<string> {
   }
 }
 
+/** Default waves that receive the skills XML block when skills are configured but
+ *  the user has not specified `enabled_waves`. Mirrors the default in
+ *  `SkillsConfigSchema` — kept in sync via the matching `enabled_waves` default
+ *  in `src/types/config.ts`. The two lists are intentionally duplicated rather
+ *  than imported: the schema default is the source of truth for *user config*,
+ *  and this constant is the source of truth for *direct loadPrompt callers*
+ *  (tests, future-runtime code) that don't go through the config schema. */
+export const DEFAULT_SKILL_ENABLED_WAVES: readonly SkillWaveName[] = [
+  'assess',
+  'spec',
+  'impl',
+  'quality',
+  'review',
+  'brainstorm',
+];
+
+/** Skills injection option for loadPrompt (issue #298). */
+export interface PromptSkillsOption {
+  /** Skills discovered via {@link loadWaveSkills} (or any other source). */
+  skills: readonly Skill[];
+  /** Waves whose system prompt receives the skills block. Defaults to
+   *  {@link DEFAULT_SKILL_ENABLED_WAVES} when omitted. */
+  enabledWaves?: readonly SkillWaveName[];
+}
+
 export interface LoadPromptOptions {
   /** A/B test variant name for this wave. When set, loads {wave}.{variant}.md from promptsDir. */
   abTestVariant?: string | undefined;
+  /** Skills to inject into the system prompt (issue #298). When undefined or
+   *  the skill list is empty, the prompt is returned unchanged. */
+  skills?: PromptSkillsOption | undefined;
 }
 
 export async function loadPrompt(
@@ -176,7 +206,27 @@ export async function loadPrompt(
     prompt += `\n\n${buildCustomToolsSection(customTools)}`;
   }
 
+  // Append skills block when configured for this wave (issue #298). Gated so
+  // pure-mechanical waves (test by default, ship always) don't get the noise.
+  prompt = appendSkillsSection(prompt, wave, options?.skills);
+
   return prompt;
+}
+
+/** Append the formatted skills block to a wave's system prompt when the wave is
+ *  in `enabledWaves` and there are visible (non-model-disabled) skills.
+ *  Returns the original prompt unchanged when no skills should be injected —
+ *  this is the load-bearing fallback behavior the acceptance criteria require. */
+function appendSkillsSection(prompt: string, wave: string, opt: PromptSkillsOption | undefined): string {
+  if (!opt || opt.skills.length === 0) return prompt;
+  const enabled = opt.enabledWaves ?? DEFAULT_SKILL_ENABLED_WAVES;
+  if (!enabled.includes(wave as SkillWaveName)) return prompt;
+  const section = formatSkillsForPrompt([...opt.skills]);
+  // formatSkillsForPrompt returns '' when every skill has disableModelInvocation=true,
+  // matching the same "empty → no-op" contract.
+  if (!section) return prompt;
+  // formatSkillsForPrompt already prepends "\n\n", so just concatenate.
+  return prompt + section;
 }
 
 /** Load a custom prompt from promptsDir, falling back to built-in default. */

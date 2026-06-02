@@ -266,11 +266,45 @@ export const ABTestPolicySchema = z.object({
 });
 export type ABTestPolicyConfig = z.infer<typeof ABTestPolicySchema>;
 
+/** Wave names valid in the `skills.enabled_waves` list (issue #298).
+ *  Includes 'ship' for loss-less user intent — at runtime the ship wave does
+ *  not spawn an AI agent, so listing it has no effect, but the schema accepts
+ *  it rather than surprising the user with a validation error. */
+export const SkillWaveNameSchema = z.enum([
+  'assess',
+  'spec',
+  'test',
+  'impl',
+  'quality',
+  'review',
+  'brainstorm',
+  'ship',
+]);
+export type SkillWaveName = z.infer<typeof SkillWaveNameSchema>;
+
+/** Skills block (issue #298).
+ *  Controls which directories kova scans for SKILL.md skills and which waves
+ *  receive the formatted skill list in their system prompt. Defaults mirror
+ *  the issue's "default ~/.claude/skills + per-repo .kova/skills" guidance
+ *  and enable the reasoning + impl/quality waves. */
+export const SkillsConfigSchema = z.object({
+  /** Directories to scan for SKILL.md skills. Order matters — first dir wins
+   *  on name collisions. Supports `~` (expanded to $HOME) and relative paths
+   *  (resolved against the repo root). Empty array → no skills loaded. */
+  dirs: z.array(z.string().min(1)).default(['~/.claude/skills', '.kova/skills']),
+  /** Waves whose system prompt receives the skills block. The `test` wave is
+   *  excluded by default — TDD red phase is mechanical and benefits little
+   *  from skill discovery. Users can opt the test wave in explicitly. */
+  enabled_waves: z.array(SkillWaveNameSchema).default(['assess', 'spec', 'impl', 'quality', 'review', 'brainstorm']),
+});
+export type SkillsConfig = z.infer<typeof SkillsConfigSchema>;
+
 export const RepoConfigSchema = z.object({
   path: z.string(),
   prompts_dir: z.string().optional(),
   ab_test: ABTestConfigSchema.optional(),
   ab_test_policy: ABTestPolicySchema.optional(),
+  skills: SkillsConfigSchema.optional(),
   vectordb: VectorDBConfigSchema.optional(),
   episodes: EpisodicMemoryConfigSchema.optional(),
   playbooks: PlaybooksConfigSchema.optional(),
