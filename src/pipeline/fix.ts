@@ -27,7 +27,7 @@ import { checkForConflicts } from '../services/conflict-check.js';
 import { resolveConflicts } from '../services/conflict-resolver.js';
 import { collectPRFeedback } from '../services/feedback-collector.js';
 import { commentOnIssue, createPR, listOpenPRs } from '../services/github.js';
-import { appendHistoryEntry } from '../services/history.js';
+import { appendHistoryEntry, readHistory } from '../services/history.js';
 import { validateIsolation } from '../services/isolation.js';
 import { detectTooling } from '../services/language-detect.js';
 import * as metrics from '../services/metrics.js';
@@ -35,6 +35,7 @@ import { ensureScreenshotsDir, isPlaywrightEnabled, resolvePlaywrightEnv } from 
 import { formatPRContext, type OpenPR } from '../services/pr-context.js';
 import { ProgressTracker } from '../services/progress.js';
 import { loadProjectContext, type ProjectContext } from '../services/project-context.js';
+import { type ABTestVariantStats, correlateByABTestVariant } from '../services/prompt-correlation.js';
 import { detectPromptChange, hashPrompt, recordPromptVersion } from '../services/prompt-versions.js';
 import {
   formatRepoContext,
@@ -441,11 +442,37 @@ export async function fix(options: FixOptions): Promise<FixResult> {
   // Track prompt hashes across waves for history correlation
   const promptHashes: Record<string, string> = {};
 
-  // A/B test: select variants for configured waves
+  // A/B test: select variants for configured waves. Consult historical
+  // variant stats so we exploit known winners (epsilon-greedy), falling back
+  // to uniform random when no sufficient data exists for a wave.
   let abTestVariants: VariantSelection | undefined;
   if (config.ab_test) {
-    abTestVariants = selectVariants(config.ab_test);
-    flog.info(`A/B test variants selected: ${JSON.stringify(abTestVariants)}`);
+    let abTestStats: ABTestVariantStats[] | undefined;
+    try {
+      const historyEntries = await readHistory(repoPath, { repo: repoName });
+      abTestStats = correlateByABTestVariant(historyEntries);
+    } catch (err) {
+      flog.warn(
+        `[ab-test] Failed to load history for adaptive selection — falling back to cold-start: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    let policy: { epsilon?: number; forceRandom?: boolean } | undefined;
+    if (config.ab_test_policy) {
+      policy = {};
+      if (config.ab_test_policy.epsilon !== undefined) {
+        policy.epsilon = config.ab_test_policy.epsilon;
+      }
+      if (config.ab_test_policy.force_random !== undefined) {
+        policy.forceRandom = config.ab_test_policy.force_random;
+      }
+    }
+    const selectOpts: Parameters<typeof selectVariants>[1] = {};
+    if (abTestStats !== undefined) selectOpts.stats = abTestStats;
+    if (policy !== undefined) selectOpts.policy = policy;
+    abTestVariants = selectVariants(config.ab_test, selectOpts);
+    flog.info(
+      `A/B test variants selected: ${JSON.stringify(abTestVariants)} (stats: ${abTestStats?.length ?? 0} variants observed)`,
+    );
   }
 
   try {

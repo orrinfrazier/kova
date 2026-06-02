@@ -227,10 +227,28 @@ export const ABTestConfigSchema = z
   });
 export type ABTestConfig = z.infer<typeof ABTestConfigSchema>;
 
+/**
+ * A/B test selection policy. Drives adaptive variant selection in
+ * `selectVariants`. Optional — when omitted, selection uses the built-in
+ * defaults (DEFAULT_EPSILON, no force-random).
+ *
+ * - `epsilon`: exploration probability, clamped to [0, 1]. When at least one
+ *   sufficient variant exists for a wave, selection exploits the best one
+ *   with probability `1 - epsilon` and explores uniformly otherwise.
+ * - `force_random`: opt back into pure uniform-random selection regardless
+ *   of history (use as a `--explore` / debugging escape hatch).
+ */
+export const ABTestPolicySchema = z.object({
+  epsilon: z.number().min(0).max(1).optional(),
+  force_random: z.boolean().optional(),
+});
+export type ABTestPolicyConfig = z.infer<typeof ABTestPolicySchema>;
+
 export const RepoConfigSchema = z.object({
   path: z.string(),
   prompts_dir: z.string().optional(),
   ab_test: ABTestConfigSchema.optional(),
+  ab_test_policy: ABTestPolicySchema.optional(),
   vectordb: VectorDBConfigSchema.optional(),
   episodes: EpisodicMemoryConfigSchema.optional(),
   repo_intel: RepoIntelConfigSchema.optional(),
