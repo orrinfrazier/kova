@@ -400,6 +400,15 @@ export type EvalConfig = z.infer<typeof EvalConfigSchema>;
 
 export const RepoConfigSchema = z.object({
   path: z.string(),
+  /**
+   * GitHub repository slug (`owner/name`) used for cross-repo dependency
+   * awareness (issue #287). When set, `runAutoMultiRepoParallel` can resolve
+   * `owner/name#N` references in issue bodies to this configured repo and
+   * gate dependent-repo runs on their blockers. Optional — when omitted, the
+   * repo participates in multi-repo runs but can't be the target of a
+   * cross-repo edge.
+   */
+  slug: z.string().optional(),
   prompts_dir: z.string().optional(),
   ab_test: ABTestConfigSchema.optional(),
   ab_test_policy: ABTestPolicySchema.optional(),
