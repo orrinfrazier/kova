@@ -27,6 +27,14 @@ const SECRET_PATTERNS: SecretPattern[] = [
   { type: 'AWS access key', regex: /AKIA[A-Z0-9]{16}/ },
   { type: 'Private key', regex: /-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----/ },
   { type: 'OpenAI API key', regex: /sk-proj-[A-Za-z0-9]{20,}/ },
+  // Legacy OpenAI keys (pre-`sk-proj-` format). Negative lookahead excludes
+  // `sk-ant-` and `sk-proj-` so those are reported under their canonical type
+  // rather than double-flagged. Mirrors prompts/quality.md Gate 6.
+  { type: 'OpenAI legacy key', regex: /sk-(?!ant-|proj-)[A-Za-z0-9]{48,}/ },
+  // Password literals: `password = "longerthan8"` (case-insensitive).
+  // Catches inline hardcoded credentials in committed code. Mirrors
+  // prompts/quality.md Gate 6.
+  { type: 'Password literal', regex: /password\s*[:=]\s*["'][^"']{8,}["']/i },
 ];
 
 function isPatternReference(line: string, match: string): boolean {

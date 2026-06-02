@@ -199,4 +199,124 @@ describe('scanForSecrets', () => {
     expect(result.report).toContain('leak.ts:1');
     expect(result.report).toContain('GitHub PAT');
   });
+
+  // --- Issue #285: widen patterns to match quality.md Gate 6 ---
+
+  it('detects password literal assignment (single quotes)', async () => {
+    await writeFile(join(workDir, 'pw.ts'), "const config = { password: 'hunter2pass' };\n");
+
+    const result = await scanForSecrets(workDir, ['pw.ts']);
+
+    expect(result.clean).toBe(false);
+    expect(result.findings).toHaveLength(1);
+    expect(result.findings[0]).toMatchObject({
+      file: 'pw.ts',
+      type: 'Password literal',
+    });
+  });
+
+  it('detects password literal assignment (double quotes)', async () => {
+    await writeFile(join(workDir, 'pw.ts'), 'const password = "hunter2pass";\n');
+
+    const result = await scanForSecrets(workDir, ['pw.ts']);
+
+    expect(result.clean).toBe(false);
+    expect(result.findings).toHaveLength(1);
+    expect(result.findings[0]?.type).toBe('Password literal');
+  });
+
+  it('detects password literal with surrounding whitespace', async () => {
+    await writeFile(join(workDir, 'pw.ts'), 'password   =   "longenoughpassword"\n');
+
+    const result = await scanForSecrets(workDir, ['pw.ts']);
+
+    expect(result.clean).toBe(false);
+    expect(result.findings[0]?.type).toBe('Password literal');
+  });
+
+  it('does NOT flag short password literals (under 8 chars)', async () => {
+    await writeFile(join(workDir, 'pw.ts'), 'const password = "short";\n');
+
+    const result = await scanForSecrets(workDir, ['pw.ts']);
+
+    expect(result.clean).toBe(true);
+    expect(result.findings).toEqual([]);
+  });
+
+  it('does NOT flag password assignment to a variable reference', async () => {
+    await writeFile(join(workDir, 'pw.ts'), 'const password = process.env.PW;\n');
+
+    const result = await scanForSecrets(workDir, ['pw.ts']);
+
+    expect(result.clean).toBe(true);
+    expect(result.findings).toEqual([]);
+  });
+
+  it('detects legacy OpenAI sk- key (48+ chars)', async () => {
+    // 48 alphanumeric chars after sk-
+    await writeFile(
+      join(workDir, 'openai.ts'),
+      'const key = "sk-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGhIjKlMn";\n',
+    );
+
+    const result = await scanForSecrets(workDir, ['openai.ts']);
+
+    expect(result.clean).toBe(false);
+    expect(result.findings).toHaveLength(1);
+    expect(result.findings[0]?.type).toBe('OpenAI legacy key');
+  });
+
+  it('does NOT double-report sk-ant- keys as legacy OpenAI', async () => {
+    // sk-ant-... key with 48+ chars after sk-ant-
+    await writeFile(
+      join(workDir, 'env.ts'),
+      'const key = "sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGhIjKl";\n',
+    );
+
+    const result = await scanForSecrets(workDir, ['env.ts']);
+
+    expect(result.clean).toBe(false);
+    // Should be ONLY 1 finding (Anthropic), not 2 (Anthropic + legacy OpenAI)
+    expect(result.findings).toHaveLength(1);
+    expect(result.findings[0]?.type).toBe('Anthropic API key');
+  });
+
+  it('does NOT double-report sk-proj- keys as legacy OpenAI', async () => {
+    await writeFile(
+      join(workDir, 'openai.ts'),
+      'const key = "sk-proj-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGhIjKlMnOp";\n',
+    );
+
+    const result = await scanForSecrets(workDir, ['openai.ts']);
+
+    expect(result.clean).toBe(false);
+    expect(result.findings).toHaveLength(1);
+    expect(result.findings[0]?.type).toBe('OpenAI API key');
+  });
+
+  it('does NOT flag short sk- prefixes (under 48 chars)', async () => {
+    await writeFile(join(workDir, 'short.ts'), 'const key = "sk-abc123";\n');
+
+    const result = await scanForSecrets(workDir, ['short.ts']);
+
+    expect(result.clean).toBe(true);
+    expect(result.findings).toEqual([]);
+  });
+
+  it('does NOT flag regex literals that define the new patterns', async () => {
+    await writeFile(
+      join(workDir, 'scan.ts'),
+      [
+        '// Detects sk-[a-zA-Z0-9]{48,} as legacy OpenAI keys',
+        'const openaiLegacy = /sk-[a-zA-Z0-9]{48,}/;',
+        '// Password assignment regex: password = "[^"]{8,}"',
+        'const pwPattern = /password\\s*=\\s*["\'][^"\']{8,}/;',
+        '',
+      ].join('\n'),
+    );
+
+    const result = await scanForSecrets(workDir, ['scan.ts']);
+
+    expect(result.clean).toBe(true);
+  });
 });
