@@ -115,7 +115,23 @@ export interface WaveToolOptions {
    *  Off by default. When enabled, the wave's existing wave tools (read/bash/etc.)
    *  plus customTools and mcpTools are exposed inside the sandboxed script. */
   pipelineTool?: ({ enabled: boolean } & PipelineToolOptions) | undefined;
+  /**
+   * Files this spec piece is allowed to modify (issue #250).
+   * `getWaveTools` itself does NOT enforce this — enforcement happens in
+   * `spawnWaveAgent` via a `beforeToolCall` hook. The field lives in this option
+   * bag so callers have one place to put per-wave configuration.
+   *
+   * Only the `impl` wave enforces this restriction. Test and quality waves are
+   * intentionally unrestricted — test needs to create new test files, quality
+   * needs to fix lint/type errors anywhere in the repo.
+   *
+   * Empty/undefined → no restriction (backward compat).
+   */
+  pieceFiles?: readonly string[] | undefined;
 }
+
+/** Waves where the piece-scope guard is applied (issue #250 — impl only). */
+export const PIECE_SCOPE_WAVES: ReadonlySet<AIWaveName> = new Set(['impl']);
 
 export function getWaveTools(wave: AIWaveName, cwd: string, options?: WaveToolOptions): AnyTool[] {
   const allowedNames = [...WAVE_TOOLS[wave]];

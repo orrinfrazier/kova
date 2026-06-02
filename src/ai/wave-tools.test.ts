@@ -4,6 +4,7 @@ import {
   createCustomTools,
   DEFAULT_THINKING_LEVELS,
   getWaveTools,
+  PIECE_SCOPE_WAVES,
   resolveThinkingLevel,
   WAVE_TOOLS,
 } from './wave-tools.js';
@@ -404,5 +405,63 @@ describe('getWaveTools with playwright config', () => {
     const tools = getWaveTools('spec', '/tmp', { playwright: { enabled: true } });
     const names = tools.map((t) => t.name);
     expect(names).toEqual(WAVE_TOOLS.spec);
+  });
+});
+
+describe('PIECE_SCOPE_WAVES (issue #250)', () => {
+  it('includes impl wave', () => {
+    expect(PIECE_SCOPE_WAVES.has('impl')).toBe(true);
+  });
+
+  it('does NOT include test wave (test needs to create new test files)', () => {
+    expect(PIECE_SCOPE_WAVES.has('test')).toBe(false);
+  });
+
+  it('does NOT include quality wave (quality needs to fix lint/type errors anywhere)', () => {
+    expect(PIECE_SCOPE_WAVES.has('quality')).toBe(false);
+  });
+
+  it('does NOT include read-only waves', () => {
+    expect(PIECE_SCOPE_WAVES.has('assess')).toBe(false);
+    expect(PIECE_SCOPE_WAVES.has('spec')).toBe(false);
+    expect(PIECE_SCOPE_WAVES.has('review')).toBe(false);
+  });
+});
+
+describe('getWaveTools with pieceFiles option (issue #250)', () => {
+  // The pieceFiles option is consumed by spawnWaveAgent (via a beforeToolCall hook),
+  // not by getWaveTools itself — getWaveTools must remain a pure tool-set selector.
+  // These tests pin that contract.
+
+  it('returns the same tool set for impl regardless of pieceFiles', () => {
+    const without = getWaveTools('impl', '/tmp').map((t) => t.name);
+    const withFiles = getWaveTools('impl', '/tmp', { pieceFiles: ['a.ts'] }).map((t) => t.name);
+    expect(withFiles).toEqual(without);
+  });
+
+  it('returns the same tool set for test regardless of pieceFiles', () => {
+    const without = getWaveTools('test', '/tmp').map((t) => t.name);
+    const withFiles = getWaveTools('test', '/tmp', { pieceFiles: ['a.ts'] }).map((t) => t.name);
+    expect(withFiles).toEqual(without);
+  });
+
+  it('accepts an empty pieceFiles list without changing tool set', () => {
+    const tools = getWaveTools('impl', '/tmp', { pieceFiles: [] });
+    const names = tools.map((t) => t.name);
+    expect(names).toEqual(WAVE_TOOLS.impl);
+  });
+
+  it('composes with customTools and pipelineTool', () => {
+    const customTools: CustomTool[] = [
+      { name: 'run-migrations', description: 'Run DB migrations', command: 'npm run db:migrate' },
+    ];
+    const tools = getWaveTools('impl', '/tmp', {
+      customTools,
+      pieceFiles: ['src/a.ts'],
+      pipelineTool: { enabled: true },
+    });
+    const names = tools.map((t) => t.name);
+    expect(names).toContain('run-migrations');
+    expect(names).toContain('execute_pipeline');
   });
 });
