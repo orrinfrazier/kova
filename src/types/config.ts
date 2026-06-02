@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { isValidCronExpression } from '../services/cron-evaluator.js';
 
 export const ModelTierSchema = z.enum(['small', 'medium', 'large']);
 export type ModelTier = z.infer<typeof ModelTierSchema>;
@@ -354,6 +355,22 @@ export const SkillsConfigSchema = z.object({
 export type SkillsConfig = z.infer<typeof SkillsConfigSchema>;
 
 /**
+ * Cron schedule block (issue #303) — map of `<job_name>: <cron expression>`.
+ *
+ * Each value is a 5-field POSIX cron expression validated at config-load
+ * time via `isValidCronExpression`. The scheduler (src/services/cron-scheduler.ts)
+ * reads this map to decide what to run and when; failures in one job never
+ * affect the others (each runs inside its own try/catch).
+ */
+export const ScheduleConfigSchema = z.record(
+  z.string().min(1, 'schedule job name must be non-empty'),
+  z.string().refine((expr) => isValidCronExpression(expr), {
+    message: 'invalid cron expression — expected a 5-field POSIX cron string (e.g. "0 2 * * *")',
+  }),
+);
+export type ScheduleConfig = z.infer<typeof ScheduleConfigSchema>;
+
+/**
  * Eval-harness config (issue #278). When `context_arm` is set, every fix run
  * in this repo is tagged as part of that arm of the retrieval-quality eval and
  * the tag is persisted into `history.jsonl` so `kova eval context` can compute
@@ -371,6 +388,7 @@ export const RepoConfigSchema = z.object({
   ab_test: ABTestConfigSchema.optional(),
   ab_test_policy: ABTestPolicySchema.optional(),
   eval: EvalConfigSchema.optional(),
+  schedule: ScheduleConfigSchema.optional(),
   skills: SkillsConfigSchema.optional(),
   vectordb: VectorDBConfigSchema.optional(),
   episodes: EpisodicMemoryConfigSchema.optional(),
