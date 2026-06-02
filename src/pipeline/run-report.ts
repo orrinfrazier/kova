@@ -2,7 +2,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { WaveName, WaveResult } from '../types/index.js';
 import { log } from '../utils/logger.js';
-import type { LoopResult } from './loop.js';
+import type { IssueOutcome, LoopResult, SkipReasonKey } from './loop.js';
 
 export interface RunReportIssue {
   number: number;
@@ -50,6 +50,13 @@ export interface RunReport {
   completedAt: string;
   /** Populated when the loop was milestone-scoped — omitted otherwise. */
   milestoneProgress?: MilestoneProgress;
+  /**
+   * Coverage ledger surfaced from LoopResult (issue #288): full per-fetched-issue
+   * record + per-reason skip counts so the run report can show "N not attempted"
+   * with reasons. Defaults to empty so older callers stay compatible.
+   */
+  outcomes: IssueOutcome[];
+  skippedByReason: Partial<Record<SkipReasonKey, number>>;
 }
 
 function sumWaveField(
@@ -89,6 +96,8 @@ export function buildRunReport(loopResult: LoopResult, milestoneInput?: Mileston
     issues,
     startedAt: loopResult.startedAt,
     completedAt: new Date().toISOString(),
+    outcomes: loopResult.outcomes ?? [],
+    skippedByReason: loopResult.skippedByReason ?? {},
   };
 
   if (milestoneInput) {
@@ -115,6 +124,25 @@ function escapeTableCell(text: string): string {
   return text.replace(/\|/g, '\\|');
 }
 
+/**
+ * Format the coverage-ledger breakdown line (issue #288): "N not attempted
+ * (over-limit: A, budget: B, shutdown: C)". Returns undefined when nothing
+ * was skipped so callers can skip the line entirely.
+ */
+function formatNotAttempted(report: RunReport): string | undefined {
+  if (report.skipped <= 0) return undefined;
+  const breakdown = report.skippedByReason;
+  const parts: string[] = [];
+  // Keep a stable, documented order so users see it the same way every run.
+  const order: SkipReasonKey[] = ['over-limit', 'budget', 'shutdown'];
+  for (const key of order) {
+    const count = breakdown[key] ?? 0;
+    if (count > 0) parts.push(`${key}: ${count}`);
+  }
+  const detail = parts.length > 0 ? ` (${parts.join(', ')})` : '';
+  return `${report.skipped} not attempted${detail}`;
+}
+
 export async function writeRunReport(workDir: string, report: RunReport): Promise<void> {
   const kovaDir = join(workDir, '.kova');
   await mkdir(kovaDir, { recursive: true });
@@ -135,6 +163,11 @@ function renderMarkdown(report: RunReport): string {
     `| **Total turns** | ${report.totalTurns} |`,
     '',
   ];
+
+  const notAttempted = formatNotAttempted(report);
+  if (notAttempted) {
+    lines.push('## Coverage', '', notAttempted, '');
+  }
 
   if (report.milestoneProgress) {
     const mp = report.milestoneProgress;
@@ -265,6 +298,10 @@ export function printRunReport(report: RunReport): void {
   log.info(
     `Total cost: $${report.totalCost.toFixed(2)} | ${report.totalTurns} turns | ${formatDuration(report.totalDuration)}`,
   );
+  const notAttempted = formatNotAttempted(report);
+  if (notAttempted) {
+    log.info(`Coverage: ${notAttempted}`);
+  }
   if (report.milestoneProgress) {
     const mp = report.milestoneProgress;
     log.info(`Milestone progress: ${mp.milestone} — ${mp.open} open / ${mp.closed} closed / ${mp.attempted} attempted`);

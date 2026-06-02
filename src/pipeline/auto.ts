@@ -226,6 +226,8 @@ function emptyLoopResult(): LoopResult {
     budgetExceeded: false,
     startedAt: new Date().toISOString(),
     results: [],
+    outcomes: [],
+    skippedByReason: {},
   };
 }
 
