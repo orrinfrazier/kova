@@ -102,11 +102,51 @@ repos:
       max_per_run: 10
 ```
 
+#### Per-wave provider overrides
+
+Each wave accepts either a tier (`small`/`medium`/`large` → default Anthropic
+models) or an explicit `provider:modelId` string. Mix and match providers per
+wave — there is no requirement that a single run use one provider.
+
+```yaml
+repos:
+  my-project:
+    path: ~/dev/my-project
+    model:
+      assess: large                     # anthropic (default tier)
+      spec: large                       # anthropic
+      test: openai:gpt-4o               # OpenAI for test authoring
+      impl: openai:gpt-4o-mini          # OpenAI for implementation
+      quality: small                    # anthropic haiku
+      review: google:gemini-2.5-pro     # Google Gemini for diverse review
+      brainstorm: anthropic:claude-opus-4-6
+```
+
+Supported provider prefixes: `anthropic:`, `openai:`, `google:`,
+`amazon-bedrock:`, `vertex-ai:`, plus local runtimes (`ollama:`, `lmstudio:`,
+`vllm:`, `llamacpp:`).
+
+| Provider | API key env var(s) |
+|----------|---------------------|
+| `anthropic:` | `ANTHROPIC_API_KEY` |
+| `openai:` | `OPENAI_API_KEY` |
+| `google:` | `GEMINI_API_KEY` **or** `GOOGLE_API_KEY` (either is accepted) |
+| `amazon-bedrock:` | `AWS_ACCESS_KEY_ID` (plus standard AWS env) |
+| `vertex-ai:` | `GOOGLE_APPLICATION_CREDENTIALS` |
+| `ollama:`, `lmstudio:`, `vllm:`, `llamacpp:` | none (local) |
+
+Kova validates the model config at startup: if any wave references a provider
+whose key is not set, you get a wave-scoped error like
+`Wave "review" uses provider "openai" (model: gpt-4o) but no API key is set —
+set OPENAI_API_KEY.` This catches misconfigurations before the pipeline runs.
+
 ### Environment variables
 
 | Variable | Description |
 |----------|-------------|
 | `ANTHROPIC_API_KEY` | Anthropic API key |
+| `OPENAI_API_KEY` | OpenAI API key (for `openai:` per-wave models) |
+| `GEMINI_API_KEY` / `GOOGLE_API_KEY` | Google API key (either is accepted; `GEMINI_API_KEY` is preferred) |
 | `KOVA_SMALL_MODEL` | Override small model (default: haiku) |
 | `KOVA_MEDIUM_MODEL` | Override medium model (default: sonnet) |
 | `KOVA_LARGE_MODEL` | Override large model (default: opus) |

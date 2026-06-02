@@ -208,20 +208,40 @@ export function getApiFallbackModelString(tier: ModelTier): string {
 }
 
 // --- Provider → API key env var mapping ---
+//
+// Each provider lists the env var(s) hasApiKey accepts. This MUST stay in sync
+// with `resolveApiKey` in wave-executor.ts — if resolveApiKey would find a key
+// at runtime, validateModelConfig must accept that wave at startup (and vice
+// versa). When the two drift, a config that would run gets rejected up front
+// (or, worse, the opposite). See orrinfrazier/kova#263.
+//
+// Order matters for error messages: env vars are listed in the same priority
+// order as resolveApiKey, and `describeApiKeyEnv` joins them with "or".
 
-const PROVIDER_API_KEY_ENV: Readonly<Record<string, string>> = {
-  anthropic: 'ANTHROPIC_API_KEY',
-  openai: 'OPENAI_API_KEY',
-  google: 'GOOGLE_API_KEY',
-  'amazon-bedrock': 'AWS_ACCESS_KEY_ID',
-  'vertex-ai': 'GOOGLE_APPLICATION_CREDENTIALS',
+const PROVIDER_API_KEY_ENV: Readonly<Record<string, readonly string[]>> = {
+  anthropic: ['ANTHROPIC_API_KEY'],
+  openai: ['OPENAI_API_KEY'],
+  // resolveApiKey('google') prefers GEMINI_API_KEY, falls back to GOOGLE_API_KEY.
+  google: ['GEMINI_API_KEY', 'GOOGLE_API_KEY'],
+  'amazon-bedrock': ['AWS_ACCESS_KEY_ID'],
+  'vertex-ai': ['GOOGLE_APPLICATION_CREDENTIALS'],
 };
 
-/** Check whether the required API key is available for a provider. */
+/** Check whether the required API key is available for a provider.
+ *  A provider with multiple accepted env vars passes if ANY of them is set. */
 function hasApiKey(provider: string): boolean {
-  const envVar = PROVIDER_API_KEY_ENV[provider];
-  if (!envVar) return true; // Unknown provider — assume key is handled elsewhere
-  return !!process.env[envVar];
+  const envVars = PROVIDER_API_KEY_ENV[provider];
+  if (!envVars) return true; // Unknown provider — assume key is handled elsewhere
+  return envVars.some((v) => !!process.env[v]);
+}
+
+/** Human-readable description of the env var(s) a provider accepts.
+ *  "GEMINI_API_KEY or GOOGLE_API_KEY" for google, "OPENAI_API_KEY" for openai. */
+function describeApiKeyEnv(provider: string): string {
+  const envVars = PROVIDER_API_KEY_ENV[provider];
+  if (!envVars || envVars.length === 0) return 'the appropriate env var';
+  if (envVars.length === 1) return envVars[0] as string;
+  return envVars.join(' or ');
 }
 
 // --- Startup model validation ---
@@ -237,7 +257,7 @@ export function validateModelConfig(config: RepoConfig): void {
       const model = resolveWaveModel(waveConfig);
       if (!isLocalProvider(model.provider) && !hasApiKey(model.provider)) {
         throw new KovaError(
-          `No API key for provider "${model.provider}" (set ${PROVIDER_API_KEY_ENV[model.provider] ?? 'the appropriate env var'}). Wave: ${wave}, model: ${model.id}`,
+          `Wave "${wave}" uses provider "${model.provider}" (model: ${model.id}) but no API key is set — set ${describeApiKeyEnv(model.provider)}.`,
           'config',
           false,
         );

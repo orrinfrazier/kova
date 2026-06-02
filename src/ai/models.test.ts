@@ -545,6 +545,172 @@ describe('models', () => {
         }),
       ).toThrow(/Unknown model/i);
     });
+
+    // --- Cross-provider per-wave routing (orrinfrazier/kova#263) ---
+    //
+    // The runtime resolveApiKey accepts EITHER GEMINI_API_KEY or GOOGLE_API_KEY
+    // for google models, so validateModelConfig must agree. Otherwise a config
+    // that would run gets rejected at startup.
+
+    it('accepts google wave when only GEMINI_API_KEY is set', async () => {
+      delete process.env.GOOGLE_API_KEY;
+      process.env.ANTHROPIC_API_KEY = 'sk-ant-test';
+      process.env.GEMINI_API_KEY = 'gemini-only';
+      const { validateModelConfig } = await import('./models.js');
+
+      expect(() =>
+        validateModelConfig({
+          path: '/tmp/test',
+          rules: {
+            coverage: 80,
+            auto_merge: false,
+            max_issues_per_run: 10,
+            ci_merge: 'require' as const,
+            concurrency: 1,
+          },
+          model: {
+            assess: 'large',
+            spec: 'google:gemini-2.5-pro',
+            test: 'medium',
+            impl: 'medium',
+            quality: 'small',
+            review: 'large',
+            brainstorm: 'large',
+          },
+          isolation: 'worktree',
+        }),
+      ).not.toThrow();
+      delete process.env.ANTHROPIC_API_KEY;
+      delete process.env.GEMINI_API_KEY;
+    });
+
+    it('accepts google wave when only GOOGLE_API_KEY is set', async () => {
+      delete process.env.GEMINI_API_KEY;
+      process.env.ANTHROPIC_API_KEY = 'sk-ant-test';
+      process.env.GOOGLE_API_KEY = 'google-only';
+      const { validateModelConfig } = await import('./models.js');
+
+      expect(() =>
+        validateModelConfig({
+          path: '/tmp/test',
+          rules: {
+            coverage: 80,
+            auto_merge: false,
+            max_issues_per_run: 10,
+            ci_merge: 'require' as const,
+            concurrency: 1,
+          },
+          model: {
+            assess: 'large',
+            spec: 'google:gemini-2.5-pro',
+            test: 'medium',
+            impl: 'medium',
+            quality: 'small',
+            review: 'large',
+            brainstorm: 'large',
+          },
+          isolation: 'worktree',
+        }),
+      ).not.toThrow();
+      delete process.env.ANTHROPIC_API_KEY;
+      delete process.env.GOOGLE_API_KEY;
+    });
+
+    it('throws a wave-scoped error for google when neither GEMINI_API_KEY nor GOOGLE_API_KEY is set', async () => {
+      delete process.env.GEMINI_API_KEY;
+      delete process.env.GOOGLE_API_KEY;
+      process.env.ANTHROPIC_API_KEY = 'sk-ant-test';
+      const { validateModelConfig } = await import('./models.js');
+
+      expect(() =>
+        validateModelConfig({
+          path: '/tmp/test',
+          rules: {
+            coverage: 80,
+            auto_merge: false,
+            max_issues_per_run: 10,
+            ci_merge: 'require' as const,
+            concurrency: 1,
+          },
+          model: {
+            assess: 'large',
+            spec: 'google:gemini-2.5-pro',
+            test: 'medium',
+            impl: 'medium',
+            quality: 'small',
+            review: 'large',
+            brainstorm: 'large',
+          },
+          isolation: 'worktree',
+        }),
+      ).toThrow(/spec.*google.*GEMINI_API_KEY.*GOOGLE_API_KEY/i);
+      delete process.env.ANTHROPIC_API_KEY;
+    });
+
+    it('validates a mixed-provider config (anthropic assess + openai review + google spec) when all keys are set', async () => {
+      process.env.ANTHROPIC_API_KEY = 'sk-ant-test';
+      process.env.OPENAI_API_KEY = 'sk-openai-test';
+      process.env.GEMINI_API_KEY = 'gemini-test';
+      const { validateModelConfig } = await import('./models.js');
+
+      expect(() =>
+        validateModelConfig({
+          path: '/tmp/test',
+          rules: {
+            coverage: 80,
+            auto_merge: false,
+            max_issues_per_run: 10,
+            ci_merge: 'require' as const,
+            concurrency: 1,
+          },
+          model: {
+            assess: 'large', // anthropic (default)
+            spec: 'google:gemini-2.5-pro',
+            test: 'medium',
+            impl: 'medium',
+            quality: 'small',
+            review: 'openai:gpt-4o',
+            brainstorm: 'large',
+          },
+          isolation: 'worktree',
+        }),
+      ).not.toThrow();
+      delete process.env.ANTHROPIC_API_KEY;
+      delete process.env.OPENAI_API_KEY;
+      delete process.env.GEMINI_API_KEY;
+    });
+
+    it('throws a wave-scoped error naming the missing openai wave when OPENAI_API_KEY is absent', async () => {
+      process.env.ANTHROPIC_API_KEY = 'sk-ant-test';
+      process.env.GEMINI_API_KEY = 'gemini-test';
+      delete process.env.OPENAI_API_KEY;
+      const { validateModelConfig } = await import('./models.js');
+
+      expect(() =>
+        validateModelConfig({
+          path: '/tmp/test',
+          rules: {
+            coverage: 80,
+            auto_merge: false,
+            max_issues_per_run: 10,
+            ci_merge: 'require' as const,
+            concurrency: 1,
+          },
+          model: {
+            assess: 'large',
+            spec: 'google:gemini-2.5-pro',
+            test: 'medium',
+            impl: 'medium',
+            quality: 'small',
+            review: 'openai:gpt-4o',
+            brainstorm: 'large',
+          },
+          isolation: 'worktree',
+        }),
+      ).toThrow(/review.*openai.*OPENAI_API_KEY/i);
+      delete process.env.ANTHROPIC_API_KEY;
+      delete process.env.GEMINI_API_KEY;
+    });
   });
 
   describe('isLocalProvider', () => {
