@@ -31,6 +31,7 @@ import { log } from '../utils/logger.js';
 import { executePiecesInBatches } from './batch-scheduler.js';
 import { buildPieceContext, buildWaveContext } from './context.js';
 import { loadPrompt, resolvePromptsDir } from './prompts.js';
+import { classifyReviewFindings } from './review-classifier.js';
 import { loadReviewPersonaPrompt, selectReviewerPersona } from './review-persona.js';
 
 const exec = promisify(execCb);
@@ -1386,6 +1387,27 @@ function reviewOutputFormat(): OutputFormat {
   };
 }
 
+/**
+ * Apply the optional review-classifier opt-in (issue #320, pattern 3).
+ *
+ * When `repos.yaml` sets `review.classify_inline: true`, partition the loop's
+ * `knownIssues` into "real" and "probe". Only real findings flow downstream
+ * to the PR body. Probes get a single log line so they show up in telemetry
+ * but never produce user-facing comments. Default (flag false) is a no-op.
+ */
+function applyClassifyInlineGate(knownIssues: ReviewFinding[], repoConfig: RepoConfig): ReviewFinding[] {
+  if (repoConfig.review?.classify_inline !== true) {
+    return knownIssues;
+  }
+  const { real, probe } = classifyReviewFindings(knownIssues);
+  if (probe.length > 0) {
+    log.info(
+      `[review-classifier] classify_inline=true: kept ${real.length} real finding(s), filtered ${probe.length} probe(s)`,
+    );
+  }
+  return real;
+}
+
 // --- Review Loop Controller ---
 
 export async function runReviewLoop(config: ReviewLoopConfig): Promise<ReviewLoopResult> {
@@ -1574,12 +1596,13 @@ export async function runReviewLoop(config: ReviewLoopConfig): Promise<ReviewLoo
     // resolved; the orchestrator must see them.
     if (!lastReview || lastReview.verdict === 'pass') {
       log.info('[review-loop] Review passed');
-      const knownIssues = Array.from(skippedSurfacedFindings.values());
-      if (knownIssues.length > 0) {
+      const rawKnownIssues = Array.from(skippedSurfacedFindings.values());
+      if (rawKnownIssues.length > 0) {
         log.warn(
-          `[review-loop] ${knownIssues.length} needs_new_tests finding(s) surfaced as known issues (missing test_code from reviewer)`,
+          `[review-loop] ${rawKnownIssues.length} needs_new_tests finding(s) surfaced as known issues (missing test_code from reviewer)`,
         );
       }
+      const knownIssues = applyClassifyInlineGate(rawKnownIssues, repoConfig);
       return {
         reviewWaveResult,
         qualityWaveResult,
@@ -1731,8 +1754,9 @@ export async function runReviewLoop(config: ReviewLoopConfig): Promise<ReviewLoo
       finalKnown.set(k, f);
     }
   }
-  const knownIssues = Array.from(finalKnown.values());
-  log.warn(`[review-loop] Max iterations (${maxIterations}) reached — ${knownIssues.length} known issue(s) remain`);
+  const rawKnownIssues = Array.from(finalKnown.values());
+  log.warn(`[review-loop] Max iterations (${maxIterations}) reached — ${rawKnownIssues.length} known issue(s) remain`);
+  const knownIssues = applyClassifyInlineGate(rawKnownIssues, repoConfig);
 
   return {
     reviewWaveResult: reviewWaveResult as WaveResult,

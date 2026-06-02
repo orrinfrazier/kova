@@ -266,6 +266,23 @@ export const GitHubConfigSchema = z
 
 export type GitHubConfig = z.infer<typeof GitHubConfigSchema>;
 
+/**
+ * Review-wave config block (issue #320, pattern 3).
+ *
+ * Borrowed from claude-code-action `classify_inline_comments` — opt-in pass
+ * that buffers review-wave findings and classifies them as "real review" or
+ * "probe" before posting inline. When `classify_inline` is true, only `real`
+ * findings flow to comments; `probe` findings are logged to telemetry.
+ * Default `false` so today's behavior is preserved.
+ */
+export const ReviewConfigSchema = z
+  .object({
+    classify_inline: z.boolean().default(false),
+  })
+  .default(() => ({ classify_inline: false }));
+
+export type ReviewConfig = z.infer<typeof ReviewConfigSchema>;
+
 export const CiMergePolicySchema = z.enum(['require', 'warn']);
 export type CiMergePolicy = z.infer<typeof CiMergePolicySchema>;
 
@@ -364,6 +381,13 @@ export const RepoConfigSchema = z.object({
   playwright: PlaywrightConfigSchema.optional(),
   tools: z.array(CustomToolSchema).optional(),
   github: GitHubConfigSchema.optional(),
+  review: ReviewConfigSchema.optional(),
+  /**
+   * Mustache-style template for fix-branch names (issue #320, pattern 2).
+   * When omitted, kova uses the historical `kova/fix-{N}` pattern.
+   * See `src/services/branch-template.ts` for the supported variables.
+   */
+  branch_name_template: z.string().optional(),
   rules: z
     .object({
       coverage: z.number().default(80),

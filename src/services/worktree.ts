@@ -2,12 +2,48 @@
 
 import { $, fs, path } from 'zx';
 import { log } from '../utils/logger.js';
+import { type BranchTemplateVars, kebabDescription, renderBranchTemplate } from './branch-template.js';
 
 $.verbose = false;
 
 export interface Worktree {
   path: string;
   branch: string;
+}
+
+/**
+ * Optional context for templated branch naming (issue #320, pattern 2).
+ *
+ * When `template` is set, the branch name is rendered from the template with
+ * variables drawn from `issue` and the optional fields below. When `template`
+ * is omitted, the historical `kova/fix-{issueNumber}` pattern is preserved.
+ */
+export interface BranchNamingContext {
+  template?: string | undefined;
+  issue: { number: number; title?: string | undefined; labels?: readonly string[] | undefined };
+  /** Override the prefix substituted for `{{prefix}}`. Default `"kova/"`. */
+  prefix?: string | undefined;
+  /** Override the entity type substituted for `{{entityType}}`. Default `"fix"`. */
+  entityType?: string | undefined;
+}
+
+function resolveBranchName(ctx: BranchNamingContext): string {
+  const { template, issue } = ctx;
+  if (template == null || template.trim().length === 0) {
+    return `kova/fix-${issue.number}`;
+  }
+  const vars: BranchTemplateVars = {
+    prefix: ctx.prefix ?? 'kova/',
+    entityType: ctx.entityType ?? 'fix',
+    entityNumber: issue.number,
+    timestamp: new Date().toISOString().slice(0, 10).replace(/-/g, ''),
+    sha: '',
+    label: issue.labels?.[0] ?? '',
+    description: kebabDescription(issue.title ?? ''),
+  };
+  const rendered = renderBranchTemplate(template, vars);
+  // Guard against pathological templates that produce empty refs.
+  return rendered.length > 0 ? rendered : `kova/fix-${issue.number}`;
 }
 
 export async function detectDefaultBranch(repoPath: string): Promise<string> {
@@ -23,8 +59,12 @@ export async function detectDefaultBranch(repoPath: string): Promise<string> {
   return 'main';
 }
 
-export async function createWorktree(repoPath: string, issueNumber: number): Promise<Worktree> {
-  const branch = `kova/fix-${issueNumber}`;
+export async function createWorktree(
+  repoPath: string,
+  issueNumber: number,
+  branchContext?: BranchNamingContext,
+): Promise<Worktree> {
+  const branch = branchContext != null ? resolveBranchName(branchContext) : `kova/fix-${issueNumber}`;
   const wtPath = worktreePath(repoPath, issueNumber);
   const defaultBranch = await detectDefaultBranch(repoPath);
 

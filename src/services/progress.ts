@@ -3,7 +3,7 @@
 
 import type { FixState, Issue, WaveName } from '../types/index.js';
 import { log } from '../utils/logger.js';
-import { createIssueComment, editIssueComment } from './github.js';
+import { editIssueComment, upsertTrackingComment } from './github.js';
 
 const PIPELINE_WAVES: WaveName[] = ['assess', 'spec', 'test', 'impl', 'quality', 'review', 'ship'];
 
@@ -84,7 +84,9 @@ export class ProgressTracker {
   async start(): Promise<void> {
     const body = formatProgressBody(this.issue, [], 'running');
     try {
-      this.commentId = await createIssueComment(this.ownerRepo, this.issue.number, body);
+      // Use upsert so a resumed run in a fresh worktree finds the existing
+      // tracking comment by HTML marker instead of posting a duplicate.
+      this.commentId = await upsertTrackingComment(this.ownerRepo, this.issue.number, body);
     } catch (err) {
       log.warn(`[progress] Failed to create progress comment: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -111,7 +113,10 @@ export class ProgressTracker {
       if (this.commentId != null) {
         await editIssueComment(this.ownerRepo, this.commentId, body);
       } else {
-        this.commentId = await createIssueComment(this.ownerRepo, this.issue.number, body);
+        // No stored comment id (e.g. resumed run in a fresh worktree) — find
+        // the existing tracking comment via the HTML marker and edit it in
+        // place, or create a fresh one.
+        this.commentId = await upsertTrackingComment(this.ownerRepo, this.issue.number, body);
       }
     } catch (err) {
       log.warn(`[progress] Failed to update progress comment: ${err instanceof Error ? err.message : String(err)}`);
