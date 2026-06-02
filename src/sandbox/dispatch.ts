@@ -150,8 +150,11 @@ export async function dispatchExecuteWave(
 
       // Convert WaveHandoff → WaveExecutionResult so loop callers see the same shape
       // they would get from executeWaveWithRetry on the host path.
+      // `parsed === false` ↔ artifact is the raw model string (issue #308 discriminator).
+      // Fall back to the legacy `typeof artifact === 'string'` check for older handoffs.
+      const artifactIsString = handoff.parsed === false || typeof handoff.artifact === 'string';
       const result: WaveExecutionResult = {
-        result: typeof handoff.artifact === 'string' ? handoff.artifact : JSON.stringify(handoff.artifact),
+        result: artifactIsString ? (handoff.artifact as string) : JSON.stringify(handoff.artifact),
         success: true,
         duration,
         turns: handoff.turns,

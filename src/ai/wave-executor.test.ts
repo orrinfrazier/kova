@@ -376,6 +376,105 @@ describe('spawnWaveAgent', () => {
     expect(result.confidence).toBe('medium');
   });
 
+  it('sets parsed=true when structured output parses successfully', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+
+    setAgentResponse('{"grade": "A", "should_proceed": true}', 0.01);
+
+    const result = await spawnWaveAgent({
+      wave: 'assess',
+      model: 'claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Message.',
+      cwd: '/tmp/test',
+      outputFormat: { type: 'json_schema', schema: { type: 'object' } },
+    });
+
+    expect(result.parsed).toBe(true);
+    // When parsed is true, the artifact is the structured object, not the raw string
+    expect(typeof result.artifact).toBe('object');
+  });
+
+  it('sets parsed=false when no outputFormat is requested (raw text artifact)', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+
+    setAgentResponse('plain text wave output, no structured output', 0.01);
+
+    const result = await spawnWaveAgent({
+      wave: 'test',
+      model: 'claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Message.',
+      cwd: '/tmp/test',
+    });
+
+    expect(result.parsed).toBe(false);
+    // String fallback — artifact is the raw resultText
+    expect(typeof result.artifact).toBe('string');
+  });
+
+  it('sets parsed=false when outputFormat is set but JSON parsing fails (string-fallback path)', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+
+    // Model emits non-JSON despite outputFormat being requested
+    setAgentResponse('this is not JSON at all', 0.01);
+
+    const result = await spawnWaveAgent({
+      wave: 'assess',
+      model: 'claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Message.',
+      cwd: '/tmp/test',
+      outputFormat: { type: 'json_schema', schema: { type: 'object' } },
+    });
+
+    expect(result.parsed).toBe(false);
+    expect(typeof result.artifact).toBe('string');
+    expect(result.artifact).toBe('this is not JSON at all');
+  });
+
+  it('parsed field discriminates string fallback from typed artifact (acceptance criterion)', async () => {
+    // This is the contract the issue requires: callers can use !handoff.parsed
+    // instead of typeof handoff.artifact === 'string'.
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+
+    setAgentResponse('{"x": 1}', 0.01);
+    const ok = await spawnWaveAgent({
+      wave: 'assess',
+      model: 'claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Message.',
+      cwd: '/tmp/test',
+      outputFormat: { type: 'json_schema', schema: { type: 'object' } },
+    });
+
+    setAgentResponse('garbage', 0.01);
+    const bad = await spawnWaveAgent({
+      wave: 'assess',
+      model: 'claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Message.',
+      cwd: '/tmp/test',
+      outputFormat: { type: 'json_schema', schema: { type: 'object' } },
+    });
+
+    // The discriminator is reliable: parsed ↔ artifact-is-not-a-string
+    expect(ok.parsed).toBe(true);
+    expect(typeof ok.artifact).toBe('object');
+    expect(bad.parsed).toBe(false);
+    expect(typeof bad.artifact).toBe('string');
+  });
+
   it('agent has no knowledge of other waves conversations (fresh state per call)', async () => {
     const { spawnWaveAgent } = await import('./wave-executor.js');
 
