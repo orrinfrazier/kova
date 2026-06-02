@@ -243,6 +243,54 @@ describe('runTILoop', () => {
     expect(result.testsPassing).toBe(false);
   });
 
+  it('skipTestPhase: does not dispatch the test agent (IMPL_ONLY / REFACTOR scope, issue #283)', async () => {
+    // Drop default queued mocks since test wave should not be dispatched
+    mockExecute.mockReset();
+    mockExecute.mockResolvedValue(implWaveExecResult());
+    vi.mocked(mockTestRunner).mockResolvedValueOnce({ passed: true, output: 'ok', exitCode: 0 });
+
+    const result = await runTILoop({
+      issue: makeIssue(),
+      workDir: '/tmp/test',
+      repoConfig: makeConfig(),
+      waveResults: {},
+      testRunner: mockTestRunner,
+      testCommand: 'npm test',
+      skipTestPhase: true,
+    });
+
+    const testCalls = mockExecute.mock.calls.filter((c) => c[0].wave === 'test');
+    expect(testCalls).toHaveLength(0);
+    expect((result.testWaveResult.artifact as { skipped?: boolean }).skipped).toBe(true);
+    expect((result.testWaveResult.artifact as { reason?: string }).reason).toBe('pipeline-scope');
+    expect(result.testsPassing).toBe(true);
+  });
+
+  it('skipImplPhase: does not dispatch the impl agent or retry loop (TEST_ONLY scope, issue #283)', async () => {
+    const result = await runTILoop({
+      issue: makeIssue(),
+      workDir: '/tmp/test',
+      repoConfig: makeConfig(),
+      waveResults: {},
+      testRunner: mockTestRunner,
+      testCommand: 'npm test',
+      skipImplPhase: true,
+    });
+
+    // Test agent still ran once
+    const testCalls = mockExecute.mock.calls.filter((c) => c[0].wave === 'test');
+    expect(testCalls).toHaveLength(1);
+    // Impl never dispatched
+    const implCalls = mockExecute.mock.calls.filter((c) => c[0].wave === 'impl');
+    expect(implCalls).toHaveLength(0);
+    // testRunner never invoked (no impl retries to gate)
+    expect(vi.mocked(mockTestRunner)).not.toHaveBeenCalled();
+    expect((result.implWaveResult.artifact as { skipped?: boolean }).skipped).toBe(true);
+    expect((result.implWaveResult.artifact as { reason?: string }).reason).toBe('pipeline-scope');
+    expect(result.attempts).toBe(0);
+    expect(result.testsPassing).toBe(true);
+  });
+
   it('honors configurable maxRetries', async () => {
     vi.mocked(mockTestRunner).mockResolvedValue({ passed: false, output: 'fail', exitCode: 1 });
 
