@@ -75,7 +75,31 @@ export const WaveModelOverrideSchema = z.object({
 });
 export type WaveModelOverride = z.infer<typeof WaveModelOverrideSchema>;
 
-export const WaveModelConfigSchema = z.union([ModelTierSchema, WaveModelOverrideSchema, z.string()]);
+/** A single-model wave config: tier, override object, or bare model string.
+ *  Mirrors the original pre-pool wave model shape; kept as a named export so the pool
+ *  members can be typed without re-encoding the union inline. */
+export const WaveSingleModelConfigSchema = z.union([ModelTierSchema, WaveModelOverrideSchema, z.string()]);
+export type WaveSingleModelConfig = z.infer<typeof WaveSingleModelConfigSchema>;
+
+/** Consensus pool: 2-5 wave model configs + an optional adjudicator (defaults to `large`).
+ *  When a wave is assigned a pool, the wave runner is expected to fan out to every
+ *  pool member in parallel and route the results through the adjudicator. See
+ *  `resolveConsensusPool` / `isConsensusPool` in src/ai/models.ts for resolution. */
+export const WaveConsensusConfigSchema = z.object({
+  pool: z.array(WaveSingleModelConfigSchema).min(2).max(5),
+  adjudicator: WaveSingleModelConfigSchema.default('large'),
+});
+export type WaveConsensusConfig = z.infer<typeof WaveConsensusConfigSchema>;
+
+/** A wave's model config: either a single model (tier/override/string) or a consensus pool.
+ *  Pool variant is listed first so the union tries the object-with-`pool` shape before
+ *  the bare override object. */
+export const WaveModelConfigSchema = z.union([
+  WaveConsensusConfigSchema,
+  ModelTierSchema,
+  WaveModelOverrideSchema,
+  z.string(),
+]);
 export type WaveModelConfig = z.infer<typeof WaveModelConfigSchema>;
 
 export const VectorDBConfigSchema = z

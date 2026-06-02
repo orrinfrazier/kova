@@ -24,10 +24,12 @@ export type {
   SandboxResourceUsage,
   ThinkingLevel,
   VectorDBConfig,
+  WaveConsensusConfig,
   WaveModelConfig,
   WaveModelOverride,
   WaveName,
   WaveResult,
+  WaveSingleModelConfig,
 } from './config.js';
 export {
   ABTestConfigSchema,
@@ -50,8 +52,10 @@ export {
   SandboxConfigSchema,
   ThinkingLevelSchema,
   VectorDBConfigSchema,
+  WaveConsensusConfigSchema,
   WaveModelConfigSchema,
   WaveModelOverrideSchema,
+  WaveSingleModelConfigSchema,
 } from './config.js';
 export type { WaveHandoff } from './handoffs.js';
 export { loadAllHandoffs, loadHandoff, saveHandoff, WaveHandoffSchema } from './handoffs.js';
