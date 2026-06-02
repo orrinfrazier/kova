@@ -15,7 +15,10 @@
     "lint:fix": "biome check --write .",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "bench:build": "tsc -p tsconfig.bench.json",
+    "bench": "npm run bench:build && node dist-bench/bench/index.js",
+    "bench:dry": "npm run bench:build && node dist-bench/bench/index.js --dry-run"
   },
   "dependencies": {
     "@clack/prompts": "^1.2.0",
