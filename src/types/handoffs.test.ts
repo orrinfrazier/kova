@@ -13,6 +13,7 @@ function makeAssessHandoff(overrides?: Partial<WaveHandoff<AssessResult>>): Wave
     cost: 0.05,
     turns: 3,
     confidence: 'high',
+    parsed: true,
     artifact: {
       grade: 'A',
       surface_area: { files: ['src/foo.ts'], estimated_lines: 50, modules_affected: ['foo'] },
@@ -33,6 +34,7 @@ function makeSpecHandoff(overrides?: Partial<WaveHandoff<SpecResult>>): WaveHand
     cost: 0.08,
     turns: 5,
     confidence: 'high',
+    parsed: true,
     artifact: {
       summary: 'Add a foo module',
       pieces: [
@@ -112,6 +114,37 @@ describe('WaveHandoff', () => {
       if (result.success) {
         expect(result.data.fallback_used).toBeUndefined();
       }
+    });
+
+    it('accepts handoff with parsed=true and typed artifact (structured-success path)', () => {
+      const handoff = makeAssessHandoff({ parsed: true });
+      const result = WaveHandoffSchema.safeParse(handoff);
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.parsed).toBe(true);
+      }
+    });
+
+    it('accepts handoff with parsed=false and string artifact (string-fallback path)', () => {
+      const handoff = {
+        ...makeAssessHandoff(),
+        parsed: false,
+        artifact: 'raw model output that could not be parsed as JSON',
+      };
+      const result = WaveHandoffSchema.safeParse(handoff);
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.parsed).toBe(false);
+        expect(typeof result.data.artifact).toBe('string');
+      }
+    });
+
+    it('legacy handoff without parsed field is accepted (backward compat with persisted data)', () => {
+      // Old persisted handoffs on disk pre-date the parsed field. They must still load.
+      const { parsed: _omitted, ...legacy } = makeAssessHandoff();
+      void _omitted;
+      const result = WaveHandoffSchema.safeParse(legacy);
+      expect(result.success).toBe(true);
     });
   });
 
@@ -193,6 +226,35 @@ describe('WaveHandoff', () => {
       expect(loaded).not.toBeNull();
       expect(loaded?.artifact.pieces).toHaveLength(1);
       expect(loaded?.artifact.pieces[0]?.name).toBe('foo');
+    });
+
+    it('round-trips parsed=true through save/load', async () => {
+      const handoff = makeAssessHandoff({ parsed: true });
+      await saveHandoff(workDir, handoff);
+
+      const loaded = await loadHandoff<AssessResult>(workDir, 'assess');
+      expect(loaded).not.toBeNull();
+      expect(loaded?.parsed).toBe(true);
+    });
+
+    it('round-trips parsed=false (string-fallback) through save/load', async () => {
+      const handoff: WaveHandoff = {
+        wave: 'assess',
+        timestamp: '2026-04-06T12:00:00.000Z',
+        model: 'claude-opus-4-6',
+        cost: 0.05,
+        turns: 3,
+        confidence: 'medium',
+        parsed: false,
+        artifact: 'unparseable raw output',
+        approach_notes: '',
+      };
+      await saveHandoff(workDir, handoff);
+
+      const loaded = await loadHandoff(workDir, 'assess');
+      expect(loaded).not.toBeNull();
+      expect(loaded?.parsed).toBe(false);
+      expect(loaded?.artifact).toBe('unparseable raw output');
     });
   });
 

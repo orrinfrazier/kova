@@ -434,6 +434,14 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
       confidence = 'medium';
     }
 
+    // `parsed` discriminates the structured-success path from the string-fallback path.
+    // When true, `artifact` is the typed `T` (structuredOutput). When false, `artifact`
+    // is the raw model `string` (resultText). Issue #308: replaces the
+    // `typeof artifact === 'string'` runtime check downstream by making the discriminator
+    // explicit on the envelope. The cast below is now sound under this invariant.
+    const parsed = structuredOutput != null;
+    const artifact = parsed ? (structuredOutput as T) : ((resultText ?? '') as unknown as T);
+
     return {
       wave,
       timestamp: new Date().toISOString(),
@@ -441,7 +449,8 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
       cost,
       turns: turnCount,
       confidence,
-      artifact: (structuredOutput ?? resultText) as T,
+      parsed,
+      artifact,
       approach_notes: '',
       ...(outputFormat?.zodSchema != null ? { repair_attempts: repairAttempts } : {}),
     };
@@ -600,8 +609,12 @@ export async function executeWave(options: WaveOptions): Promise<WaveExecutionRe
 
     const duration = Date.now() - startTime;
 
+    // `parsed === false` ↔ artifact is the raw model string (issue #308 discriminator).
+    // For backward compat with older handoffs that lack `parsed`, fall back to the
+    // legacy `typeof artifact === 'string'` shape check.
+    const artifactIsString = handoff.parsed === false || typeof handoff.artifact === 'string';
     return {
-      result: typeof handoff.artifact === 'string' ? handoff.artifact : JSON.stringify(handoff.artifact),
+      result: artifactIsString ? (handoff.artifact as string) : JSON.stringify(handoff.artifact),
       success: true,
       duration,
       turns: handoff.turns,
