@@ -194,6 +194,19 @@ export type ModelSpec = any;
  */
 export type ThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
 
+/**
+ * Prompt-cache retention preference (issue #297).
+ *
+ * `none` disables prompt caching for this run; `short` is the provider default
+ * (~5 min TTL on Anthropic); `long` extends the cache to ~1 hour where the
+ * provider supports it (Anthropic `cache_control.ttl='1h'`). Providers that
+ * don't support cache TTL silently ignore the hint.
+ *
+ * Maps directly onto pi-ai's `CacheRetention` so the runtime can pass it
+ * through to the underlying stream call without translation.
+ */
+export type CacheRetention = 'none' | 'short' | 'long';
+
 // ────────────────────────────────────────────────────────────────────────────
 // AgentRuntime + Factory
 // ────────────────────────────────────────────────────────────────────────────
@@ -250,6 +263,19 @@ export interface AgentRuntimeConfig {
   afterToolCall?: RuntimeAfterToolCallHook;
   beforeToolCall?: RuntimeBeforeToolCallHook;
   getApiKey: RuntimeGetApiKey;
+  /**
+   * Optional session identifier (issue #297) forwarded to providers that
+   * support session-affinity headers and prompt-cache partitioning. Adapter
+   * passthrough — the runtime treats it as opaque.
+   */
+  sessionId?: string;
+  /**
+   * Optional prompt-cache retention preference (issue #297). When set, the
+   * adapter is responsible for plumbing this into the underlying stream call
+   * (pi-mono's Agent has no direct field for this, so the pi-mono adapter
+   * wraps `streamSimple` instead).
+   */
+  cacheRetention?: CacheRetention;
 }
 
 /** Factory that constructs a fresh `AgentRuntime` per wave. */

@@ -26,6 +26,7 @@ import {
   type AgentMessage,
   type AgentRuntimeFactory,
   type AssistantTurn,
+  type CacheRetention,
   defaultAgentRuntimeFactory,
   type RuntimeAfterToolCallHook,
   type RuntimeBeforeToolCallHook,
@@ -88,6 +89,50 @@ export const DEFAULT_WAVE_TIMEOUTS: Record<WaveName, number | undefined> = {
   quality: 20 * 60 * 1000,
   ship: undefined,
 };
+
+/**
+ * Default prompt-cache retention per wave type (issue #297).
+ *
+ * Waves that run for 20-30 minutes of multi-turn tool calls ('impl', 'test')
+ * benefit dramatically from `long` retention because the provider's default
+ * `short` (~5 min) TTL expires mid-wave and the system prompt / large file
+ * reads get re-billed as full input tokens on every turn.
+ *
+ * Fast waves leave the override `undefined` so the provider's default applies
+ * (`short` on Anthropic) — no benefit to extending TTL for single-turn
+ * structured-output calls that complete in well under five minutes.
+ */
+export const DEFAULT_WAVE_CACHE_RETENTION: Record<WaveName, CacheRetention | undefined> = {
+  assess: undefined,
+  spec: undefined,
+  review: undefined,
+  brainstorm: undefined,
+  test: 'long',
+  impl: 'long',
+  quality: undefined,
+  ship: undefined,
+};
+
+/**
+ * Build a deterministic session id from repo + issue + wave (issue #297).
+ *
+ * Providers that key prompt caching off `sessionId` (Anthropic session
+ * affinity, Bedrock cache partitioning) need the value to be stable across
+ * the multi-turn run for a given wave, and to be distinct enough across
+ * runs/waves that one wave's cache does not pollute another's.
+ *
+ * Format: `kova-<repo-slug>-<issue>-<wave>` where `<repo-slug>` lowercases
+ * the repo and replaces non-alphanumerics with a single hyphen. The
+ * `kova-` prefix avoids collisions with other tools sharing the provider
+ * account.
+ */
+export function buildWaveSessionId(args: { repo: string; issue: string | number; wave: WaveName }): string {
+  const slug = args.repo
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return `kova-${slug}-${args.issue}-${args.wave}`;
+}
 
 type PublishWaveEvent = (
   payload:
@@ -188,6 +233,23 @@ export interface SpawnWaveAgentConfig {
     fixId: string;
     pieceId?: string;
   };
+  /**
+   * Optional deterministic session identifier for prompt-cache affinity
+   * (issue #297). Providers that key prompt caching off `sessionId`
+   * (Anthropic, Bedrock) use it to keep the cache hot across the multi-turn
+   * run. Callers from the fix pipeline typically build this from
+   * `buildWaveSessionId({ repo, issue, wave })`. Unset → no session header is
+   * sent and the provider falls back to its default behavior.
+   */
+  sessionId?: string;
+  /**
+   * Optional prompt-cache retention preference (issue #297). Long-running
+   * multi-turn waves (`impl`, `test`) default to `'long'` via
+   * `DEFAULT_WAVE_CACHE_RETENTION` so the system prompt and large early-turn
+   * tool reads stay cached past the provider's default ~5 min TTL. Pass
+   * `'short'` or `'none'` to opt out; pass `'long'` to opt a fast wave in.
+   */
+  cacheRetention?: CacheRetention;
 }
 
 export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig): Promise<WaveHandoff<T>> {
@@ -212,11 +274,17 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
     pieceFiles,
     eventBus,
     eventContext,
+    sessionId,
+    cacheRetention: explicitCacheRetention,
   } = config;
 
   const timeoutMs = explicitTimeout ?? DEFAULT_WAVE_TIMEOUTS[wave];
   const thinkingLevel = explicitThinking ?? DEFAULT_THINKING_LEVELS[wave];
   const contextThreshold = Math.max(0.1, Math.min(1, rawThreshold));
+  // Issue #297: per-wave cache-retention default. Explicit caller value wins
+  // (including explicit 'short' or 'none' opt-outs), otherwise fall back to
+  // the per-wave default — `'long'` for impl/test, undefined elsewhere.
+  const cacheRetention: CacheRetention | undefined = explicitCacheRetention ?? DEFAULT_WAVE_CACHE_RETENTION[wave];
   const model = resolveModelFromString(modelString);
   const startTime = Date.now();
 
@@ -277,6 +345,11 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
     tools,
     getApiKey: resolveApiKey,
     transformContext: createTransformContext(model.contextWindow) as unknown as RuntimeTransformContext,
+    // Issue #297: session affinity + cache retention. Both are optional;
+    // omitted when unset so adapters that do not support either field stay
+    // unaffected.
+    ...(sessionId != null ? { sessionId } : {}),
+    ...(cacheRetention != null ? { cacheRetention } : {}),
     ...(afterToolCallHook && {
       afterToolCall: afterToolCallHook as unknown as RuntimeAfterToolCallHook,
     }),
@@ -293,6 +366,10 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
   let contextSteered = false;
   let contextTrimmed = false;
   let lastErrorMessage: string | undefined;
+  // Issue #297: cache-read telemetry — accumulate input + cacheRead across
+  // every assistant turn so we can compute the cache-hit share at completion.
+  let totalInputTokens = 0;
+  let totalCacheReadTokens = 0;
 
   // Fixed thresholds for graceful degradation
   const STEER_THRESHOLD = 0.7;
@@ -312,6 +389,14 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
         // Track cost incrementally from assistant turn_end events
         const turnCost = msg.usage.cost.total;
         accumulatedCost += turnCost;
+        // Issue #297: accumulate input + cacheRead tokens for the cache-share
+        // telemetry line emitted at wave completion. The kova-owned
+        // `AssistantTurn.usage` shape only declares `input`/`output`/`cost`,
+        // but pi-mono passes through pi-ai's richer `Usage` (which includes
+        // `cacheRead`). Read defensively so adapters that omit it still work.
+        totalInputTokens += msg.usage.input ?? 0;
+        const usageWithCache = msg.usage as { cacheRead?: number };
+        totalCacheReadTokens += usageWithCache.cacheRead ?? 0;
         publishEvent({
           type: 'wave-output',
           wave: wave as EventWaveName,
@@ -566,6 +651,16 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
     log.info(
       `[${wave}] Completed — turns=${turnCount}, cost=$${cost.toFixed(4)}, duration=${(duration / 1000).toFixed(1)}s`,
     );
+    // Issue #297: cache-read share. `share` is the fraction of input tokens
+    // served from cache; with `cacheRetention: 'long'` and a stable
+    // `sessionId` the multi-turn waves should show share > 50% after the
+    // first couple of turns. Emit the line whenever the wave actually
+    // observed input tokens — even share=0% is useful signal (means caching
+    // did not engage and the run paid full input cost).
+    if (totalInputTokens > 0) {
+      const share = Math.round((totalCacheReadTokens / totalInputTokens) * 100);
+      log.info(`[${wave}] Cache: cacheRead=${totalCacheReadTokens} input=${totalInputTokens} share=${share}%`);
+    }
     publishEvent({ type: 'cost', wave: wave as EventWaveName, costUsd: cost });
 
     // Determine confidence from structured output parsing + Zod validation
@@ -725,6 +820,13 @@ export interface WaveOptions {
    * Empty/undefined → no restriction (backward compat).
    */
   pieceFiles?: readonly string[] | undefined;
+  /**
+   * Optional deterministic session id (issue #297). Forwarded to
+   * `spawnWaveAgent` so providers can key prompt-cache affinity per wave.
+   * Callers in the fix pipeline build this via `buildWaveSessionId(...)`.
+   * Unset → no session header sent (provider default behavior).
+   */
+  sessionId?: string;
 }
 
 export interface WaveExecutionResult {
@@ -751,6 +853,7 @@ export async function executeWave(options: WaveOptions): Promise<WaveExecutionRe
     customTools,
     playwright,
     pieceFiles,
+    sessionId,
   } = options;
 
   const model = resolveWaveModel(modelTier);
@@ -771,6 +874,10 @@ export async function executeWave(options: WaveOptions): Promise<WaveExecutionRe
       ...(maxTurns != null && { maxTurns }),
       ...(thinkingLevel != null && { thinkingLevel }),
       ...(pieceFiles != null && { pieceFiles }),
+      // Issue #297: forward sessionId for prompt-cache affinity. Per-wave
+      // cacheRetention default ('long' for impl/test) is applied inside
+      // spawnWaveAgent based on the `wave` field.
+      ...(sessionId != null ? { sessionId } : {}),
     });
 
     const duration = Date.now() - startTime;
