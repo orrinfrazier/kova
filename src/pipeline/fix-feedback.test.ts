@@ -115,6 +115,8 @@ vi.mock('../ai/index.js', async (importOriginal) => {
     getModelString: actual.getModelString,
     getWaveTools: vi.fn().mockReturnValue([]),
     resolveThinkingLevel: actual.resolveThinkingLevel,
+    // Issue #297: pipeline now imports buildWaveSessionId.
+    buildWaveSessionId: actual.buildWaveSessionId,
   };
 });
 

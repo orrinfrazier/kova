@@ -8,7 +8,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { z } from 'zod';
-import { type OutputFormat, resolveThinkingLevel } from '../ai/index.js';
+import { buildWaveSessionId, type OutputFormat, resolveThinkingLevel } from '../ai/index.js';
 import { dispatchExecuteWave, type SandboxContext } from '../sandbox/dispatch.js';
 import { detectTooling } from '../services/language-detect.js';
 import type { ProjectContext } from '../services/project-context.js';
@@ -72,6 +72,12 @@ export interface TILoopConfig {
    * point for `config.isolation === 'docker'` (see issue #319).
    */
   sandbox?: SandboxContext | undefined;
+  /**
+   * Optional prompt-cache affinity context (issue #297). When set, every
+   * test/impl wave inside this loop is dispatched with a deterministic
+   * sessionId of the form `kova-<repo>-<issue>-<wave>`.
+   */
+  cacheContext?: { repo: string; issue: string | number };
 }
 
 export interface TILoopResult {
@@ -114,6 +120,12 @@ export interface ReviewLoopConfig {
   /** Route every wave through the docker sandbox container when set. */
   sandbox?: SandboxContext | undefined;
   /**
+   * Optional prompt-cache affinity context (issue #297). When set, the review
+   * + per-piece test/impl waves inside this loop are dispatched with a
+   * deterministic sessionId built via `buildWaveSessionId(...)`.
+   */
+  cacheContext?: { repo: string; issue: string | number };
+  /**
    * Optional pre-scan over diff-added lines. When provided and the result is
    * `blocking`, the orchestrator forces verdict = needs_fixes regardless of
    * the model's judgment. Hits are surfaced as critical findings.
@@ -153,6 +165,12 @@ export interface PieceTILoopConfig {
   diffRunner?: DiffRunner | undefined;
   /** Route every wave through the docker sandbox container when set. */
   sandbox?: SandboxContext | undefined;
+  /**
+   * Optional prompt-cache affinity context (issue #297). Forwarded to every
+   * dispatched test/impl wave so the provider can key prompt caching off
+   * `kova-<repo>-<issue>-<wave>`.
+   */
+  cacheContext?: { repo: string; issue: string | number } | undefined;
 }
 
 export interface PieceTILoopResult {
@@ -179,6 +197,13 @@ export interface ParallelPieceTILoopConfig {
   projectContext?: ProjectContext | undefined;
   /** Route every wave through the docker sandbox container when set. */
   sandbox?: SandboxContext | undefined;
+  /**
+   * Optional prompt-cache affinity context (issue #297). When set, every
+   * test/impl wave inside this loop is dispatched with a deterministic
+   * sessionId of the form `kova-<repo>-<issue>-<wave>`. Built upstream by
+   * fix.ts via `buildWaveSessionId(...)`.
+   */
+  cacheContext?: { repo: string; issue: string | number };
 }
 
 export interface ParallelPieceTILoopResult {
@@ -515,7 +540,12 @@ export async function runTILoop(config: TILoopConfig): Promise<TILoopResult> {
     diffRunner = defaultDiffRunner,
     fileReader = defaultFileReader,
     sandbox,
+    cacheContext,
   } = config;
+  // Issue #297: build per-wave sessionIds once so every dispatched call gets
+  // a stable cache-affinity key without re-deriving the slug on each turn.
+  const testSessionId = cacheContext != null ? buildWaveSessionId({ ...cacheContext, wave: 'test' }) : undefined;
+  const implSessionId = cacheContext != null ? buildWaveSessionId({ ...cacheContext, wave: 'impl' }) : undefined;
 
   if (maxRetries < 1) {
     throw new Error('maxRetries must be at least 1');
@@ -539,6 +569,7 @@ export async function runTILoop(config: TILoopConfig): Promise<TILoopResult> {
       modelTier: repoConfig.model.test,
       thinkingLevel: resolveThinkingLevel(repoConfig, 'test'),
       customTools: repoConfig.tools,
+      ...(testSessionId != null && { sessionId: testSessionId }),
     },
     sandbox,
   );
@@ -661,6 +692,7 @@ export async function runTILoop(config: TILoopConfig): Promise<TILoopResult> {
         modelTier: repoConfig.model.impl,
         thinkingLevel: resolveThinkingLevel(repoConfig, 'impl'),
         customTools: repoConfig.tools,
+        ...(implSessionId != null && { sessionId: implSessionId }),
       },
       sandbox,
     );
@@ -726,11 +758,17 @@ export async function runPieceTILoop(config: PieceTILoopConfig): Promise<PieceTI
     maxRetries = 3,
     testRunner = defaultTestRunner,
     sandbox,
+    cacheContext,
   } = config;
 
   if (maxRetries < 1) {
     throw new Error('maxRetries must be at least 1');
   }
+
+  // Issue #297: piece-scoped sessionIds — same `<repo>-<issue>` slug, per-wave
+  // suffix. All pieces of one issue share the cache namespace per wave.
+  const testSessionId = cacheContext != null ? buildWaveSessionId({ ...cacheContext, wave: 'test' }) : undefined;
+  const implSessionId = cacheContext != null ? buildWaveSessionId({ ...cacheContext, wave: 'impl' }) : undefined;
 
   const testCmd = await resolveTestCommand(workDir, config.testCommand);
   log.info(`[piece-ti-loop] Piece ${pieceIndex} (${piece.name}): test command: ${testCmd}`);
@@ -750,6 +788,7 @@ export async function runPieceTILoop(config: PieceTILoopConfig): Promise<PieceTI
       modelTier: repoConfig.model.test,
       thinkingLevel: resolveThinkingLevel(repoConfig, 'test'),
       customTools: repoConfig.tools,
+      ...(testSessionId != null && { sessionId: testSessionId }),
     },
     sandbox,
   );
@@ -806,6 +845,7 @@ export async function runPieceTILoop(config: PieceTILoopConfig): Promise<PieceTI
         // surreal-bench while working on domain-networking); this guard rejects
         // out-of-scope edits with a clear error message before they execute.
         pieceFiles: piece.files,
+        ...(implSessionId != null && { sessionId: implSessionId }),
       },
       sandbox,
     );
@@ -867,6 +907,7 @@ export async function runParallelPieceTILoop(config: ParallelPieceTILoopConfig):
     codebaseContext,
     projectContext,
     sandbox,
+    cacheContext,
   } = config;
 
   // Extract spec pieces
@@ -892,6 +933,7 @@ export async function runParallelPieceTILoop(config: ParallelPieceTILoopConfig):
       ...(config.diffRunner != null && { diffRunner: config.diffRunner }),
       ...(config.testCommand != null && { testCommand: config.testCommand }),
       ...(sandbox != null && { sandbox }),
+      ...(cacheContext != null && { cacheContext }),
     });
 
     return {
@@ -939,6 +981,7 @@ export async function runParallelPieceTILoop(config: ParallelPieceTILoopConfig):
         testRunner,
         ...(config.testCommand != null && { testCommand: config.testCommand }),
         ...(sandbox != null && { sandbox }),
+        ...(cacheContext != null && { cacheContext }),
       });
 
       pieceResults.push(result);
@@ -1072,7 +1115,13 @@ export async function runReviewLoop(config: ReviewLoopConfig): Promise<ReviewLoo
     prescanRunner,
     baselineFailures,
     currentFailures,
+    cacheContext,
   } = config;
+  // Issue #297: per-wave sessionIds for the review/impl retries. The review
+  // loop does not dispatch its own 'test' wave (tests are run via bash, not
+  // an agent), so no test sessionId is built here.
+  const reviewSessionId = cacheContext != null ? buildWaveSessionId({ ...cacheContext, wave: 'review' }) : undefined;
+  const implSessionId = cacheContext != null ? buildWaveSessionId({ ...cacheContext, wave: 'impl' }) : undefined;
 
   if (maxIterations < 1) {
     throw new Error('maxIterations must be at least 1');
@@ -1201,6 +1250,7 @@ export async function runReviewLoop(config: ReviewLoopConfig): Promise<ReviewLoo
         thinkingLevel: resolveThinkingLevel(repoConfig, 'review'),
         customTools: repoConfig.tools,
         playwright: config.playwright,
+        ...(reviewSessionId != null && { sessionId: reviewSessionId }),
       },
       sandbox,
     );
@@ -1308,6 +1358,7 @@ export async function runReviewLoop(config: ReviewLoopConfig): Promise<ReviewLoo
               modelTier: repoConfig.model.impl,
               thinkingLevel: resolveThinkingLevel(repoConfig, 'impl'),
               customTools: repoConfig.tools,
+              ...(implSessionId != null && { sessionId: implSessionId }),
             },
             sandbox,
           );
@@ -1337,6 +1388,7 @@ export async function runReviewLoop(config: ReviewLoopConfig): Promise<ReviewLoo
           modelTier: repoConfig.model.impl,
           thinkingLevel: resolveThinkingLevel(repoConfig, 'impl'),
           customTools: repoConfig.tools,
+          ...(implSessionId != null && { sessionId: implSessionId }),
         },
         sandbox,
       );
@@ -1477,6 +1529,12 @@ export interface QualityRetryConfig {
   projectContext?: ProjectContext | undefined;
   /** Route every wave through the docker sandbox container when set. */
   sandbox?: SandboxContext | undefined;
+  /**
+   * Optional prompt-cache affinity context (issue #297). Threaded into the
+   * impl-retry dispatch so the cache stays hot when WAVE Q has to bounce work
+   * back to impl.
+   */
+  cacheContext?: { repo: string; issue: string | number } | undefined;
 }
 
 export interface QualityRetryResult {
@@ -1492,7 +1550,18 @@ export interface QualityRetryResult {
  * Max 1 retry cycle: impl → quality re-run.
  */
 export async function runQualityRetryLoop(config: QualityRetryConfig): Promise<QualityRetryResult> {
-  const { issue, workDir, repoConfig, waveResults, projectContext, testRunner = defaultTestRunner, sandbox } = config;
+  const {
+    issue,
+    workDir,
+    repoConfig,
+    waveResults,
+    projectContext,
+    testRunner = defaultTestRunner,
+    sandbox,
+    cacheContext,
+  } = config;
+  // Issue #297: per-wave sessionIds for impl/quality retry.
+  const implSessionId = cacheContext != null ? buildWaveSessionId({ ...cacheContext, wave: 'impl' }) : undefined;
 
   const qualityWaveResult = waveResults.quality;
   if (!qualityWaveResult) {
@@ -1527,6 +1596,7 @@ export async function runQualityRetryLoop(config: QualityRetryConfig): Promise<Q
       modelTier: repoConfig.model.impl,
       thinkingLevel: resolveThinkingLevel(repoConfig, 'impl'),
       customTools: repoConfig.tools,
+      ...(implSessionId != null && { sessionId: implSessionId }),
     },
     sandbox,
   );
