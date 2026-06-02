@@ -14,6 +14,8 @@ import { resolve } from 'node:path';
 import { Command } from 'commander';
 import { validateModelConfig } from '../ai/index.js';
 import { runAuto, runAutoMultiRepo, runAutoMultiRepoParallel } from '../pipeline/auto.js';
+import { runBabysit } from '../pipeline/babysit.js';
+import { makeRunReviewLoopDispatch, previewDispatch } from '../pipeline/babysit-dispatch.js';
 import { brainstorm, printBrainstormPreview } from '../pipeline/brainstorm.js';
 import { fix } from '../pipeline/fix.js';
 import { indexCodebase } from '../pipeline/index-codebase.js';
@@ -613,6 +615,64 @@ program
     }
 
     process.exit(result.failed.length > 0 ? 1 : 0);
+  });
+
+program
+  .command('babysit')
+  .description('Act on human review comments on open kova PRs — fix, push, reply')
+  .option('--pr <number>', 'Process a single PR instead of every open kova PR')
+  .option('--repo <name-or-path>', 'Repository name (from config) or path', '.')
+  .option('--preview', 'Do not dispatch real edits — log threads only')
+  .option('--max-iterations <n>', 'Max edit-dispatch attempts per PR', '2')
+  .action(async (opts: { pr?: string; repo?: string; preview?: boolean; maxIterations?: string }) => {
+    const kovaConfig = await tryLoadConfig(program.opts().config);
+    const { repoPath, repoName, config } = resolveRepo(opts.repo ?? '.', kovaConfig);
+    initMetrics(config.metrics);
+    registerOllamaProvidersFromConfig(config);
+
+    const prNumber = opts.pr ? Number.parseInt(opts.pr, 10) : undefined;
+    if (opts.pr && (prNumber === undefined || Number.isNaN(prNumber))) {
+      console.error(`Invalid PR number: ${opts.pr}`);
+      process.exit(1);
+    }
+
+    const maxIterations = Number.parseInt(opts.maxIterations ?? '2', 10);
+
+    const dispatchEdits = opts.preview
+      ? previewDispatch
+      : makeRunReviewLoopDispatch({ config, worktreePath: repoPath });
+
+    log.info(`Babysitting kova PRs in ${repoName}${opts.preview ? ' (preview)' : ''}`);
+    const result = await runBabysit({
+      repoPath,
+      repoName,
+      config,
+      dispatchEdits,
+      ...(prNumber !== undefined && { prNumber }),
+      maxIterations,
+    });
+
+    log.info(
+      `Done — ${result.prsProcessed} PR(s) processed, ${result.totalResolved} thread(s) resolved, ${result.totalNonActionable} non-actionable, ${result.totalErrors} error(s)`,
+    );
+    for (const pr of result.perPR) {
+      if (
+        pr.result.threadsResolved.length === 0 &&
+        pr.result.nonActionable.length === 0 &&
+        pr.result.errors.length === 0
+      ) {
+        continue;
+      }
+      log.info(
+        `  PR #${pr.prNumber}: resolved=${pr.result.threadsResolved.length} nonActionable=${pr.result.nonActionable.length} errors=${pr.result.errors.length}`,
+      );
+    }
+    for (const err of result.errors) {
+      log.error(`  PR #${err.prNumber}: ${err.message}`);
+    }
+
+    shutdownMetrics();
+    process.exit(result.errors.length > 0 ? 1 : 0);
   });
 
 const sandbox = program.command('sandbox').description('Manage sandbox Docker images');
