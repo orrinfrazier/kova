@@ -10,6 +10,7 @@ import {
   getMCPToolsForWave,
   getModelString,
   getWaveTools,
+  isConsensusPool,
   isLocalModel,
   type MCPServerHandle,
   type OutputFormat,
@@ -139,16 +140,27 @@ export interface FixResult {
 
 // --- Helpers ---
 
-/** Extract provider name from a wave's model config. */
+/** Extract provider name from a wave's model config.
+ *  For consensus pools the "provider" concept doesn't fit (multi-provider by design);
+ *  we return the first pool member's provider for telemetry-tagging purposes only. */
 function waveProvider(config: RepoConfig, wave: FixAIWaveName): string {
   const waveModel = config.model[wave];
+  if (isConsensusPool(waveModel)) {
+    const first = waveModel.pool[0];
+    // `first` is guaranteed defined: pool min length is 2 via WaveConsensusConfigSchema.
+    if (first === undefined) throw new Error(`Empty consensus pool for wave ${wave}`);
+    if (typeof first === 'string') return resolveWaveModel(first).provider;
+    return first.provider;
+  }
   if (typeof waveModel !== 'string') return waveModel.provider;
   return resolveWaveModel(waveModel).provider;
 }
 
 /** Determine the fallback model string for a wave config, if applicable.
  *  Uses the configured fallback model when set, otherwise falls back to
- *  the tier-default API model for local-only models. */
+ *  the tier-default API model for local-only models.
+ *  Consensus pools are not supported by this single-model fallback path —
+ *  pool wave runners handle their own per-member fallback. */
 function waveFallbackModel(
   waveConfig: WaveModelConfig,
   modelString: string,
@@ -158,6 +170,10 @@ function waveFallbackModel(
   if (configFallback && configFallback !== modelString) return configFallback;
   // Default behavior: local models fall back to API tier defaults
   if (!isLocalModel(modelString)) return undefined;
+  if (isConsensusPool(waveConfig)) {
+    // Pool wave runners own their own fallback per member; nothing to do here.
+    return undefined;
+  }
   if (typeof waveConfig === 'string') {
     if (waveConfig === 'small' || waveConfig === 'medium' || waveConfig === 'large') {
       return getApiFallbackModelString(waveConfig);

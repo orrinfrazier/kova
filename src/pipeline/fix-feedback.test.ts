@@ -99,6 +99,7 @@ vi.mock('../ai/index.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../ai/index.js')>();
   return {
     resolveWaveModel: vi.fn().mockReturnValue({ id: 'test-model', provider: 'anthropic' }),
+    isConsensusPool: actual.isConsensusPool,
     isLocalProvider: actual.isLocalProvider,
     spawnWaveAgent: (...args: unknown[]) => mockSpawnWaveAgent(...args),
     spawnWaveAgentWithFallback: (...args: unknown[]) => mockSpawnWaveAgent(...args),
