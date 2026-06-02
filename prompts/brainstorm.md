@@ -52,6 +52,30 @@ For each issue, produce:
 - **category**: `bug`, `security`, `performance`, `tech-debt`, or `enhancement`
 - **dependencies** (optional): Titles of other issues that should be fixed first
 
+### 6. Report Coverage
+
+You MUST also populate the top-level `coverage` array on the result. This is the
+scope ledger — the user gates issue creation on it, so missing entries are
+visible signals that the pass was incomplete.
+
+For each top-level source subdirectory (e.g. `src/ai`, `src/cli`, `src/pipeline`,
+`src/services`, `src/utils`, `src/types`, or the language equivalent: `crates/*`
+for Rust workspaces, `packages/*` for pnpm monorepos, the package root for
+single-package projects), add one entry to `coverage`:
+
+```
+{ "unit": "src/ai", "status": "covered" }
+{ "unit": "src/utils", "status": "skipped", "reason": "no findings — logging helpers only" }
+```
+
+Rules:
+- Every top-level unit MUST appear exactly once.
+- `status: "covered"` means you read enough of that unit to form a judgment about
+  whether issues exist there (whether or not you ended up filing any).
+- `status: "skipped"` means you did NOT examine that unit; provide a one-line
+  `reason` (e.g. focus area mismatch, generated code, vendored deps).
+- Do not invent units that don't exist. List what you actually saw on disk.
+
 ## Focus Areas
 
 If the user message specifies focus areas, you MUST only generate issues within those areas. Ignore all other categories entirely. For example, if focus areas are "security, performance", only produce issues categorized as `security` or `performance`.
