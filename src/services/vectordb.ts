@@ -933,9 +933,63 @@ export async function runMigration(client: VectorDBClient): Promise<void> {
 
 /**
  * Upserts raw Chunk objects for a single file into the vectordb.
- * This is a simplified stub; in production wire a real VectorDBClient.
+ *
+ * Wires the incremental indexer (src/pipeline/index-codebase.ts) to the SAME
+ * REST endpoint that `queryCodeContext` reads from — i.e. the `reindex_endpoint`
+ * configured in vectordb config. The endpoint is expected to accept
+ * `{ repo_path, file_path, chunks }` and persist embeddings so that subsequent
+ * `queryCodeContext` calls return the newly-indexed symbols.
+ *
+ * Graceful degradation:
+ *   - config undefined → no-op (preserves backward compat with existing call sites)
+ *   - !config.enabled → no-op
+ *   - !config.reindex_endpoint → no-op (logged warning)
+ *   - empty chunks array → no-op
+ *   - network error or non-200 response → warning logged, returns without throwing
+ *
+ * Issue #255: previously a no-op stub; the incremental indexer was effectively
+ * silent in production. This version is wired to the real embedding sink.
  */
-export async function upsertChunks(_repoPath: string, _filePath: string, _chunks: Chunk[]): Promise<void> {
-  // No-op stub — the index-codebase pipeline tests mock this entire module.
-  // Real implementation would use a VectorDBClient injected via options.
+export async function upsertChunks(
+  repoPath: string,
+  filePath: string,
+  chunks: Chunk[],
+  config?: VectorDBConfig,
+): Promise<void> {
+  if (!config) {
+    // No config supplied — preserve no-op behavior for existing callers that
+    // haven't migrated to passing vectordb config through yet.
+    return;
+  }
+
+  if (!config.enabled) {
+    return;
+  }
+
+  if (!config.reindex_endpoint) {
+    log.warn('[vectordb] upsertChunks: vectordb enabled but reindex_endpoint not configured — skipping');
+    return;
+  }
+
+  if (chunks.length === 0) {
+    return;
+  }
+
+  try {
+    const response = await fetch(config.reindex_endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ repo_path: repoPath, file_path: filePath, chunks }),
+    });
+
+    if (!response.ok) {
+      log.warn(`[vectordb] upsertChunks: reindex endpoint returned ${response.status} for ${filePath} — skipping`);
+      return;
+    }
+
+    log.info(`[vectordb] upsertChunks: indexed ${chunks.length} chunks for ${filePath}`);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    log.warn(`[vectordb] upsertChunks: failed to POST ${filePath} chunks: ${msg} — skipping`);
+  }
 }

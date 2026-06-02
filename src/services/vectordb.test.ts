@@ -15,6 +15,7 @@ import {
   queryEpisodes,
   queryPatterns,
   runMigration,
+  upsertChunks,
   upsertCodeEmbeddings,
   upsertPattern,
 } from './vectordb.js';
@@ -1220,5 +1221,83 @@ describe('edge cases', () => {
     const results = await queryPatterns(client, 'repo', 'no matches');
 
     expect(results).toEqual([]);
+  });
+});
+
+/* ================================================================== */
+/*  upsertChunks — wired-up REST sink                                  */
+/* ================================================================== */
+
+const REINDEX_ENDPOINT = 'http://localhost:8100/reindex';
+
+function makeVectorConfig(overrides?: Partial<VectorDBConfig>): VectorDBConfig {
+  return {
+    enabled: true,
+    endpoint: ENDPOINT,
+    reindex_endpoint: REINDEX_ENDPOINT,
+    top_k: 10,
+    ...overrides,
+  };
+}
+
+describe('upsertChunks', () => {
+  const sampleFileChunks = [
+    { text: 'line1\nline2', startLine: 1, endLine: 2 },
+    { text: 'line3\nline4', startLine: 3, endLine: 4 },
+  ];
+
+  it('POSTs chunks to reindex_endpoint when config is enabled', async () => {
+    mockFetch.mockResolvedValueOnce(mockJsonResponse({ indexed: 1, api_calls: 2 }));
+
+    await upsertChunks('/tmp/repo', 'src/a.ts', sampleFileChunks, makeVectorConfig());
+
+    expect(mockFetch).toHaveBeenCalledOnce();
+    const [url, init] = mockFetch.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(REINDEX_ENDPOINT);
+    expect(init.method).toBe('POST');
+    const body = JSON.parse(init.body as string) as {
+      repo_path: string;
+      file_path: string;
+      chunks: Array<{ text: string; startLine: number; endLine: number }>;
+    };
+    expect(body.repo_path).toBe('/tmp/repo');
+    expect(body.file_path).toBe('src/a.ts');
+    expect(body.chunks).toEqual(sampleFileChunks);
+  });
+
+  it('is a no-op when config is undefined (backwards compat — graceful degradation)', async () => {
+    await upsertChunks('/tmp/repo', 'src/a.ts', sampleFileChunks);
+
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('is a no-op when config.enabled=false', async () => {
+    await upsertChunks('/tmp/repo', 'src/a.ts', sampleFileChunks, makeVectorConfig({ enabled: false }));
+
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('is a no-op when reindex_endpoint is not configured', async () => {
+    await upsertChunks('/tmp/repo', 'src/a.ts', sampleFileChunks, makeVectorConfig({ reindex_endpoint: undefined }));
+
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('skips fetch when chunks array is empty', async () => {
+    await upsertChunks('/tmp/repo', 'src/a.ts', [], makeVectorConfig());
+
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('does not throw when endpoint returns non-200 (graceful degradation)', async () => {
+    mockFetch.mockResolvedValueOnce(mockJsonResponse({ error: 'oops' }, 500));
+
+    await expect(upsertChunks('/tmp/repo', 'src/a.ts', sampleFileChunks, makeVectorConfig())).resolves.toBeUndefined();
+  });
+
+  it('does not throw on network error (graceful degradation)', async () => {
+    mockFetch.mockRejectedValueOnce(new Error('ECONNREFUSED'));
+
+    await expect(upsertChunks('/tmp/repo', 'src/a.ts', sampleFileChunks, makeVectorConfig())).resolves.toBeUndefined();
   });
 });

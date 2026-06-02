@@ -465,13 +465,14 @@ program
   .option('--repo <name-or-path>', 'Repository name (from config) or path', '.')
   .action(async (opts: { full?: boolean; connection?: string; repo?: string }) => {
     const kovaConfig = await tryLoadConfig(program.opts().config);
-    const { repoPath } = resolveRepo(opts.repo ?? '.', kovaConfig);
+    const { repoPath, config } = resolveRepo(opts.repo ?? '.', kovaConfig);
 
     log.info('Indexing codebase...');
     const result = await indexCodebase({
       repoPath,
       full: opts.full ?? false,
       connectionUrl: opts.connection,
+      vectordb: config.vectordb,
     });
 
     log.info(
