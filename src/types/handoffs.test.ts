@@ -146,6 +146,61 @@ describe('WaveHandoff', () => {
       const result = WaveHandoffSchema.safeParse(legacy);
       expect(result.success).toBe(true);
     });
+
+    it('accepts optional structured_output_metrics with all parse method values', () => {
+      const methods = [
+        'json-tag',
+        'json-tag-repaired',
+        'markdown-fence',
+        'markdown-fence-repaired',
+        'direct-parse',
+        'direct-parse-repaired',
+      ] as const;
+      for (const method of methods) {
+        const handoff = {
+          ...makeAssessHandoff(),
+          structured_output_metrics: {
+            parse_method: method,
+            attempts: 1,
+            success: true,
+            repair_attempts: 0,
+            zod_validation_failed: false,
+          },
+        };
+        const result = WaveHandoffSchema.safeParse(handoff);
+        expect(result.success).toBe(true);
+        if (result.success) {
+          expect(result.data.structured_output_metrics?.parse_method).toBe(method);
+        }
+      }
+    });
+
+    it('accepts structured_output_metrics with parse_method=null for unparseable output', () => {
+      const handoff = {
+        ...makeAssessHandoff(),
+        structured_output_metrics: {
+          parse_method: null,
+          attempts: 1,
+          success: false,
+          repair_attempts: 2,
+          zod_validation_failed: false,
+        },
+      };
+      const result = WaveHandoffSchema.safeParse(handoff);
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.structured_output_metrics?.success).toBe(false);
+      }
+    });
+
+    it('omits structured_output_metrics when not present (backward compat)', () => {
+      const handoff = makeAssessHandoff();
+      const result = WaveHandoffSchema.safeParse(handoff);
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.structured_output_metrics).toBeUndefined();
+      }
+    });
   });
 
   describe('saveHandoff', () => {

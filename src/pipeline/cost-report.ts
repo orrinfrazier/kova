@@ -1,7 +1,7 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { isLocalProvider } from '../ai/index.js';
-import type { FixState, SandboxResourceUsage, WaveName } from '../types/index.js';
+import type { FixState, SandboxResourceUsage, StructuredOutputMetrics, WaveName } from '../types/index.js';
 import { log } from '../utils/logger.js';
 
 export interface CostReport {
@@ -19,6 +19,11 @@ export interface CostReport {
     model?: string | undefined;
     provider?: string | undefined;
     fallback_used?: boolean | undefined;
+    /**
+     * Structured-output extraction telemetry for this wave (issue #247).
+     * Present when the wave was invoked with an `outputFormat`.
+     */
+    structured_output_metrics?: StructuredOutputMetrics | undefined;
   }>;
   /** Per-provider cost aggregation (e.g., { anthropic: 0.50, google: 0.20 }). */
   providerCosts: Record<string, number>;
@@ -52,6 +57,9 @@ export function buildCostReport(state: FixState): CostReport {
       model: result.model,
       provider: result.provider,
       fallback_used: fallbackUsed || undefined,
+      ...(result.structured_output_metrics != null && {
+        structured_output_metrics: result.structured_output_metrics,
+      }),
     });
     totalCost += result.cost;
     totalTurns += result.turns;

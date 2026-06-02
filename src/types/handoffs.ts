@@ -8,6 +8,45 @@ import { log } from '../utils/logger.js';
 
 const WaveNameSchema = z.enum(['assess', 'spec', 'test', 'impl', 'quality', 'review', 'ship', 'brainstorm']);
 
+/**
+ * Per-wave structured-output extraction telemetry (issue #247).
+ *
+ * Captures which parse path succeeded and how many repair turns were needed,
+ * so the harness can measure which models need help with structured output and
+ * whether extraction improvements (fuzzy repair, conversation repair) are
+ * actually doing useful work.
+ *
+ * `parse_method` is the canonical {@link ParseMethod} label when extraction
+ * succeeded, `null` when all strategies failed.
+ */
+export const StructuredOutputMetricsSchema = z.object({
+  /**
+   * Which parse path produced the structured value (or `null` if none did).
+   * One of: `json-tag`, `json-tag-repaired`, `markdown-fence`, `markdown-fence-repaired`,
+   * `direct-parse`, `direct-parse-repaired`.
+   */
+  parse_method: z
+    .enum([
+      'json-tag',
+      'json-tag-repaired',
+      'markdown-fence',
+      'markdown-fence-repaired',
+      'direct-parse',
+      'direct-parse-repaired',
+    ])
+    .nullable()
+    .optional(),
+  /** Total extraction attempts (initial + repair turns). */
+  attempts: z.number().int().min(0),
+  /** Whether extraction ultimately produced a value that passed Zod validation. */
+  success: z.boolean(),
+  /** Number of conversation-repair turns the wave used (0..MAX_REPAIR_ATTEMPTS). */
+  repair_attempts: z.number().int().min(0),
+  /** True when the parsed JSON failed schema validation on the final attempt. */
+  zod_validation_failed: z.boolean().optional(),
+});
+export type StructuredOutputMetrics = z.infer<typeof StructuredOutputMetricsSchema>;
+
 export const WaveHandoffSchema = z.object({
   wave: WaveNameSchema,
   timestamp: z.string().datetime(),
@@ -33,6 +72,13 @@ export const WaveHandoffSchema = z.object({
   local_attempt_cost: z.number().optional(),
   /** Number of structured-output repair turns used (0..2). Present when outputFormat+zodSchema was set. */
   repair_attempts: z.number().int().min(0).max(2).optional(),
+  /**
+   * Structured-output extraction telemetry (issue #247). Populated by
+   * `spawnWaveAgent` whenever `outputFormat` is set; omitted on waves that
+   * don't request structured output. Backward-compat: legacy persisted
+   * handoffs without this field still load.
+   */
+  structured_output_metrics: StructuredOutputMetricsSchema.optional(),
 });
 
 export type WaveHandoff<T = unknown> = Omit<z.infer<typeof WaveHandoffSchema>, 'artifact'> & {
