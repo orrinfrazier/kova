@@ -2552,3 +2552,290 @@ describe('spawnWaveAgent API key routing', () => {
     expect(agentConfig.getApiKey('openai')).toBe('openai-test-key');
   });
 });
+
+describe('spawnWaveAgent prompt-caching plumbing (issue #297)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env.ANTHROPIC_API_KEY = 'test-key';
+    mockPrompt.mockResolvedValue(undefined);
+    mockSubscribe.mockImplementation(() => vi.fn());
+    setAgentResponse('done');
+  });
+
+  afterEach(() => {
+    delete process.env.ANTHROPIC_API_KEY;
+  });
+
+  it('forwards explicit sessionId to the underlying pi-mono Agent', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+
+    await spawnWaveAgent({
+      wave: 'impl',
+      model: 'claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Message.',
+      cwd: '/tmp/test',
+      sessionId: 'kova-acme-foo-42-impl',
+    });
+
+    const agentConfig = vi.mocked(Agent).mock.calls[0]?.[0] as { sessionId?: string };
+    expect(agentConfig.sessionId).toBe('kova-acme-foo-42-impl');
+  });
+
+  it('forwards explicit cacheRetention by wrapping streamFn (pi-mono Agent has no direct field)', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+    const piAi = await import('@earendil-works/pi-ai');
+
+    await spawnWaveAgent({
+      wave: 'impl',
+      model: 'claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Message.',
+      cwd: '/tmp/test',
+      cacheRetention: 'long',
+    });
+
+    const agentConfig = vi.mocked(Agent).mock.calls[0]?.[0] as {
+      streamFn?: (model: unknown, ctx: unknown, opts?: Record<string, unknown>) => unknown;
+    };
+    expect(typeof agentConfig.streamFn).toBe('function');
+
+    // Invoke the wrapper and confirm cacheRetention is merged into options.
+    const model = { id: 'claude-sonnet-4-6', provider: 'anthropic' } as unknown;
+    const ctx = { systemPrompt: 's', messages: [], tools: [] } as unknown;
+    vi.mocked(piAi.streamSimple).mockReturnValue('STREAM' as unknown as never);
+    const out = agentConfig.streamFn?.(model, ctx, { temperature: 0.1 });
+    expect(out).toBe('STREAM');
+    expect(piAi.streamSimple).toHaveBeenCalledTimes(1);
+    const passedOpts = vi.mocked(piAi.streamSimple).mock.calls[0]?.[2] as
+      | { cacheRetention?: string; temperature?: number }
+      | undefined;
+    expect(passedOpts?.cacheRetention).toBe('long');
+    expect(passedOpts?.temperature).toBe(0.1);
+  });
+
+  it('auto-selects cacheRetention="long" by default for the impl wave', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+    const piAi = await import('@earendil-works/pi-ai');
+
+    await spawnWaveAgent({
+      wave: 'impl',
+      model: 'claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Message.',
+      cwd: '/tmp/test',
+    });
+
+    const agentConfig = vi.mocked(Agent).mock.calls[0]?.[0] as {
+      streamFn?: (model: unknown, ctx: unknown, opts?: Record<string, unknown>) => unknown;
+    };
+    vi.mocked(piAi.streamSimple).mockReturnValue('STREAM' as unknown as never);
+    agentConfig.streamFn?.({ id: 'x', provider: 'anthropic' }, {}, undefined);
+    const passedOpts = vi.mocked(piAi.streamSimple).mock.calls[0]?.[2] as { cacheRetention?: string } | undefined;
+    expect(passedOpts?.cacheRetention).toBe('long');
+  });
+
+  it('auto-selects cacheRetention="long" by default for the test wave', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+    const piAi = await import('@earendil-works/pi-ai');
+
+    await spawnWaveAgent({
+      wave: 'test',
+      model: 'claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Message.',
+      cwd: '/tmp/test',
+    });
+
+    const agentConfig = vi.mocked(Agent).mock.calls[0]?.[0] as {
+      streamFn?: (model: unknown, ctx: unknown, opts?: Record<string, unknown>) => unknown;
+    };
+    vi.mocked(piAi.streamSimple).mockReturnValue('STREAM' as unknown as never);
+    agentConfig.streamFn?.({ id: 'x', provider: 'anthropic' }, {}, undefined);
+    const passedOpts = vi.mocked(piAi.streamSimple).mock.calls[0]?.[2] as { cacheRetention?: string } | undefined;
+    expect(passedOpts?.cacheRetention).toBe('long');
+  });
+
+  it('does NOT install streamFn wrapper for short-wave defaults (no override)', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+
+    await spawnWaveAgent({
+      wave: 'assess',
+      model: 'claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Message.',
+      cwd: '/tmp/test',
+    });
+
+    const agentConfig = vi.mocked(Agent).mock.calls[0]?.[0] as { streamFn?: unknown };
+    // Default streamFn is pi-mono's streamSimple — adapter does NOT wrap when no retention override.
+    // We verify by checking the constructor option is the canonical streamSimple symbol.
+    const piAi = await import('@earendil-works/pi-ai');
+    expect(agentConfig.streamFn).toBe(piAi.streamSimple);
+  });
+
+  it('explicit cacheRetention overrides per-wave default', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+    const piAi = await import('@earendil-works/pi-ai');
+
+    await spawnWaveAgent({
+      wave: 'impl', // default is 'long'
+      model: 'claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Message.',
+      cwd: '/tmp/test',
+      cacheRetention: 'short',
+    });
+
+    const agentConfig = vi.mocked(Agent).mock.calls[0]?.[0] as {
+      streamFn?: (model: unknown, ctx: unknown, opts?: Record<string, unknown>) => unknown;
+    };
+    vi.mocked(piAi.streamSimple).mockReturnValue('STREAM' as unknown as never);
+    agentConfig.streamFn?.({ id: 'x', provider: 'anthropic' }, {}, undefined);
+    const passedOpts = vi.mocked(piAi.streamSimple).mock.calls[0]?.[2] as { cacheRetention?: string } | undefined;
+    expect(passedOpts?.cacheRetention).toBe('short');
+  });
+});
+
+describe('DEFAULT_WAVE_CACHE_RETENTION', () => {
+  it('sets long retention for multi-turn impl/test waves', async () => {
+    const { DEFAULT_WAVE_CACHE_RETENTION } = await import('./wave-executor.js');
+    expect(DEFAULT_WAVE_CACHE_RETENTION.impl).toBe('long');
+    expect(DEFAULT_WAVE_CACHE_RETENTION.test).toBe('long');
+  });
+
+  it('omits retention override for short-running reasoning waves', async () => {
+    const { DEFAULT_WAVE_CACHE_RETENTION } = await import('./wave-executor.js');
+    expect(DEFAULT_WAVE_CACHE_RETENTION.assess).toBeUndefined();
+    expect(DEFAULT_WAVE_CACHE_RETENTION.spec).toBeUndefined();
+    expect(DEFAULT_WAVE_CACHE_RETENTION.review).toBeUndefined();
+    expect(DEFAULT_WAVE_CACHE_RETENTION.brainstorm).toBeUndefined();
+    expect(DEFAULT_WAVE_CACHE_RETENTION.ship).toBeUndefined();
+  });
+});
+
+describe('buildWaveSessionId', () => {
+  it('produces a deterministic kova-prefixed session id from repo+issue+wave', async () => {
+    const { buildWaveSessionId } = await import('./wave-executor.js');
+    expect(buildWaveSessionId({ repo: 'orrinfrazier/kova', issue: 297, wave: 'impl' })).toBe(
+      'kova-orrinfrazier-kova-297-impl',
+    );
+  });
+
+  it('sanitizes special chars but preserves issue identity', async () => {
+    const { buildWaveSessionId } = await import('./wave-executor.js');
+    expect(buildWaveSessionId({ repo: 'My Org/Some.Repo!', issue: '42', wave: 'test' })).toBe(
+      'kova-my-org-some-repo-42-test',
+    );
+  });
+
+  it('is stable for identical inputs', async () => {
+    const { buildWaveSessionId } = await import('./wave-executor.js');
+    const a = buildWaveSessionId({ repo: 'foo/bar', issue: 1, wave: 'impl' });
+    const b = buildWaveSessionId({ repo: 'foo/bar', issue: 1, wave: 'impl' });
+    expect(a).toBe(b);
+  });
+});
+
+describe('spawnWaveAgent cache-read telemetry (issue #297)', () => {
+  let subscribeCb: ((event: unknown) => void) | undefined;
+  let cacheLogState = { messages: [] as unknown[], errorMessage: undefined as string | undefined };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env.ANTHROPIC_API_KEY = 'test-key';
+    subscribeCb = undefined;
+    cacheLogState = { messages: [], errorMessage: undefined };
+    mockSubscribe.mockImplementation((cb: (event: unknown) => void) => {
+      subscribeCb = cb;
+      return vi.fn();
+    });
+    // Wire the mock Agent state to our local store so collectState reads turns.
+    mockAgentState = cacheLogState as typeof mockAgentState;
+  });
+
+  afterEach(() => {
+    delete process.env.ANTHROPIC_API_KEY;
+  });
+
+  function simulateTurnsWithCache(turns: Array<{ input: number; cacheRead?: number; cost?: number }>): void {
+    mockPrompt.mockImplementation(async () => {
+      for (const t of turns) {
+        const msg = {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'done' }],
+          usage: { input: t.input, cacheRead: t.cacheRead ?? 0, cost: { total: t.cost ?? 0.001 } },
+        };
+        cacheLogState.messages.push(msg);
+        subscribeCb?.({ type: 'turn_end', message: msg });
+      }
+    });
+  }
+
+  it('logs cache-read share line at wave completion when cacheRead tokens were observed', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+    const { log } = await import('../utils/logger.js');
+    const infoSpy = vi.spyOn(log, 'info');
+
+    simulateTurnsWithCache([
+      { input: 100, cacheRead: 0 },
+      { input: 800, cacheRead: 600 },
+      { input: 1000, cacheRead: 900 },
+    ]);
+
+    await spawnWaveAgent({
+      wave: 'impl',
+      model: 'claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Message.',
+      cwd: '/tmp/test',
+    });
+
+    const calls = infoSpy.mock.calls.map((c) => String(c[0]));
+    const cacheLine = calls.find((c) => /\[impl\] Cache:/.test(c));
+    expect(cacheLine).toBeDefined();
+    // total cacheRead = 1500, total input = 1900 -> share = 79% (rounded)
+    expect(cacheLine).toMatch(/cacheRead=1500/);
+    expect(cacheLine).toMatch(/input=1900/);
+    expect(cacheLine).toMatch(/share=79%/);
+    infoSpy.mockRestore();
+  });
+
+  it('logs share=0% when no cache reads occurred', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+    const { log } = await import('../utils/logger.js');
+    const infoSpy = vi.spyOn(log, 'info');
+
+    simulateTurnsWithCache([{ input: 500, cacheRead: 0 }]);
+
+    await spawnWaveAgent({
+      wave: 'spec',
+      model: 'claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Message.',
+      cwd: '/tmp/test',
+    });
+
+    const calls = infoSpy.mock.calls.map((c) => String(c[0]));
+    const cacheLine = calls.find((c) => /\[spec\] Cache:/.test(c));
+    expect(cacheLine).toBeDefined();
+    expect(cacheLine).toMatch(/share=0%/);
+    infoSpy.mockRestore();
+  });
+});

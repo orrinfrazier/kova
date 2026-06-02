@@ -54,6 +54,7 @@ export {
   type AgentRuntimeConfig,
   type AgentRuntimeFactory,
   type AssistantTurn,
+  type CacheRetention,
   createPiAgentRuntime,
   defaultAgentRuntimeFactory,
   type ModelSpec as RuntimeModelSpec,
@@ -82,6 +83,8 @@ export {
   truncateContent,
 } from './tool-hooks.js';
 export {
+  buildWaveSessionId,
+  DEFAULT_WAVE_CACHE_RETENTION,
   executeWave,
   executeWaveWithRetry,
   type FallbackWaveHandoff,

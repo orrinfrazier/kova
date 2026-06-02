@@ -17,6 +17,7 @@ export type {
   AgentRuntimeConfig,
   AgentRuntimeFactory,
   AssistantTurn,
+  CacheRetention,
   ModelSpec,
   RuntimeAfterToolCallContext,
   RuntimeAfterToolCallHook,

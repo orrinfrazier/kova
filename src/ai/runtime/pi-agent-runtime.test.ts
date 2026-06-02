@@ -140,4 +140,71 @@ describe('defaultAgentRuntimeFactory (PiAgentRuntime stub)', () => {
     expect(rt.state.messages).toEqual([{ role: 'user', content: 'x' }]);
     expect(rt.state.errorMessage).toBe('boom');
   });
+
+  it('forwards sessionId to the underlying Agent constructor (issue #297)', async () => {
+    const { defaultAgentRuntimeFactory } = await import('./index.js');
+    const { Agent } = await import('@earendil-works/pi-agent-core');
+    defaultAgentRuntimeFactory.create({
+      systemPrompt: 's',
+      model: { id: 'm' } as never,
+      tools: [],
+      getApiKey: () => undefined,
+      sessionId: 'kova-foo-bar-impl',
+    });
+    const cfg = vi.mocked(Agent).mock.calls[0]?.[0] as { sessionId?: string };
+    expect(cfg.sessionId).toBe('kova-foo-bar-impl');
+  });
+
+  it('does not set sessionId on the Agent when none is provided (issue #297)', async () => {
+    const { defaultAgentRuntimeFactory } = await import('./index.js');
+    const { Agent } = await import('@earendil-works/pi-agent-core');
+    defaultAgentRuntimeFactory.create({
+      systemPrompt: 's',
+      model: { id: 'm' } as never,
+      tools: [],
+      getApiKey: () => undefined,
+    });
+    const cfg = vi.mocked(Agent).mock.calls[0]?.[0] as { sessionId?: string };
+    expect(cfg.sessionId).toBeUndefined();
+  });
+
+  it('wraps streamFn with cacheRetention when retention is set (issue #297)', async () => {
+    const { defaultAgentRuntimeFactory } = await import('./index.js');
+    const { Agent } = await import('@earendil-works/pi-agent-core');
+    const piAi = await import('@earendil-works/pi-ai');
+    defaultAgentRuntimeFactory.create({
+      systemPrompt: 's',
+      model: { id: 'm' } as never,
+      tools: [],
+      getApiKey: () => undefined,
+      cacheRetention: 'long',
+    });
+    const cfg = vi.mocked(Agent).mock.calls[0]?.[0] as {
+      streamFn?: (m: unknown, c: unknown, o?: Record<string, unknown>) => unknown;
+    };
+    expect(typeof cfg.streamFn).toBe('function');
+    vi.mocked(piAi.streamSimple).mockReturnValue('STREAM' as unknown as never);
+    cfg.streamFn?.({ id: 'm', provider: 'anthropic' }, {}, { foo: 'bar' });
+    const passed = vi.mocked(piAi.streamSimple).mock.calls[0]?.[2] as
+      | { cacheRetention?: string; foo?: string }
+      | undefined;
+    expect(passed?.cacheRetention).toBe('long');
+    expect(passed?.foo).toBe('bar');
+  });
+
+  it('uses pi-ai streamSimple directly when no cacheRetention override is set (issue #297)', async () => {
+    const { defaultAgentRuntimeFactory } = await import('./index.js');
+    const { Agent } = await import('@earendil-works/pi-agent-core');
+    const piAi = await import('@earendil-works/pi-ai');
+    defaultAgentRuntimeFactory.create({
+      systemPrompt: 's',
+      model: { id: 'm' } as never,
+      tools: [],
+      getApiKey: () => undefined,
+    });
+    const cfg = vi.mocked(Agent).mock.calls[0]?.[0] as { streamFn?: unknown };
+    // When no retention override is set, the canonical streamSimple is passed through
+    // (no wrapper allocation) so the agent-loop sees the same function reference.
+    expect(cfg.streamFn).toBe(piAi.streamSimple);
+  });
 });

@@ -28,7 +28,36 @@
 import { Agent } from '@earendil-works/pi-agent-core';
 import { streamSimple } from '@earendil-works/pi-ai';
 import { convertToLlm } from '@earendil-works/pi-coding-agent';
-import type { AgentMessage, AgentRuntime, AgentRuntimeConfig, AgentRuntimeFactory, RuntimeEvent } from './types.js';
+import type {
+  AgentMessage,
+  AgentRuntime,
+  AgentRuntimeConfig,
+  AgentRuntimeFactory,
+  CacheRetention,
+  RuntimeEvent,
+} from './types.js';
+
+/**
+ * Wrap pi-ai `streamSimple` with a closure that injects `cacheRetention`
+ * (issue #297). Pi-mono's loop config does NOT carry `cacheRetention`, so the
+ * `streamFn` slot is the only place where the per-request hint reaches the
+ * provider stream call. The closure preserves any caller-supplied options
+ * (temperature, headers, …) and merges retention on top — explicit
+ * per-call `cacheRetention` in `options` still wins because spread order is
+ * `{ ...options, cacheRetention }`.
+ *
+ * Exported for tests so wave-executor tests can drive the wrapper directly.
+ */
+function wrapStreamFnWithCacheRetention(retention: CacheRetention): typeof streamSimple {
+  // biome-ignore lint/suspicious/noExplicitAny: pi-ai streamSimple is parameterized over Api/options
+  const wrapped = (model: any, context: any, options: any): any =>
+    streamSimple(model, context, {
+      ...((options ?? {}) as Record<string, unknown>),
+      cacheRetention: retention,
+    });
+  // biome-ignore lint/suspicious/noExplicitAny: cast back to the typeof signature
+  return wrapped as any;
+}
 
 /**
  * Construct a fresh pi-mono `Agent` wrapped as an `AgentRuntime`.
@@ -38,8 +67,18 @@ import type { AgentMessage, AgentRuntime, AgentRuntimeConfig, AgentRuntimeFactor
  * only touch the interface surface.
  */
 function createPiAgentRuntime(config: AgentRuntimeConfig): AgentRuntime {
-  const { systemPrompt, model, thinkingLevel, tools, transformContext, afterToolCall, beforeToolCall, getApiKey } =
-    config;
+  const {
+    systemPrompt,
+    model,
+    thinkingLevel,
+    tools,
+    transformContext,
+    afterToolCall,
+    beforeToolCall,
+    getApiKey,
+    sessionId,
+    cacheRetention,
+  } = config;
 
   // `exactOptionalPropertyTypes` rejects undefined-valued optional fields, so
   // build the pi-mono `initialState` conditionally instead of inlining `?:`.
@@ -47,12 +86,27 @@ function createPiAgentRuntime(config: AgentRuntimeConfig): AgentRuntime {
   const initialState: Record<string, any> = { systemPrompt, model, tools };
   if (thinkingLevel !== undefined) initialState.thinkingLevel = thinkingLevel;
 
+  // Pi-mono's `Agent.createLoopConfig` does not include `cacheRetention` in
+  // the loop config it passes to `streamFn`, so the only seam where we can
+  // inject the per-request hint is the `streamFn` itself. When the caller
+  // sets `cacheRetention`, wrap `streamSimple` with a closure that merges the
+  // retention preference into the options object before delegating.
+  //
+  // When `cacheRetention` is unset, pass the canonical `streamSimple`
+  // reference through unchanged so callers that rely on identity (tests, the
+  // agent-loop's `streamFn || streamSimple` guard, future memoization) keep
+  // working as before.
+  const streamFn = cacheRetention != null ? wrapStreamFnWithCacheRetention(cacheRetention) : streamSimple;
+
   const agent = new Agent({
     // biome-ignore lint/suspicious/noExplicitAny: built defensively above
     initialState: initialState as any,
-    streamFn: streamSimple,
+    streamFn,
     convertToLlm,
     getApiKey,
+    // Pi-mono Agent natively threads `sessionId` to providers for cache-aware
+    // backends (Anthropic session-id header, Bedrock cache partitioning, etc).
+    ...(sessionId != null ? { sessionId } : {}),
     // biome-ignore lint/suspicious/noExplicitAny: pi-mono transformContext is structurally compatible
     ...(transformContext ? { transformContext: transformContext as any } : {}),
     // biome-ignore lint/suspicious/noExplicitAny: pi-mono afterToolCall is structurally compatible

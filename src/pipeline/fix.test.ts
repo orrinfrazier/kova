@@ -100,6 +100,10 @@ vi.mock('../ai/index.js', async (importOriginal) => {
     getModelString: actual.getModelString,
     getWaveTools: vi.fn().mockReturnValue([]),
     resolveThinkingLevel: actual.resolveThinkingLevel,
+    // Issue #297: pipeline now imports buildWaveSessionId to thread session-id
+    // affinity through every spawnWave call. Re-export the real impl so the
+    // identifier is defined when the pipeline reaches a call site.
+    buildWaveSessionId: actual.buildWaveSessionId,
   };
 });
 

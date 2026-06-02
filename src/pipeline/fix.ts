@@ -5,6 +5,7 @@
 import { z } from 'zod';
 import { $ } from 'zx';
 import {
+  buildWaveSessionId,
   type FixAIWaveName,
   getApiFallbackModelString,
   getMCPToolsForWave,
@@ -204,6 +205,12 @@ export function waveFallbackModel(
  * `dispatchSpawnWave` — the AI runs on `/workspace` inside the container, not on the
  * host filesystem. Without `sandbox`, the wave runs in-process on the host (the
  * worktree/none isolation modes).
+ *
+ * Issue #297: when `cacheContext` is provided, builds a deterministic
+ * `sessionId` of the form `kova-<repo>-<issue>-<wave>` and forwards it to the
+ * underlying spawn so providers that key prompt caching off session affinity
+ * can keep the cache hot across the multi-turn run. The per-wave cache
+ * retention default (long for impl/test) is applied inside spawnWaveAgent.
  */
 /** Cached per-run skills + the configured enabledWaves list. Loaded once at the
  *  top of `fix()` and threaded through `spawnWave` so each wave's loadPrompt
@@ -227,6 +234,7 @@ async function spawnWave<T>(
   abTestVariant?: string,
   sandbox?: SandboxContext | undefined,
   runSkills?: FixRunSkills | undefined,
+  cacheContext?: { repo: string; issue: string | number },
 ): Promise<{ handoff: WaveHandoff<T>; promptHash: string }> {
   const model = resolveWaveModel(config.model[wave]);
   const mcpTools =
@@ -255,6 +263,12 @@ async function spawnWave<T>(
   // Falls back to DEFAULT_WAVE_TIMEOUTS in spawnWaveAgent when undefined.
   const timeoutSeconds = config.rules.wave_timeout?.[wave];
   const timeoutMs = timeoutSeconds != null ? timeoutSeconds * 1000 : undefined;
+  // Issue #297: build a deterministic session id when caller supplied the
+  // cache context. Forwarded to dispatchSpawnWave → spawnWaveAgent →
+  // runtime, where pi-mono Agent threads it into the provider call as the
+  // cache-affinity key. Cache retention defaults (long for impl/test) are
+  // applied inside spawnWaveAgent and do not need to be set here.
+  const sessionId = cacheContext != null ? buildWaveSessionId({ ...cacheContext, wave }) : undefined;
   const handoff = await dispatchSpawnWave<T>(
     {
       wave,
@@ -268,6 +282,7 @@ async function spawnWave<T>(
       fallbackModel,
       ...(outputFormat != null && { outputFormat }),
       ...(timeoutMs != null && { timeoutMs }),
+      ...(sessionId != null ? { sessionId } : {}),
     },
     sandbox,
   );
@@ -352,6 +367,11 @@ export async function fix(options: FixOptions): Promise<FixResult> {
   const worktree = config.isolation === 'worktree' ? await createWorktree(repoPath, issue.number) : undefined;
   const workDir = worktree?.path ?? repoPath;
   const resolvedPromptsDir = resolvePromptsDir(repoPath, config.prompts_dir);
+  // Issue #297: cache-affinity context. Stable across all waves of this fix
+  // run so providers can keep the prompt cache hot per `<repo, issue, wave>`.
+  // Threaded into every `spawnWave` call below; `buildWaveSessionId` adds the
+  // wave suffix internally.
+  const cacheContext = { repo: repoName, issue: issue.number };
 
   // Issue #298: load SKILL.md skills once per run. Resolved against `repoPath`
   // (not the worktree) so `.kova/skills` is found in the user's repo root, and
@@ -571,6 +591,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         abTestVariants?.assess,
         sandboxContext,
         runSkills,
+        cacheContext,
       );
       await saveHandoff(workDir, handoff);
       promptHashes.assess = promptHash;
@@ -655,6 +676,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         abTestVariants?.spec,
         sandboxContext,
         runSkills,
+        cacheContext,
       );
       await saveHandoff(workDir, handoff);
       promptHashes.spec = promptHash;
@@ -744,6 +766,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           abTestVariants?.spec,
           sandboxContext,
           runSkills,
+          cacheContext,
         );
 
         await saveHandoff(workDir, retryHandoff);
@@ -844,6 +867,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           abTestVariants?.spec,
           sandboxContext,
           runSkills,
+          cacheContext,
         );
 
         await saveHandoff(workDir, emptyRetryHandoff);
@@ -882,6 +906,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         ...(testRunner != null && { testRunner }),
         ...(serialFallback && { maxConcurrent: 1 }),
         ...(sandboxContext != null && { sandbox: sandboxContext }),
+        cacheContext,
       });
 
       // Save handoffs for test and impl
@@ -934,6 +959,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           abTestVariants?.spec,
           sandboxContext,
           runSkills,
+          cacheContext,
         );
         await saveHandoff(workDir, specHandoff);
         promptHashes.spec = specPromptHash;
@@ -949,6 +975,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           projectContext,
           ...(testRunner != null && { testRunner }),
           ...(sandboxContext != null && { sandbox: sandboxContext }),
+          cacheContext,
         });
         state.waveResults.test = retryTI.testWaveResult;
         state.waveResults.impl = retryTI.implWaveResult;
@@ -994,6 +1021,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         abTestVariants?.quality,
         sandboxContext,
         runSkills,
+        cacheContext,
       );
       await saveHandoff(workDir, handoff);
       promptHashes.quality = promptHash;
@@ -1013,6 +1041,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         ...(testRunner != null && { testRunner }),
         projectContext,
         ...(sandboxContext != null && { sandbox: sandboxContext }),
+        cacheContext,
       });
       if (qualityRetry.retried) {
         state.waveResults.quality = qualityRetry.qualityWaveResult;
@@ -1051,6 +1080,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         ...(testRunner != null && { testRunner }),
         playwright: playwrightOption,
         ...(sandboxContext != null && { sandbox: sandboxContext }),
+        cacheContext,
       });
 
       // Save review handoff
@@ -1138,6 +1168,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
             projectContext,
             ...(testRunner != null && { testRunner }),
             ...(sandboxContext != null && { sandbox: sandboxContext }),
+            cacheContext,
           });
 
           state.waveResults.test = retryTI.testWaveResult;
