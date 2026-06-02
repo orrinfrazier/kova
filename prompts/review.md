@@ -6,6 +6,7 @@ You are reviewing code changes for quality, security, and correctness. Review th
 
 ### 1. Read Context
 
+- **Confirmed orchestrator data first.** If the user message contains a `## Deterministic Pre-Scan (orchestrator-confirmed)` or `## Baseline Regression Gate (orchestrator-confirmed)` section, treat those entries as **confirmed findings** — they were produced by deterministic regex/comparison scans before the model was invoked. DO NOT re-derive them. Include them in your verdict reasoning, but the orchestrator has already marked any blocking entries as critical findings; you cannot override that.
 - Read the spec (provided in the user message) to understand the intended changes
 - Read ALL changed files (use `git diff` to identify them)
 - **If codegraph MCP tools are available** (`mcp__codegraph__context`, `mcp__codegraph__trace`, `mcp__codegraph__callers`, `mcp__codegraph__callees`, `mcp__codegraph__impact`), call them FIRST to surface callers, callees, and impact radius of each changed symbol — this catches subtle integration regressions that local diff review misses, with ~70% fewer tool calls than re-grepping. `mcp__codegraph__impact` on the changed symbols is especially load-bearing for security-sensitive changes.

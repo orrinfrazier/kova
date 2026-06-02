@@ -1555,6 +1555,160 @@ describe('runReviewLoop', () => {
     expect(implCall?.[0].modelTier).toBe('medium');
     expect(qualityCall?.[0].modelTier).toBe('small');
   });
+
+  // --- Pre-scan + baseline gate tests (issue #257) ---
+
+  it('forces needs_fixes when pre-scan finds a hardcoded key in the diff, even if the model returns pass', async () => {
+    // Model returns PASS, but pre-scan has a blocking finding —
+    // orchestrator must override the verdict and surface the finding.
+    mockExecute.mockResolvedValueOnce(reviewExecResult('pass'));
+
+    const prescanRunner = vi.fn().mockResolvedValue({
+      findings: [
+        {
+          file: 'src/auth.ts',
+          line: 12,
+          type: 'GitHub PAT',
+          snippet: 'const token = "ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"',
+        },
+      ],
+      blocking: true,
+      summary: 'src/auth.ts:12 — GitHub PAT',
+    });
+
+    const result = await runReviewLoop({
+      issue: makeIssue(),
+      workDir: '/tmp/test',
+      repoConfig: makeConfig(),
+      waveResults: {},
+      testRunner: mockTestRunner,
+      fileWriter: mockFileWriter,
+      testCommand: 'npm test',
+      maxIterations: 1,
+      prescanRunner,
+    });
+
+    expect(prescanRunner).toHaveBeenCalled();
+    // Pre-scan finding must surface as a known issue because the orchestrator
+    // overrode verdict to needs_fixes (forcing blocking treatment).
+    expect(result.knownIssues.length).toBeGreaterThanOrEqual(1);
+    expect(result.knownIssues.some((f) => f.description.includes('GitHub PAT'))).toBe(true);
+    // The orchestrator-forced finding is critical severity.
+    expect(result.knownIssues.find((f) => f.description.includes('GitHub PAT'))?.severity).toBe('critical');
+  });
+
+  it('forces needs_fixes when baseline-gate detects a newly failing test, with regression count', async () => {
+    mockExecute.mockResolvedValueOnce(reviewExecResult('pass'));
+
+    const prescanRunner = vi.fn().mockResolvedValue({
+      findings: [],
+      blocking: false,
+      summary: 'No static findings.',
+    });
+
+    const result = await runReviewLoop({
+      issue: makeIssue(),
+      workDir: '/tmp/test',
+      repoConfig: makeConfig(),
+      waveResults: {},
+      testRunner: mockTestRunner,
+      fileWriter: mockFileWriter,
+      testCommand: 'npm test',
+      maxIterations: 1,
+      prescanRunner,
+      baselineFailures: ['suite > pre-existing'],
+      currentFailures: ['suite > pre-existing', 'suite > newly broken'],
+    });
+
+    expect(result.knownIssues.length).toBeGreaterThanOrEqual(1);
+    const regressionFinding = result.knownIssues.find((f) => /regression/i.test(f.description));
+    expect(regressionFinding).toBeDefined();
+    expect(regressionFinding?.description).toMatch(/1 newly failing/);
+    expect(regressionFinding?.severity).toBe('critical');
+  });
+
+  it('does NOT block when current failures match baseline (pre-existing failures only)', async () => {
+    mockExecute.mockResolvedValueOnce(reviewExecResult('pass'));
+
+    const prescanRunner = vi.fn().mockResolvedValue({
+      findings: [],
+      blocking: false,
+      summary: 'No static findings.',
+    });
+
+    const result = await runReviewLoop({
+      issue: makeIssue(),
+      workDir: '/tmp/test',
+      repoConfig: makeConfig(),
+      waveResults: {},
+      testRunner: mockTestRunner,
+      fileWriter: mockFileWriter,
+      testCommand: 'npm test',
+      maxIterations: 1,
+      prescanRunner,
+      baselineFailures: ['suite > pre-existing'],
+      currentFailures: ['suite > pre-existing'],
+    });
+
+    // No new regressions, no pre-scan hits → review passes cleanly.
+    expect(result.knownIssues).toHaveLength(0);
+  });
+
+  it('passes pre-scan findings and baseline regressions to the reviewer as data (in user message)', async () => {
+    // The reviewer agent must receive the pre-scan + baseline-gate output as
+    // confirmed data, not re-derive it.
+    mockExecute.mockResolvedValueOnce(reviewExecResult('needs_fixes', [mechanicalFixFinding]));
+    mockExecute.mockResolvedValueOnce(implWaveExecResult());
+    mockExecute.mockResolvedValueOnce(reviewExecResult('pass'));
+
+    const prescanRunner = vi.fn().mockResolvedValue({
+      findings: [{ file: 'src/auth.ts', line: 12, type: 'GitHub PAT', snippet: 'token = "ghp_..."' }],
+      blocking: true,
+      summary: 'src/auth.ts:12 — GitHub PAT',
+    });
+
+    vi.mocked(mockTestRunner).mockResolvedValue({ passed: true, output: 'ok', exitCode: 0 });
+
+    await runReviewLoop({
+      issue: makeIssue(),
+      workDir: '/tmp/test',
+      repoConfig: makeConfig(),
+      waveResults: {},
+      testRunner: mockTestRunner,
+      fileWriter: mockFileWriter,
+      testCommand: 'npm test',
+      prescanRunner,
+      baselineFailures: ['preexisting'],
+      currentFailures: ['preexisting', 'new-regression'],
+    });
+
+    const reviewCalls = mockExecute.mock.calls.filter((c) => c[0].wave === 'review');
+    expect(reviewCalls.length).toBeGreaterThan(0);
+    // The first review call's user message must contain the pre-scan summary
+    // AND baseline-regression summary — passed as data.
+    const firstReviewUserMessage = reviewCalls[0]?.[0].userMessage as string;
+    expect(firstReviewUserMessage).toMatch(/GitHub PAT/);
+    expect(firstReviewUserMessage).toMatch(/regression/i);
+    expect(firstReviewUserMessage).toMatch(/new-regression/);
+  });
+
+  it('runs without pre-scan or baseline-gate when not configured (backward compatible)', async () => {
+    // No prescanRunner / baseline provided → loop behaves exactly as before.
+    mockExecute.mockResolvedValueOnce(reviewExecResult('pass'));
+
+    const result = await runReviewLoop({
+      issue: makeIssue(),
+      workDir: '/tmp/test',
+      repoConfig: makeConfig(),
+      waveResults: {},
+      testRunner: mockTestRunner,
+      fileWriter: mockFileWriter,
+      testCommand: 'npm test',
+    });
+
+    expect(result.iterations).toBe(1);
+    expect(result.knownIssues).toHaveLength(0);
+  });
 });
 
 // --- detectThrashing tests ---
