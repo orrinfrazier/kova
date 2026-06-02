@@ -722,6 +722,34 @@ program
     }
   });
 
+program
+  .command('reflect')
+  .description('Cross-run telemetry analysis — surface patterns, stalls, gate failures, A/B leaders')
+  .option('--repo <name-or-path>', 'Repository name (from config) or path', '.')
+  .option('--since <duration>', 'Only include runs newer than N (e.g. 7d, 24h, 2w, or ISO date)')
+  .option('--json', 'Emit a single JSON object instead of a text report')
+  .action(async (opts: { repo?: string; since?: string; json?: boolean }) => {
+    const { analyzeReflect, formatReflectReport, parseSinceFlag } = await import('../services/reflect.js');
+
+    const kovaConfig = await tryLoadConfig(program.opts().config);
+    const { repoPath } = resolveRepo(opts.repo ?? '.', kovaConfig);
+
+    const since = parseSinceFlag(opts.since);
+    if (opts.since && !since) {
+      log.error(`Invalid --since value: ${opts.since} (expected Nd / Nh / Nw or ISO date)`);
+      process.exit(1);
+    }
+
+    const entries = await readHistory(repoPath);
+    const report = analyzeReflect(entries, since ? { since } : undefined);
+
+    if (opts.json) {
+      console.log(JSON.stringify(report));
+    } else {
+      console.log(formatReflectReport(report, { path: repoPath }));
+    }
+  });
+
 const prompts = program.command('prompts').description('Manage wave prompts');
 
 prompts
