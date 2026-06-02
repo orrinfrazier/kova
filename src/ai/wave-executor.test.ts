@@ -1812,6 +1812,255 @@ describe('spawnWaveAgentWithFallback', () => {
   });
 });
 
+describe('conversation repair turn on structured output failure', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env.ANTHROPIC_API_KEY = 'test-key';
+    mockSubscribe.mockImplementation(() => vi.fn());
+  });
+
+  afterEach(() => {
+    delete process.env.ANTHROPIC_API_KEY;
+  });
+
+  /** Helper: queue successive assistant responses across multiple prompt() invocations. */
+  function setSequentialResponses(responses: Array<{ text: string; cost?: number }>): void {
+    let callIndex = 0;
+    mockPrompt.mockImplementation(async () => {
+      const next = responses[callIndex] ?? responses[responses.length - 1];
+      callIndex++;
+      if (!next) return;
+      mockAgentState.messages.push({
+        role: 'assistant',
+        content: [{ type: 'text', text: next.text }],
+        usage: { cost: { total: next.cost ?? 0.005 } },
+      });
+    });
+    // Reset transcript at start of each test
+    mockAgentState = { messages: [], errorMessage: undefined };
+  }
+
+  it('repairs Zod validation failure on first repair turn (1 attempt)', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+    const Schema = z.object({ grade: z.string(), should_proceed: z.boolean() });
+
+    setSequentialResponses([
+      { text: '<json>{"bad": "data"}</json>' }, // initial: parses but fails Zod
+      { text: '<json>{"grade": "A", "should_proceed": true}</json>' }, // repair: passes Zod
+    ]);
+
+    const result = await spawnWaveAgent({
+      wave: 'assess',
+      model: 'claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Message.',
+      cwd: '/tmp/test',
+      outputFormat: {
+        type: 'json_schema',
+        schema: { type: 'object' },
+        zodSchema: Schema,
+      },
+    });
+
+    expect(result.confidence).toBe('high');
+    expect(result.artifact).toEqual({ grade: 'A', should_proceed: true });
+    expect(result.repair_attempts).toBe(1);
+    // prompt should have been called twice: initial + 1 repair turn
+    expect(mockPrompt).toHaveBeenCalledTimes(2);
+  });
+
+  it('repairs Zod validation failure on second repair turn (2 attempts)', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+    const Schema = z.object({ grade: z.string(), should_proceed: z.boolean() });
+
+    setSequentialResponses([
+      { text: '<json>{"bad": "data"}</json>' }, // initial: fails
+      { text: '<json>{"still": "wrong"}</json>' }, // repair 1: still fails
+      { text: '<json>{"grade": "B", "should_proceed": false}</json>' }, // repair 2: succeeds
+    ]);
+
+    const result = await spawnWaveAgent({
+      wave: 'assess',
+      model: 'claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Message.',
+      cwd: '/tmp/test',
+      outputFormat: {
+        type: 'json_schema',
+        schema: { type: 'object' },
+        zodSchema: Schema,
+      },
+    });
+
+    expect(result.confidence).toBe('high');
+    expect(result.artifact).toEqual({ grade: 'B', should_proceed: false });
+    expect(result.repair_attempts).toBe(2);
+    expect(mockPrompt).toHaveBeenCalledTimes(3); // initial + 2 repair
+  });
+
+  it('gives up after max 2 repair turns and degrades to low confidence', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+    const Schema = z.object({ grade: z.string(), should_proceed: z.boolean() });
+
+    setSequentialResponses([
+      { text: '<json>{"bad": "data"}</json>' }, // initial: fails
+      { text: '<json>{"still": "wrong"}</json>' }, // repair 1: fails
+      { text: '<json>{"nope": true}</json>' }, // repair 2: fails
+    ]);
+
+    const result = await spawnWaveAgent({
+      wave: 'assess',
+      model: 'claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Message.',
+      cwd: '/tmp/test',
+      outputFormat: {
+        type: 'json_schema',
+        schema: { type: 'object' },
+        zodSchema: Schema,
+      },
+    });
+
+    expect(result.confidence).toBe('low');
+    expect(result.repair_attempts).toBe(2);
+    expect(mockPrompt).toHaveBeenCalledTimes(3); // initial + 2 repair (max)
+    // Should not exceed 2 repair turns
+  });
+
+  it('repair turn message includes Zod error details and asks for corrected JSON only', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+    const Schema = z.object({ grade: z.string() });
+
+    setSequentialResponses([{ text: '<json>{"bad": "data"}</json>' }, { text: '<json>{"grade": "A"}</json>' }]);
+
+    await spawnWaveAgent({
+      wave: 'assess',
+      model: 'claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Message.',
+      cwd: '/tmp/test',
+      outputFormat: {
+        type: 'json_schema',
+        schema: { type: 'object' },
+        zodSchema: Schema,
+      },
+    });
+
+    // Inspect the second prompt() call — the repair turn
+    expect(mockPrompt).toHaveBeenCalledTimes(2);
+    const repairMsg = mockPrompt.mock.calls[1]?.[0] as string;
+    expect(repairMsg).toContain("didn't match");
+    expect(repairMsg.toLowerCase()).toContain('json');
+    // Should mention "only" / "no other text" instruction
+    expect(repairMsg.toLowerCase()).toMatch(/only.*corrected json|corrected json.*no other text|only.*json/);
+  });
+
+  it('does not trigger repair when outputFormat is absent', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+
+    setSequentialResponses([{ text: 'just some text, no json' }]);
+
+    const result = await spawnWaveAgent({
+      wave: 'test',
+      model: 'claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Message.',
+      cwd: '/tmp/test',
+    });
+
+    expect(result.confidence).toBe('medium');
+    expect(mockPrompt).toHaveBeenCalledTimes(1); // no repair turn
+    expect(result.repair_attempts ?? 0).toBe(0);
+  });
+
+  it('does not trigger repair when outputFormat has no zodSchema and JSON parses successfully', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+
+    setSequentialResponses([{ text: '<json>{"any": "json"}</json>' }]);
+
+    const result = await spawnWaveAgent({
+      wave: 'assess',
+      model: 'claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Message.',
+      cwd: '/tmp/test',
+      outputFormat: { type: 'json_schema', schema: { type: 'object' } },
+    });
+
+    expect(result.confidence).toBe('high');
+    expect(mockPrompt).toHaveBeenCalledTimes(1);
+    expect(result.repair_attempts ?? 0).toBe(0);
+  });
+
+  it('triggers repair when JSON cannot be parsed at all and zodSchema is provided', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+    const Schema = z.object({ grade: z.string() });
+
+    setSequentialResponses([
+      { text: 'I think the answer is just text, no JSON here at all.' },
+      { text: '<json>{"grade": "A"}</json>' },
+    ]);
+
+    const result = await spawnWaveAgent({
+      wave: 'assess',
+      model: 'claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Message.',
+      cwd: '/tmp/test',
+      outputFormat: {
+        type: 'json_schema',
+        schema: { type: 'object' },
+        zodSchema: Schema,
+      },
+    });
+
+    expect(result.confidence).toBe('high');
+    expect(result.artifact).toEqual({ grade: 'A' });
+    expect(result.repair_attempts).toBe(1);
+    expect(mockPrompt).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not trigger repair when initial response already passes Zod', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+    const Schema = z.object({ grade: z.string() });
+
+    setSequentialResponses([{ text: '<json>{"grade": "A"}</json>' }]);
+
+    const result = await spawnWaveAgent({
+      wave: 'assess',
+      model: 'claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Message.',
+      cwd: '/tmp/test',
+      outputFormat: {
+        type: 'json_schema',
+        schema: { type: 'object' },
+        zodSchema: Schema,
+      },
+    });
+
+    expect(result.confidence).toBe('high');
+    expect(mockPrompt).toHaveBeenCalledTimes(1);
+    expect(result.repair_attempts ?? 0).toBe(0);
+  });
+});
+
 describe('isAssistantMessage', () => {
   it('returns true for a valid assistant message', async () => {
     const { isAssistantMessage } = await import('./wave-executor.js');
