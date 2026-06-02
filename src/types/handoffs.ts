@@ -47,6 +47,44 @@ export const StructuredOutputMetricsSchema = z.object({
 });
 export type StructuredOutputMetrics = z.infer<typeof StructuredOutputMetricsSchema>;
 
+/**
+ * INVARIANT: `WaveHandoffSchema` carries TYPED ARTIFACT FIELDS ONLY — never
+ * Agent state.
+ *
+ * This schema is the wire contract between waves. It MUST NOT grow a
+ * `messages`, `state`, `agent`, `conversation`, or any equivalently-shaped
+ * field that holds raw pi-mono `Agent` data (`AssistantMessage[]`,
+ * `RuntimeEvent[]`, tool-call traces, captured closures over an `Agent`
+ * instance, …). Adding one would leak prior-wave Agent state into the next
+ * wave and break the "fresh per wave" guarantee enforced by `spawnWaveAgent`
+ * in `src/ai/wave-executor.ts`.
+ *
+ * What IS allowed: typed business-domain fields on the wave-specific artifact
+ * payload that flows through `artifact: z.unknown()` — e.g. the `spec` wave
+ * may emit `{ pieces: [...], dependency_order: [...] }`, the `assess` wave may
+ * emit `{ grade, surface_area, risk_summary }`. Those are downstream-typed
+ * objects, not Agent state.
+ *
+ * Why the distinction matters: every wave runs in a brand-new `Agent`. The
+ * next wave's prompt is built from `artifact` plus a formatted context string
+ * (see `buildWaveContext` in `src/pipeline/context.ts`) — never from prior
+ * conversation turns. If `messages` slipped in here, `loadHandoff` /
+ * `loadAllHandoffs` would silently propagate them and a downstream wave
+ * could end up re-reading another wave's reasoning trace.
+ *
+ * Violation shapes to reject in review:
+ *   - Any new field whose Zod type is `z.array(AssistantMessageSchema)` or
+ *     equivalent.
+ *   - Any new field named `messages`, `state`, `agent`, `conversation`,
+ *     `transcript`, or `history` — regardless of declared type.
+ *   - Any new field whose runtime value transitively holds a reference to
+ *     the `Agent` instance from `spawnWaveAgent`.
+ *
+ * If a downstream wave genuinely needs more information from an upstream
+ * wave, EXTEND THAT WAVE'S TYPED ARTIFACT SCHEMA (the `T` in
+ * `WaveHandoff<T>`). Never widen this base schema to smuggle conversational
+ * state across the boundary.
+ */
 export const WaveHandoffSchema = z.object({
   wave: WaveNameSchema,
   timestamp: z.string().datetime(),
