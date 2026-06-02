@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Issue } from '../types/index.js';
-import { parseDependencies, prioritizeIssues, scoreIssue } from './prioritize.js';
+import { parseCrossRepoDependencies, parseDependencies, prioritizeIssues, scoreIssue } from './prioritize.js';
 
 function makeIssue(overrides: Partial<Issue> & { number: number }): Issue {
   return {
@@ -39,6 +39,74 @@ describe('parseDependencies', () => {
 
   it('deduplicates references', () => {
     expect(parseDependencies('blocked by #3, depends on #3')).toEqual([3]);
+  });
+
+  // Issue #287 — parseDependencies must remain back-compat: bare #N still works,
+  // and it should ALSO recognize cross-repo forms (`owner/repo#N`, `repo#N`) as
+  // dependencies (collapsed to bare numbers — the cross-repo edges live in the
+  // separate parseCrossRepoDependencies helper).
+  it('recognizes owner/repo#N as a dependency (number captured)', () => {
+    expect(parseDependencies('blocked by orrinfrazier/kova#42')).toEqual([42]);
+  });
+
+  it('recognizes repo#N (no owner) as a dependency (number captured)', () => {
+    expect(parseDependencies('depends on onexos#7')).toEqual([7]);
+  });
+
+  it('mixes bare and cross-repo dependency forms', () => {
+    expect(parseDependencies('blocked by #1, depends on owner/repo#2, depends on repo#3')).toEqual([1, 2, 3]);
+  });
+});
+
+// Issue #287 — cross-repo dependency awareness for multi-repo auto runs.
+describe('parseCrossRepoDependencies', () => {
+  it('returns empty list when no deps present', () => {
+    expect(parseCrossRepoDependencies('no deps here')).toEqual([]);
+  });
+
+  it('parses owner/repo#N form', () => {
+    expect(parseCrossRepoDependencies('blocked by orrinfrazier/kova#42')).toEqual([
+      { repo: 'orrinfrazier/kova', number: 42 },
+    ]);
+  });
+
+  it('parses repo#N form using defaultRepo owner when defaultRepo is owner/repo', () => {
+    expect(parseCrossRepoDependencies('blocked by other#7', 'orrinfrazier/kova')).toEqual([
+      { repo: 'orrinfrazier/other', number: 7 },
+    ]);
+  });
+
+  it('parses bare #N as defaultRepo dependency', () => {
+    expect(parseCrossRepoDependencies('blocked by #5', 'owner/me')).toEqual([{ repo: 'owner/me', number: 5 }]);
+  });
+
+  it('omits bare #N when no defaultRepo provided (back-compat: bare deps are not cross-repo)', () => {
+    // Bare #N is intra-repo. Without a defaultRepo context, we can't attribute
+    // it to any repo slug. parseDependencies still captures the number.
+    expect(parseCrossRepoDependencies('blocked by #5')).toEqual([]);
+  });
+
+  it('parses "depends on" syntax case-insensitively', () => {
+    expect(parseCrossRepoDependencies('Depends On owner/r#3')).toEqual([{ repo: 'owner/r', number: 3 }]);
+  });
+
+  it('deduplicates same cross-repo reference', () => {
+    expect(parseCrossRepoDependencies('blocked by a/b#1 and depends on a/b#1')).toEqual([{ repo: 'a/b', number: 1 }]);
+  });
+
+  it('extracts multiple distinct cross-repo references', () => {
+    expect(parseCrossRepoDependencies('blocked by a/b#1, depends on c/d#2')).toEqual([
+      { repo: 'a/b', number: 1 },
+      { repo: 'c/d', number: 2 },
+    ]);
+  });
+
+  it('mixes cross-repo and bare forms with defaultRepo', () => {
+    const got = parseCrossRepoDependencies('blocked by a/b#1, depends on #2', 'owner/me');
+    expect(got).toEqual([
+      { repo: 'a/b', number: 1 },
+      { repo: 'owner/me', number: 2 },
+    ]);
   });
 });
 

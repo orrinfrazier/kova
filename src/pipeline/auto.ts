@@ -1,6 +1,8 @@
+import { fetchIssues } from '../services/github.js';
 import { collectChangedFilesFromPRs, reindexFiles } from '../services/reindex.js';
-import type { KovaConfig, RepoConfig } from '../types/index.js';
+import type { Issue, KovaConfig, RepoConfig } from '../types/index.js';
 import { log } from '../utils/logger.js';
+import { buildCrossRepoTiers } from './cross-repo-scheduler.js';
 import { fixLoop, type LoopResult } from './loop.js';
 import { buildMultiRepoRunReport, printMultiRepoRunReport } from './run-report.js';
 import { createSharedBudget, type SharedBudgetTracker } from './shared-budget.js';
@@ -144,7 +146,18 @@ export interface MultiRepoParallelResult {
   };
 }
 
-/** Run auto mode across all repos concurrently. Each repo gets its own sequential fix queue. */
+/**
+ * Run auto mode across all repos. Repos with no cross-repo blockers run
+ * concurrently; repos blocked by another configured repo defer until the
+ * blocker repo completes (issue #287).
+ *
+ * Each repo still gets its own sequential fix queue inside `runAuto` /
+ * `fixLoop`. Cross-repo gating is layered on top via repo tiers built from
+ * `parseCrossRepoDependencies` over pre-fetched issue bodies. When no
+ * `slug` is configured on any repo (or no cross-repo edges resolve), the
+ * tier graph collapses to a single tier and behavior is identical to the
+ * pre-#287 fully-parallel implementation.
+ */
 export async function runAutoMultiRepoParallel(options: MultiRepoParallelOptions): Promise<MultiRepoParallelResult> {
   const { config, filter, milestone, max, force, budgetUsd } = options;
   const repoEntries = Object.entries(config.repos);
@@ -156,22 +169,81 @@ export async function runAutoMultiRepoParallel(options: MultiRepoParallelOptions
     log.info(`[auto] Shared budget cap: $${budgetTracker.limitUsd.toFixed(2)}`);
   }
 
-  const settled = await Promise.allSettled(
-    repoEntries.map(async ([name, repoConfig]) => {
-      log.info(`[auto] Starting repo: ${name} (${repoConfig.path})`);
-      const result = await runAuto({
-        repoPath: repoConfig.path,
-        repoName: name,
-        config: repoConfig,
-        filter,
-        ...(milestone !== undefined ? { milestone } : {}),
-        max,
-        force,
-        budgetTracker,
-      });
-      return { repoName: name, loopResult: result.loopResult };
-    }),
-  );
+  // ---- Cross-repo dependency awareness (issue #287) ----
+  //
+  // Pre-fetch issues for slug-bearing repos so we can build the cross-repo
+  // dependency graph BEFORE dispatching any runAuto. Repos without a slug
+  // can't be targeted by `owner/name#N` references, so we skip the fetch
+  // for them and treat them as having no incoming cross-repo edges.
+  //
+  // Pre-fetch failures degrade gracefully — the repo just shows up with no
+  // pre-fetched issues, which means no cross-repo edges resolve through it.
+  // The actual fixLoop call still runs and does its own fetch.
+  const slugByName = new Map<string, string>();
+  for (const [name, repoConfig] of repoEntries) {
+    if (repoConfig.slug !== undefined) slugByName.set(name, repoConfig.slug);
+  }
+
+  const reposByName = new Map<string, Issue[]>();
+  if (slugByName.size > 0) {
+    await Promise.allSettled(
+      repoEntries.map(async ([name, repoConfig]) => {
+        try {
+          const issues = await fetchIssues(repoConfig.path, filter ?? repoConfig.auto?.filter);
+          reposByName.set(name, issues);
+        } catch (err) {
+          log.warn(
+            `[auto] Pre-fetch for cross-repo dep graph failed for ${name}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+          reposByName.set(name, []);
+        }
+      }),
+    );
+  } else {
+    for (const [name] of repoEntries) reposByName.set(name, []);
+  }
+
+  const repoTiers = buildCrossRepoTiers({ reposByName, slugByName });
+  if (repoTiers.length > 1) {
+    log.info(`[auto] Cross-repo dep graph: ${repoTiers.length} tier(s) of repos`);
+  }
+
+  const settled: PromiseSettledResult<ParallelRepoResult>[] = [];
+  const settledByName = new Map<string, PromiseSettledResult<ParallelRepoResult>>();
+
+  const dispatchRepo = async (name: string): Promise<ParallelRepoResult> => {
+    const repoConfig = config.repos[name];
+    if (!repoConfig) throw new Error(`repo ${name} not in config`);
+    log.info(`[auto] Starting repo: ${name} (${repoConfig.path})`);
+    const result = await runAuto({
+      repoPath: repoConfig.path,
+      repoName: name,
+      config: repoConfig,
+      filter,
+      ...(milestone !== undefined ? { milestone } : {}),
+      max,
+      force,
+      budgetTracker,
+    });
+    return { repoName: name, loopResult: result.loopResult };
+  };
+
+  for (const tier of repoTiers) {
+    const tierSettled = await Promise.allSettled(tier.map((entry) => dispatchRepo(entry.repoName)));
+    for (let i = 0; i < tier.length; i++) {
+      const entry = tier[i];
+      const result = tierSettled[i];
+      if (entry === undefined || result === undefined) continue;
+      settledByName.set(entry.repoName, result);
+    }
+  }
+
+  // Preserve original config order in the results array for stable downstream
+  // reporting (run-report, aggregation, regression tests).
+  for (const [name] of repoEntries) {
+    const result = settledByName.get(name);
+    if (result !== undefined) settled.push(result);
+  }
 
   const repoResults: ParallelRepoResult[] = settled.map((s, i) => {
     const repoName = repoEntries[i]?.[0] ?? 'unknown';
