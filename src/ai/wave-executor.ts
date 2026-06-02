@@ -266,6 +266,42 @@ export interface SpawnWaveAgentConfig {
   onToolCall?: (toolName: string | undefined) => void;
 }
 
+/**
+ * INVARIANT: inter-wave Agent isolation ("fresh per wave" guarantee).
+ *
+ * `spawnWaveAgent` MUST return only `WaveHandoff<T>` — a structured `artifact`
+ * (validated by Zod) plus run-level metadata (cost, turns, confidence,
+ * telemetry counters). The pi-mono `Agent` instance created inside this
+ * function MUST NOT escape its scope: no field on the returned handoff, and
+ * no entry in any handoff-derived context (see `buildWaveContext` in
+ * `src/pipeline/context.ts`), may hold a reference to the `Agent`, its
+ * `messages` array, its tool-call history, or any object that transitively
+ * retains them.
+ *
+ * Why this matters: every wave (assess → spec → test → impl → quality →
+ * review) runs in a fresh `Agent` instantiated here. The next wave's
+ * `Agent` is built from the typed `artifact` of the prior wave plus a
+ * formatted context string — never from prior conversation turns. That
+ * structural break is what gives kova its "fresh per wave" property:
+ * reasoning context, tool memoization, and accidental coupling between
+ * waves cannot leak across the boundary.
+ *
+ * Violation shapes to reject in review:
+ *   1. Changing the return type to anything richer than `WaveHandoff<T>`
+ *      (e.g. `{ handoff, agent }`, `{ handoff, messages }`).
+ *   2. Mutating a shared module-level variable from within this function
+ *      that a later wave reads.
+ *   3. Adding a field to `WaveHandoffSchema` (see `src/types/handoffs.ts`)
+ *      that holds Agent state — `messages`, `state`, `agent`, raw
+ *      `AssistantMessage[]`, or any structurally equivalent payload.
+ *   4. Returning the `Agent` via a side channel (event bus payload,
+ *      callback closure capture, global registry).
+ *
+ * If you find yourself needing prior-wave conversation context to make a
+ * wave work, that is a signal the artifact schema for the prior wave is
+ * under-specified — extend the typed artifact, do not punch a hole in
+ * the isolation boundary.
+ */
 export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig): Promise<WaveHandoff<T>> {
   const {
     wave,
@@ -1038,6 +1074,22 @@ export function buildRepairTurnMessage(
  * Aggressive context trimmer for when context usage exceeds 80%.
  * Keeps the first user message and the last 3 tool-result/assistant turn pairs,
  * dropping intermediate messages to free context space.
+ *
+ * SHAPE ASSUMPTION (pi-ai runtime): identical to the caveat on
+ * `src/ai/context-transform.ts` — this trimmer treats `AgentMessage[]` as a
+ * flat list where tool results are top-level messages (pi-ai's denormalized
+ * `ToolResultMessage`). The slice-by-index approach is safe under that shape
+ * because each tool result occupies one message slot.
+ *
+ * Under Anthropic's native Messages API shape, tool results are content
+ * blocks inside a user message and one user message can carry multiple tool
+ * results plus other blocks. Porting this trimmer to the native shape
+ * requires trimming at the content-block level (and joining `tool_use_id`
+ * back to the prior assistant `tool_use` block if name-based filtering is
+ * ever added here), not at the message level.
+ *
+ * Planned cleanup: pi-mono's `compact()` / `shouldCompact()` (issue #296)
+ * will replace this trimmer and the sibling hook in `context-transform.ts`.
  */
 async function aggressiveTrimContext(messages: AgentMessage[]): Promise<AgentMessage[]> {
   // Keep at most the first message + last 6 messages (≈ 3 turn pairs)

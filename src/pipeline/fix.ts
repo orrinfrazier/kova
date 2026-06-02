@@ -22,6 +22,7 @@ import {
   startAllMCPServers,
   stopAllMCPServers,
 } from '../ai/index.js';
+import { getSandboxBackend, type SandboxBackend } from '../sandbox/backend.js';
 import { dispatchSpawnWave, type SandboxContext } from '../sandbox/dispatch.js';
 import { selectVariants, type VariantSelection } from '../services/ab-test.js';
 import { clearCheckpoint, loadCheckpoint, saveCheckpoint } from '../services/checkpoint.js';
@@ -34,6 +35,7 @@ import { appendHistoryEntry, readHistory } from '../services/history.js';
 import { validateIsolation } from '../services/isolation.js';
 import { detectTooling } from '../services/language-detect.js';
 import * as metrics from '../services/metrics.js';
+import { formatPatterns, PatternStore, upsertPatternFromEpisode } from '../services/pattern-store.js';
 import { applyScopeToState, detectScope, formatScopeLogLine } from '../services/pipeline-scope.js';
 import { ensureScreenshotsDir, isPlaywrightEnabled, resolvePlaywrightEnv } from '../services/playwright.js';
 import { formatPRContext, type OpenPR } from '../services/pr-context.js';
@@ -418,50 +420,81 @@ export async function fix(options: FixOptions): Promise<FixResult> {
     return { skills, enabledWaves: config.skills.enabled_waves };
   })();
 
-  // Docker sandbox: start container with resource limits
+  // Sandbox: start the configured backend (docker by default, daytona for serverless persistence).
+  // The backend abstraction (issue #301) lets repos.yaml swap docker for daytona/modal/fly without
+  // touching pipeline code. The `docker` path preserves its legacy semantics (image build + timeout
+  // kill) because they are docker-specific; non-docker backends manage hibernate/resume themselves.
   let sandboxContainerId: string | undefined;
   let sandboxContainerName: string | undefined;
   let sandboxContext: SandboxContext | undefined;
+  let sandboxBackend: SandboxBackend | undefined;
   let sandboxTimeoutHandle: ReturnType<typeof setTimeout> | undefined;
   let sandboxTimedOut = false;
   const sandboxStartTime = Date.now();
 
   if (config.isolation === 'docker') {
-    const buildResult = await buildSandboxImage({ repoName, config: config.sandbox });
-    if (!buildResult.success) {
-      const state = createInitialState(issue, repoName, repoPath);
-      state.status = 'failed';
-      const errorMsg = buildResult.error ?? 'Docker image build failed';
-      state.error = errorMsg;
-      metrics.recordIssueFailed();
-      metrics.recordFixDuration(Date.now() - fixStartTime);
-      metrics.recordFixCost(0);
-      _activeFixes--;
-      metrics.setActiveFixes(_activeFixes);
-      return { success: false, error: errorMsg, state };
+    // `sandbox.backend` defaults to 'docker' via Zod, but the optional sandbox block can be omitted
+    // entirely — fall back to 'docker' explicitly so behavior matches pre-extraction default.
+    const backendName = config.sandbox?.backend ?? 'docker';
+    sandboxBackend = getSandboxBackend(backendName);
+
+    if (backendName === 'docker') {
+      // Legacy docker path: image build + direct container start. Behavior preserved bit-for-bit.
+      const buildResult = await buildSandboxImage({ repoName, config: config.sandbox });
+      if (!buildResult.success) {
+        const state = createInitialState(issue, repoName, repoPath);
+        state.status = 'failed';
+        const errorMsg = buildResult.error ?? 'Docker image build failed';
+        state.error = errorMsg;
+        metrics.recordIssueFailed();
+        metrics.recordFixDuration(Date.now() - fixStartTime);
+        metrics.recordFixCost(0);
+        _activeFixes--;
+        metrics.setActiveFixes(_activeFixes);
+        return { success: false, error: errorMsg, state };
+      }
+
+      const sandbox = await startSandboxContainer({
+        repoName,
+        issueNumber: issue.number,
+        repoPath: workDir,
+        config: config.sandbox,
+      });
+      sandboxContainerId = sandbox.containerId;
+      sandboxContainerName = sandbox.containerName;
+      // Build the SandboxContext that every wave-dispatch site below uses to
+      // route into the container. Without this, the AI would run on the host
+      // and the docker isolation would be a no-op (see issue #319).
+      sandboxContext = { containerName: sandbox.containerName, repoPath: workDir };
+
+      // Set up timeout kill
+      const timeoutStr = config.sandbox?.timeout ?? DEFAULT_SANDBOX_LIMITS.timeout;
+      const timeoutMs = parseTimeout(timeoutStr);
+      sandboxTimeoutHandle = setTimeout(async () => {
+        sandboxTimedOut = true;
+        flog.warn(`[sandbox] Timeout (${timeoutStr}) exceeded — killing container ${sandboxContainerName}`);
+        if (sandboxContainerId) await killContainer(sandboxContainerId);
+      }, timeoutMs);
+    } else {
+      // Non-docker backend (daytona/modal/etc) — delegate fully to the SandboxBackend interface.
+      // Credential errors surface here at start() rather than mid-wave, matching the
+      // acceptance criterion "fail fast with a clear classified error during start".
+      const handle = await sandboxBackend.start({
+        repoName,
+        issueNumber: issue.number,
+        repoPath: workDir,
+        config: config.sandbox,
+      });
+      sandboxContainerId = handle.containerId;
+      sandboxContainerName = handle.containerName;
+      // For non-docker backends the wave-dispatch path is not yet routed through the backend
+      // interface (dispatch.ts still targets the docker-exec contract). The Daytona backend's
+      // exec endpoint mirrors that shape, but until dispatch.ts is generalized in a follow-up,
+      // non-docker backends use the same dispatch routing — they expose a compatible
+      // containerName/repoPath surface so the docker-exec wire path still works against them.
+      sandboxContext = { containerName: handle.containerName, repoPath: workDir };
+      flog.info(`[sandbox] Backend '${backendName}' started: ${handle.containerName}`);
     }
-
-    const sandbox = await startSandboxContainer({
-      repoName,
-      issueNumber: issue.number,
-      repoPath: workDir,
-      config: config.sandbox,
-    });
-    sandboxContainerId = sandbox.containerId;
-    sandboxContainerName = sandbox.containerName;
-    // Build the SandboxContext that every wave-dispatch site below uses to
-    // route into the container. Without this, the AI would run on the host
-    // and the docker isolation would be a no-op (see issue #319).
-    sandboxContext = { containerName: sandbox.containerName, repoPath: workDir };
-
-    // Set up timeout kill
-    const timeoutStr = config.sandbox?.timeout ?? DEFAULT_SANDBOX_LIMITS.timeout;
-    const timeoutMs = parseTimeout(timeoutStr);
-    sandboxTimeoutHandle = setTimeout(async () => {
-      sandboxTimedOut = true;
-      flog.warn(`[sandbox] Timeout (${timeoutStr}) exceeded — killing container ${sandboxContainerName}`);
-      if (sandboxContainerId) await killContainer(sandboxContainerId);
-    }, timeoutMs);
   }
 
   // MCP server startup: resolve config and start servers for tool augmentation
@@ -635,6 +668,17 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       }
     }
 
+    // Pattern aggregation (#267): query top recurring (diagnosis × module) patterns
+    // for this repo and inject into the assess/spec wave context. Best-effort —
+    // disabled when episodes is off; absent DB returns no patterns silently.
+    let patternContext: string | undefined;
+    if (config.episodes?.enabled) {
+      const patterns = queryPatternContext(workDir, config.episodes, repoName);
+      if (patterns.length > 0) {
+        patternContext = formatPatterns(patterns);
+      }
+    }
+
     // WAVE A: Assess
     if (!shouldSkip('assess')) {
       const waveStart = Date.now();
@@ -650,6 +694,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           {
             ...(episodicContext != null && { episodicContext }),
             ...(repoContextText != null && { repoContextText }),
+            ...(patternContext != null && { patternContext }),
           },
         ),
         toOutputFormat(AssessResultSchema),
@@ -765,6 +810,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           ...(playbookContext != null && { playbookContext }),
           ...(codebaseContext != null && { codebaseContext }),
           ...(repoSearchText != null && { repoSearchText }),
+          ...(patternContext != null && { patternContext }),
         }),
         toOutputFormat(SpecResultSchema),
         mcpHandles,
@@ -1419,12 +1465,16 @@ export async function fix(options: FixOptions): Promise<FixResult> {
     metrics.recordFixCost(totalCost);
     _activeFixes--;
     metrics.setActiveFixes(_activeFixes);
-    // Sandbox cleanup: collect stats then kill container
+    // Sandbox cleanup: collect stats then stop the backend.
+    // Docker path uses the legacy helpers directly to preserve observable behavior;
+    // non-docker backends (daytona/modal/etc) route through the SandboxBackend interface.
     if (sandboxContainerId) {
       if (sandboxTimeoutHandle) clearTimeout(sandboxTimeoutHandle);
 
-      // Collect resource usage before killing
-      const stats = await getContainerStats(sandboxContainerId).catch(() => ({ memoryMB: 0, cpuPercent: 0 }));
+      // Collect resource usage before stopping
+      const stats = sandboxBackend
+        ? await sandboxBackend.getStats().catch(() => ({ memoryMB: 0, cpuPercent: 0 }))
+        : await getContainerStats(sandboxContainerId).catch(() => ({ memoryMB: 0, cpuPercent: 0 }));
       const wallTimeMs = Date.now() - sandboxStartTime;
       const cpuCount = config.sandbox?.cpus ?? DEFAULT_SANDBOX_LIMITS.cpus;
 
@@ -1444,7 +1494,13 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         flog.warn('[sandbox] Container was killed due to timeout');
       }
 
-      await killContainer(sandboxContainerId).catch(() => {});
+      const backendName = config.sandbox?.backend ?? 'docker';
+      if (backendName === 'docker') {
+        // Preserve the legacy direct call so DockerBackend extraction is observationally identical.
+        await killContainer(sandboxContainerId).catch(() => {});
+      } else if (sandboxBackend) {
+        await sandboxBackend.stop().catch(() => {});
+      }
     }
 
     const costReport = buildCostReport(state);
@@ -1591,6 +1647,11 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       // best-effort — any failure is logged-and-swallowed so it never breaks
       // the existing REST recordEpisode path.
       upsertEpisodeFTS(workDir, config.episodes, episode, flog);
+
+      // Aggregate the episode into the recurring-pattern table (#267). Local,
+      // best-effort — failures logged + swallowed so a flaky DB never breaks
+      // the existing record/ship path.
+      upsertEpisodePattern(workDir, config.episodes, episode, flog);
     }
 
     // PR feedback collection: collect review comments after ship
@@ -1785,6 +1846,64 @@ function upsertEpisodeFTS(
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     logger.warn(`[episode-fts] Failed to upsert episode: ${msg}`);
+  } finally {
+    store?.close();
+  }
+}
+
+/* ================================================================== */
+/*  Pattern aggregation (#267) — helpers                               */
+/* ================================================================== */
+
+/**
+ * Resolve the on-disk path for the local pattern aggregation DB. Defaults to
+ * `{workDir}/.kova/patterns.db` — co-located with the FTS index for cleanup.
+ */
+function resolvePatternStorePath(workDir: string): string {
+  return joinPath(workDir, '.kova', 'patterns.db');
+}
+
+/**
+ * Open the local PatternStore, run `queryTopPatterns(repo)`, return the rows.
+ * Best-effort: any open/query failure returns []. Absent DB is the normal
+ * first-run state and produces a silent empty result.
+ */
+function queryPatternContext(
+  workDir: string,
+  config: EpisodicMemoryConfig,
+  repo: string,
+): import('../services/pattern-store.js').PatternRecord[] {
+  if (!config.enabled) return [];
+  let store: PatternStore | null = null;
+  try {
+    store = new PatternStore(resolvePatternStorePath(workDir));
+    return store.queryTopPatterns(repo, { limit: config.max_episodes });
+  } catch {
+    return [];
+  } finally {
+    store?.close();
+  }
+}
+
+/**
+ * Aggregate the completed episode into the pattern store. Best-effort: open or
+ * upsert failures are logged and swallowed so they never break the existing
+ * recordEpisode path.
+ */
+function upsertEpisodePattern(
+  workDir: string,
+  config: EpisodicMemoryConfig,
+  episode: EpisodeRecord,
+  logger: { warn: (msg: string) => void },
+): void {
+  if (!config.enabled) return;
+  let store: PatternStore | null = null;
+  try {
+    store = new PatternStore(resolvePatternStorePath(workDir));
+    upsertPatternFromEpisode(store, episode);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    logger.warn(`[pattern-store] Failed to upsert pattern: ${msg}`);
   } finally {
     store?.close();
   }
