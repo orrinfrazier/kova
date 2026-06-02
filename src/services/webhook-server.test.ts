@@ -723,3 +723,66 @@ describe('GET /metrics — default (no metricsEnabled option)', () => {
     expect(res.status).toBe(404);
   });
 });
+
+/* ------------------------------------------------------------------ */
+/*  GET /events — SSE stream (kova#292)                                */
+/* ------------------------------------------------------------------ */
+
+describe('GET /events — event bus disabled', () => {
+  let server: WebhookServer;
+  let port: number;
+
+  beforeEach(async () => {
+    server = createWebhookServer({
+      secret: TEST_SECRET,
+      port: 0,
+      enqueue: makeEnqueueMock(),
+    });
+    await server.start();
+    port = server.port;
+  });
+
+  afterEach(async () => {
+    await server.stop();
+  });
+
+  it('returns 404 when eventBus is not configured', async () => {
+    const res = await request(port, { method: 'GET', path: '/events' });
+    expect(res.status).toBe(404);
+  });
+});
+
+describe('GET /events — event bus enabled', () => {
+  it('returns 200 with text/event-stream content-type', async () => {
+    const { EventBus } = await import('./event-bus/bus.js');
+    const bus = new EventBus();
+    const server = createWebhookServer({
+      secret: TEST_SECRET,
+      port: 0,
+      enqueue: makeEnqueueMock(),
+      eventBus: bus,
+    });
+    await server.start();
+    try {
+      // Use a streaming request — we just need to check headers then close.
+      const result = await new Promise<{ status: number; contentType: string }>((resolve, reject) => {
+        const req = http.request(
+          { hostname: '127.0.0.1', port: server.port, path: '/events', method: 'GET' },
+          (res) => {
+            resolve({
+              status: res.statusCode ?? 0,
+              contentType: String(res.headers['content-type'] ?? ''),
+            });
+            res.destroy();
+          },
+        );
+        req.on('error', reject);
+        req.end();
+      });
+      expect(result.status).toBe(200);
+      expect(result.contentType).toContain('text/event-stream');
+    } finally {
+      await server.stop();
+    }
+  });
+});

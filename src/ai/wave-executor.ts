@@ -10,6 +10,8 @@
 
 import type { AgentTool } from '@mariozechner/pi-agent-core';
 import type { z } from 'zod';
+import type { EventBus } from '../services/event-bus/bus.js';
+import type { EventWaveName } from '../services/event-bus/schema.js';
 import type { WaveHandoff, WaveModelConfig, WaveName } from '../types/index.js';
 import { log } from '../utils/logger.js';
 import { createTransformContext } from './context-transform.js';
@@ -85,6 +87,38 @@ export const DEFAULT_WAVE_TIMEOUTS: Record<WaveName, number | undefined> = {
   ship: undefined,
 };
 
+type PublishWaveEvent = (
+  payload:
+    | { type: 'wave-enter'; wave: EventWaveName }
+    | { type: 'wave-output'; wave: EventWaveName; turn: number; text?: string; costDelta?: number }
+    | { type: 'cost'; wave: EventWaveName; costUsd: number }
+    | { type: 'steered'; wave: EventWaveName; tier: 'steer' | 'trim' | 'abort'; usageRatio: number }
+    | { type: 'aborted'; wave: EventWaveName; reason: string },
+) => void;
+
+function makeWavePublisher(
+  bus: EventBus | undefined,
+  context: SpawnWaveAgentConfig['eventContext'] | undefined,
+  wave: WaveName,
+): PublishWaveEvent {
+  if (!bus || !context) {
+    return () => {
+      /* no-op when caller has not opted in */
+    };
+  }
+  return (payload) => {
+    // Narrow guard: 'ship' is a WaveName but not an EventWaveName. Treat as no-op.
+    if (wave === ('ship' as WaveName)) return;
+    bus.publish({
+      runId: context.runId,
+      repoId: context.repoId,
+      fixId: context.fixId,
+      ...(context.pieceId != null ? { pieceId: context.pieceId } : {}),
+      ...payload,
+    });
+  };
+}
+
 export interface SpawnWaveAgentConfig {
   wave: WaveName;
   model: string;
@@ -116,6 +150,24 @@ export interface SpawnWaveAgentConfig {
    * `allowDestructive: true` is passed in the tool args.
    */
   destructiveEditGuard?: Omit<DestructiveEditGuardOptions, 'cwd'> | false;
+  /**
+   * Optional `EventBus` for structured observability events (kova#292). When
+   * provided, the wave publishes `wave-enter`, `wave-output`, `steered`,
+   * `aborted`, and `cost` events tagged with `eventContext`. When omitted, the
+   * wave runs unchanged — no events published. Pure side-effect; never alters
+   * wave outcomes.
+   */
+  eventBus?: EventBus;
+  /**
+   * Identifier tag injected into every published event. Required when
+   * `eventBus` is set; ignored otherwise.
+   */
+  eventContext?: {
+    runId: string;
+    repoId: string;
+    fixId: string;
+    pieceId?: string;
+  };
 }
 
 export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig): Promise<WaveHandoff<T>> {
@@ -136,6 +188,8 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
     toolResultTruncation,
     runtimeFactory = defaultAgentRuntimeFactory,
     destructiveEditGuard,
+    eventBus,
+    eventContext,
   } = config;
 
   const timeoutMs = explicitTimeout ?? DEFAULT_WAVE_TIMEOUTS[wave];
@@ -143,6 +197,13 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
   const contextThreshold = Math.max(0.1, Math.min(1, rawThreshold));
   const model = resolveModelFromString(modelString);
   const startTime = Date.now();
+
+  // Event publisher — no-op if eventBus or eventContext is missing, so callers
+  // who don't opt in pay nothing and outcomes are unchanged. The wave name is
+  // narrowed to the EventWaveName union; pi-mono "ship" wave never spawns an
+  // agent here, so the cast is safe in practice but we guard anyway.
+  const publishEvent: PublishWaveEvent = makeWavePublisher(eventBus, eventContext, wave);
+  publishEvent({ type: 'wave-enter', wave: wave as EventWaveName });
 
   log.info(`[${wave}] Starting wave — model=${model.id}, cwd=${cwd}`);
 
@@ -212,10 +273,17 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
         // Track cost incrementally from assistant turn_end events
         const turnCost = msg.usage.cost.total;
         accumulatedCost += turnCost;
+        publishEvent({
+          type: 'wave-output',
+          wave: wave as EventWaveName,
+          turn: turnCount,
+          costDelta: turnCost,
+        });
         if (maxCostUsd != null && accumulatedCost >= maxCostUsd && !aborted) {
           costCapExceeded = true;
           aborted = true;
           log.warn(`[${wave}] Cost cap exceeded ($${accumulatedCost.toFixed(4)} >= $${maxCostUsd}), aborting`);
+          publishEvent({ type: 'aborted', wave: wave as EventWaveName, reason: 'cost_cap_exceeded' });
           agent.abort();
         }
       } else {
@@ -240,6 +308,8 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
           log.warn(
             `[${wave}] Context exhausted ${(usageRatio * 100).toFixed(0)}% >= ${(contextThreshold * 100).toFixed(0)}% threshold (${inputTokens}/${model.contextWindow} tokens), aborting`,
           );
+          publishEvent({ type: 'steered', wave: wave as EventWaveName, tier: 'abort', usageRatio });
+          publishEvent({ type: 'aborted', wave: wave as EventWaveName, reason: 'context_exhausted' });
           agent.abort();
         } else if (usageRatio >= TRIM_THRESHOLD && !contextTrimmed) {
           // Tier 2: aggressive trimming via transformContext.
@@ -249,6 +319,7 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
           log.warn(
             `[${wave}] Context usage ${(usageRatio * 100).toFixed(0)}% hit trim threshold (${inputTokens}/${model.contextWindow} tokens), enabling aggressive context compaction`,
           );
+          publishEvent({ type: 'steered', wave: wave as EventWaveName, tier: 'trim', usageRatio });
           // Optional chaining is insufficient for assignment — guard explicitly.
           if ('transformContext' in agent) {
             (agent as { transformContext: typeof aggressiveTrimContext }).transformContext = aggressiveTrimContext;
@@ -270,6 +341,7 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
           log.info(
             `[${wave}] Context usage ${(usageRatio * 100).toFixed(0)}% hit steer threshold (${inputTokens}/${model.contextWindow} tokens), steering agent to focus`,
           );
+          publishEvent({ type: 'steered', wave: wave as EventWaveName, tier: 'steer', usageRatio });
           agent.steer?.({
             role: 'user',
             content:
@@ -285,6 +357,7 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
     if (event.type === 'turn_end' && turnCount >= maxTurns && !aborted) {
       aborted = true;
       log.warn(`[${wave}] Max turns (${maxTurns}) reached, aborting`);
+      publishEvent({ type: 'aborted', wave: wave as EventWaveName, reason: 'max_turns' });
       agent.abort();
     }
   });
@@ -443,6 +516,7 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
     log.info(
       `[${wave}] Completed — turns=${turnCount}, cost=$${cost.toFixed(4)}, duration=${(duration / 1000).toFixed(1)}s`,
     );
+    publishEvent({ type: 'cost', wave: wave as EventWaveName, costUsd: cost });
 
     // Determine confidence from structured output parsing + Zod validation
     let confidence: 'high' | 'medium' | 'low';
