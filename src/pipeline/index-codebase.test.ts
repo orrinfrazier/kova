@@ -1,23 +1,39 @@
 import { describe, expect, it, vi } from 'vitest';
+import type { VectorDBConfig } from '../types/config.js';
 import type { IndexResult } from './index-codebase.js';
 import { indexCodebase } from './index-codebase.js';
 
-// Minimal stubs — real module doesn't exist yet, so these mocks are irrelevant
-// but are declared here to document what the implementation will need.
+// Hoisted spies that the mocked modules below reference. `vi.mock` is hoisted
+// above imports, so factory-scoped references to top-level `const`s would
+// throw. `vi.hoisted` makes the spies available at the same hoisted level.
+const { mockUpsertChunks, mockChunkFile, mockGetChangedFilesSince } = vi.hoisted(() => ({
+  mockUpsertChunks: vi.fn().mockResolvedValue(undefined),
+  mockChunkFile: vi.fn().mockReturnValue([]),
+  mockGetChangedFilesSince: vi.fn().mockResolvedValue([]),
+}));
+
 vi.mock('../services/chunker.js', () => ({
-  chunkFile: vi.fn().mockResolvedValue([]),
+  chunkFile: (...args: unknown[]) => mockChunkFile(...args),
 }));
 
 vi.mock('../services/vectordb.js', () => ({
-  upsertChunks: vi.fn().mockResolvedValue(undefined),
+  upsertChunks: (...args: unknown[]) => mockUpsertChunks(...args),
 }));
 
 vi.mock('../services/git-diff.js', () => ({
-  getChangedFilesSince: vi.fn().mockResolvedValue([]),
+  getChangedFilesSince: (...args: unknown[]) => mockGetChangedFilesSince(...args),
   getCurrentHeadSha: vi.fn().mockResolvedValue('abc123'),
   getLastIndexedSha: vi.fn().mockResolvedValue(null),
   saveLastIndexedSha: vi.fn().mockResolvedValue(undefined),
 }));
+
+vi.mock('node:fs/promises', async () => {
+  const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+  return {
+    ...actual,
+    readFile: vi.fn().mockResolvedValue('export const x = 1;\n'),
+  };
+});
 
 describe('indexCodebase', () => {
   describe('IndexResult shape', () => {
@@ -92,6 +108,48 @@ describe('indexCodebase', () => {
 
       expect(result.chunksUpserted).toBe(0);
     });
+  });
+});
+
+describe('indexCodebase forwards vectordb config to upsertChunks', () => {
+  it('passes the supplied vectordb config through to upsertChunks for each changed file', async () => {
+    mockUpsertChunks.mockClear();
+    mockChunkFile.mockReturnValue([{ text: 'export const x = 1;', startLine: 1, endLine: 1 }]);
+    mockGetChangedFilesSince.mockResolvedValueOnce(['src/changed.ts']);
+
+    const vectordb: VectorDBConfig = {
+      enabled: true,
+      endpoint: 'http://localhost:8100/query',
+      reindex_endpoint: 'http://localhost:8100/reindex',
+      top_k: 10,
+    };
+
+    await indexCodebase({ repoPath: '/tmp/fake-repo', full: false, vectordb });
+
+    expect(mockUpsertChunks).toHaveBeenCalledOnce();
+    const [repoPath, filePath, chunks, configArg] = mockUpsertChunks.mock.calls[0] as [
+      string,
+      string,
+      unknown[],
+      VectorDBConfig | undefined,
+    ];
+    expect(repoPath).toBe('/tmp/fake-repo');
+    expect(filePath).toBe('src/changed.ts');
+    expect(chunks).toHaveLength(1);
+    expect(configArg).toEqual(vectordb);
+  });
+
+  it('omits the config arg when vectordb is not supplied (preserves existing call sites)', async () => {
+    mockUpsertChunks.mockClear();
+    mockChunkFile.mockReturnValue([{ text: 'export const x = 1;', startLine: 1, endLine: 1 }]);
+    mockGetChangedFilesSince.mockResolvedValueOnce(['src/changed.ts']);
+
+    await indexCodebase({ repoPath: '/tmp/fake-repo', full: false });
+
+    expect(mockUpsertChunks).toHaveBeenCalledOnce();
+    const callArgs = mockUpsertChunks.mock.calls[0] as unknown[];
+    // The 4th positional arg should be undefined when no vectordb config is supplied.
+    expect(callArgs[3]).toBeUndefined();
   });
 });
 
