@@ -4,6 +4,7 @@
 import { confirm, intro, isCancel, note, outro } from '@clack/prompts';
 import { fs, path } from 'zx';
 import { approveIssues } from '../services/approval.js';
+import { resolveBrainstormDependencies } from '../services/brainstorm-deps.js';
 import { createIssue, fetchIssues } from '../services/github.js';
 import type { RepoConfig } from '../types/index.js';
 import type { BrainstormReturn } from './brainstorm.js';
@@ -128,12 +129,45 @@ export async function runSupervised(options: SupervisedOptions): Promise<Supervi
       };
     }
 
-    // Create issues in GitHub
+    // Resolve in-batch dependency titles → sibling issues, then
+    // topologically sort so blockers are filed first (issue #279).
+    // Unresolvable titles are surfaced to the user via note() so
+    // they're never silently discarded.
+    const { ordered, unresolvable } = resolveBrainstormDependencies(approvalResult.approved);
+
+    if (unresolvable.length > 0) {
+      const lines = unresolvable.map((u) => `- "${u.title}" → unresolvable: ${u.deps.map((d) => `"${d}"`).join(', ')}`);
+      note(
+        `Some dependency titles did not match any approved sibling and were dropped:\n${lines.join('\n')}`,
+        'Unresolvable dependencies',
+      );
+    }
+
+    // Title → GH issue number, used to resolve "Blocked by #N" lines for
+    // dependents as they're filed.
+    const titleToNumber = new Map<string, number>();
+    const normalizedTitle = (t: string) => t.trim().toLowerCase();
+
+    // Create issues in GitHub in dependency order.
     const createdNumbers: number[] = [];
-    for (const issue of approvalResult.approved) {
+    for (const issue of ordered) {
+      // For each dep that resolved to a sibling we've already filed,
+      // append a "Blocked by #N" line so prioritize.ts → parseDependencies
+      // can pick it up at fix time.
+      const deps = issue.dependencies ?? [];
+      const blockerNumbers: number[] = [];
+      for (const depTitle of deps) {
+        const blocker = titleToNumber.get(normalizedTitle(depTitle));
+        if (blocker !== undefined) blockerNumbers.push(blocker);
+      }
+      const blockedByLines =
+        blockerNumbers.length > 0 ? `\n\n${blockerNumbers.map((n) => `Blocked by #${n}`).join('\n')}` : '';
+      const finalBody = `${issue.body}${blockedByLines}`;
+
       try {
-        const created = await createIssue(repoPath, issue.title, issue.body, [...issue.labels, 'approved']);
+        const created = await createIssue(repoPath, issue.title, finalBody, [...issue.labels, 'approved']);
         createdNumbers.push(created.number);
+        titleToNumber.set(normalizedTitle(issue.title), created.number);
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
         note(`Failed to create "${issue.title}": ${msg}`, 'Warning');
