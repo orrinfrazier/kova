@@ -7,6 +7,7 @@ import { shutdownRequested } from '../services/shutdown.js';
 import type { Issue, RepoConfig, WaveResult } from '../types/index.js';
 import { log } from '../utils/logger.js';
 import { CostAccumulator } from './cost-accumulator.js';
+import { extractFootprint } from './file-footprint.js';
 import { type FixResult, fix } from './fix.js';
 import { buildDependencyTiers, type FixExecutor, runFixesWithConcurrency } from './issue-scheduler.js';
 import { buildRunReport, printRunReport, writeRunReport } from './run-report.js';
@@ -164,10 +165,20 @@ export async function fixLoop(options: LoopOptions): Promise<LoopResult> {
   // Determine effective budget: use shared tracker if available, otherwise local budget
   const effectiveBudgetExceeded = budgetTracker ? () => budgetTracker.isExceeded() : undefined;
 
+  // Predict each issue's file footprint from its body text so the scheduler
+  // can serialize footprint-overlapping siblings when concurrency > 1.
+  // Build the map unconditionally — the scheduler ignores it when
+  // concurrency === 1 and the cost is negligible (one regex pass per issue).
+  const footprints = new Map<number, string[]>();
+  for (const issue of toFix) {
+    footprints.set(issue.number, extractFootprint(issue));
+  }
+
   await runFixesWithConcurrency(toFix, tiers, executor, {
     concurrency,
     ...(budget !== undefined ? { budget } : {}),
     costAccumulator: accumulator,
+    footprints,
     shutdownRequested: () => {
       if (effectiveBudgetExceeded?.()) return true;
       return shutdownRequested();
@@ -367,10 +378,19 @@ export async function fixByNumbers(options: FixByNumbersOptions): Promise<LoopRe
       return { success: result.success };
     };
 
+    // Predict each issue's file footprint so the scheduler can serialize
+    // footprint-overlapping siblings when concurrency > 1. The map is cheap
+    // and ignored by the scheduler when concurrency === 1.
+    const footprints = new Map<number, string[]>();
+    for (const issue of fetchedIssues) {
+      footprints.set(issue.number, extractFootprint(issue));
+    }
+
     await runFixesWithConcurrency(fetchedIssues, tiers, executor, {
       concurrency,
       ...(budget !== undefined ? { budget } : {}),
       costAccumulator: accumulator,
+      footprints,
       shutdownRequested,
     });
 
