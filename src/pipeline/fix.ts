@@ -60,9 +60,11 @@ import {
   formatCodeChunks,
   formatEpisodes,
   formatFailedEpisodes,
+  formatPlaybook,
   formatReviewFeedback,
   queryCodeContext,
   queryEpisodeContext,
+  queryPlaybook,
   queryReviewFeedbackContext,
   recordEpisode,
 } from '../services/vectordb.js';
@@ -586,6 +588,21 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       }
     }
 
+    // Playbook synthesis (#299): query for a distilled playbook matching this
+    // issue. Default off; gated by playbooks.enabled. Graceful degradation —
+    // never blocks the fix on failure.
+    let playbookContext: string | undefined;
+    if (config.playbooks?.enabled) {
+      const query = `${issue.title}\n\n${issue.body}`;
+      const playbook = await queryPlaybook(config.playbooks, query, {
+        repo: repoName,
+        language: tooling.language !== 'unknown' ? tooling.language : undefined,
+      });
+      if (playbook) {
+        playbookContext = formatPlaybook(playbook);
+      }
+    }
+
     // WAVE S: Spec
     if (!shouldSkip('spec')) {
       const waveStart = Date.now();
@@ -597,6 +614,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         buildWaveContext('spec', issue, state.waveResults, {
           prContext,
           ...(failedEpisodicContext != null && { episodicContext: failedEpisodicContext }),
+          ...(playbookContext != null && { playbookContext }),
           ...(codebaseContext != null && { codebaseContext }),
           ...(repoSearchText != null && { repoSearchText }),
         }),

@@ -395,6 +395,50 @@ describe('buildWaveContext', () => {
     });
   });
 
+  describe('playbook context (#299 — synthesized procedural knowledge)', () => {
+    const playbookContext =
+      '## Playbook: Auth middleware fixes\n\n**Trigger:** labels=bug,auth; language=typescript\n\n### Steps\n1. Check token expiry before API call\n2. Add a mutex around refresh\n\n### Gotchas\n- Refresh order matters\n\n### Files to touch\n- src/auth/middleware.ts';
+
+    it('injects playbook context into spec wave', () => {
+      const handoffs: Partial<Record<string, WaveResult>> = {
+        assess: makeWaveResult('assess', assessArtifact),
+      };
+      const ctx = buildWaveContext('spec', makeIssue(), handoffs, { playbookContext });
+      expect(ctx).toContain('Playbook: Auth middleware fixes');
+      expect(ctx).toContain('Check token expiry before API call');
+      expect(ctx).toContain('Refresh order matters');
+    });
+
+    it('does NOT inject playbook context into test wave', () => {
+      const handoffs: Partial<Record<string, WaveResult>> = {
+        spec: makeWaveResult('spec', specArtifact),
+      };
+      const ctx = buildWaveContext('test', makeIssue(), handoffs, { playbookContext });
+      expect(ctx).not.toContain('Playbook: Auth middleware fixes');
+    });
+
+    it('does NOT inject playbook context into impl wave', () => {
+      const handoffs: Partial<Record<string, WaveResult>> = {
+        spec: makeWaveResult('spec', specArtifact),
+      };
+      const ctx = buildWaveContext('impl', makeIssue(), handoffs, { playbookContext });
+      expect(ctx).not.toContain('Playbook: Auth middleware fixes');
+    });
+
+    it('does NOT inject playbook context into assess wave (spec only)', () => {
+      const ctx = buildWaveContext('assess', makeIssue(), {}, { playbookContext });
+      expect(ctx).not.toContain('Playbook: Auth middleware fixes');
+    });
+
+    it('omits playbook section when not provided', () => {
+      const handoffs: Partial<Record<string, WaveResult>> = {
+        assess: makeWaveResult('assess', assessArtifact),
+      };
+      const ctx = buildWaveContext('spec', makeIssue(), handoffs);
+      expect(ctx).not.toContain('Playbook:');
+    });
+  });
+
   describe('assess wave', () => {
     it('includes issue title and body', () => {
       const ctx = buildWaveContext('assess', makeIssue(), {});

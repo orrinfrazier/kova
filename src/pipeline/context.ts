@@ -36,6 +36,12 @@ export interface ContextOptions {
   codebaseContext?: string;
   /** Pre-formatted episodic memory context (only for assess/spec waves). */
   episodicContext?: string;
+  /**
+   * Pre-formatted playbook context (#299) — distilled procedural memo
+   * synthesised from past successful episodes that match this issue.
+   * Injected into the SPEC wave only.
+   */
+  playbookContext?: string;
   /** Pre-formatted repo-intel context — architecture overview (only for assess wave). */
   repoContextText?: string;
   /** Pre-formatted repo-intel search results — similar implementations (only for spec wave). */
@@ -178,6 +184,10 @@ function buildSpecContext(issue: Issue, handoffs: Handoffs, options: ContextOpti
 
   if (options.episodicContext) {
     sections.push(options.episodicContext);
+  }
+
+  if (options.playbookContext) {
+    sections.push(options.playbookContext);
   }
 
   if (options.repoSearchText) {

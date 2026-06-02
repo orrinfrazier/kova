@@ -132,6 +132,28 @@ export const EpisodicMemoryConfigSchema = z
 
 export type EpisodicMemoryConfig = z.infer<typeof EpisodicMemoryConfigSchema>;
 
+/**
+ * Playbooks config (#299) — synthesize reusable Markdown procedures from
+ * repeated successful episodes. Default off; triggers synthesis only when at
+ * least `min_episodes` form a coherent cluster (shared labels + language +
+ * file overlap). The `endpoint` is the REST sink used by both
+ * `queryPlaybook` (POST with a query, returns one matching playbook) and
+ * `recordPlaybook` (PUT: persists a synthesised PlaybookRecord). Synthesis
+ * failures are logged and swallowed — they never block a fix.
+ */
+export const PlaybooksConfigSchema = z
+  .object({
+    enabled: z.boolean().default(false),
+    endpoint: z.string().optional(),
+    min_episodes: z.number().int().positive().default(3),
+  })
+  .refine((cfg) => !cfg.enabled || cfg.endpoint != null, {
+    message: 'endpoint is required when playbooks is enabled',
+    path: ['endpoint'],
+  });
+
+export type PlaybooksConfig = z.infer<typeof PlaybooksConfigSchema>;
+
 export const CustomToolSchema = z.object({
   name: z
     .string()
@@ -251,6 +273,7 @@ export const RepoConfigSchema = z.object({
   ab_test_policy: ABTestPolicySchema.optional(),
   vectordb: VectorDBConfigSchema.optional(),
   episodes: EpisodicMemoryConfigSchema.optional(),
+  playbooks: PlaybooksConfigSchema.optional(),
   repo_intel: RepoIntelConfigSchema.optional(),
   metrics: MetricsConfigSchema.optional(),
   sandbox: SandboxConfigSchema.optional(),
