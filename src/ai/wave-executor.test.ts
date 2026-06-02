@@ -2081,6 +2081,31 @@ describe('isAssistantMessage', () => {
     expect(isAssistantMessage(msg)).toBe(true);
   });
 
+  it('returns true for a kova-owned AssistantTurn shape (minimal usage = input/output/cost.total only)', async () => {
+    const { isAssistantMessage } = await import('./wave-executor.js');
+    const turn = {
+      role: 'assistant',
+      content: [{ type: 'text', text: 'hi' }],
+      usage: { input: 100, output: 20, cost: { total: 0.001 } },
+      stopReason: 'end_turn',
+    };
+    expect(isAssistantMessage(turn)).toBe(true);
+  });
+
+  it('accepts kova-owned stopReason values (end_turn, tool_use, max_turns)', async () => {
+    const { isAssistantMessage } = await import('./wave-executor.js');
+    for (const stopReason of ['end_turn', 'tool_use', 'max_turns', 'aborted', 'error']) {
+      expect(
+        isAssistantMessage({
+          role: 'assistant',
+          content: [],
+          usage: { input: 0, output: 0, cost: { total: 0 } },
+          stopReason,
+        }),
+      ).toBe(true);
+    }
+  });
+
   it('returns false for a user message', async () => {
     const { isAssistantMessage } = await import('./wave-executor.js');
     expect(isAssistantMessage({ role: 'user', content: 'hi', timestamp: 0 })).toBe(false);
