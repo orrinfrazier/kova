@@ -1351,3 +1351,41 @@ describe('prompts_dir config', () => {
     await expect(loadConfig(join(tempDir, 'repos.yaml'))).rejects.toThrow(ZodError);
   });
 });
+
+/* ------------------------------------------------------------------ */
+/*  schedule block (issue #303 — cron scheduler)                       */
+/* ------------------------------------------------------------------ */
+
+describe('loadConfig schedule block', () => {
+  it('accepts a valid schedule with one or more cron jobs', async () => {
+    const yaml = `repos:\n  my-repo:\n    path: /tmp/my-repo\n    schedule:\n      backlog_sweep: '0 2 * * *'\n      weekly_audit: '0 0 * * 1'\n`;
+    await writeFile(join(tempDir, 'repos.yaml'), yaml);
+
+    const config = await loadConfig(join(tempDir, 'repos.yaml'));
+    const repo = config.repos['my-repo'];
+    expect(repo?.schedule?.backlog_sweep).toBe('0 2 * * *');
+    expect(repo?.schedule?.weekly_audit).toBe('0 0 * * 1');
+  });
+
+  it('omits schedule when not provided', async () => {
+    const yaml = `repos:\n  my-repo:\n    path: /tmp/my-repo\n`;
+    await writeFile(join(tempDir, 'repos.yaml'), yaml);
+
+    const config = await loadConfig(join(tempDir, 'repos.yaml'));
+    expect(config.repos['my-repo']?.schedule).toBeUndefined();
+  });
+
+  it('rejects invalid cron expressions at config-load time', async () => {
+    const yaml = `repos:\n  my-repo:\n    path: /tmp/my-repo\n    schedule:\n      bad_job: 'not a cron'\n`;
+    await writeFile(join(tempDir, 'repos.yaml'), yaml);
+
+    await expect(loadConfig(join(tempDir, 'repos.yaml'))).rejects.toThrow(ZodError);
+  });
+
+  it('rejects empty job names', async () => {
+    const yaml = `repos:\n  my-repo:\n    path: /tmp/my-repo\n    schedule:\n      '': '0 2 * * *'\n`;
+    await writeFile(join(tempDir, 'repos.yaml'), yaml);
+
+    await expect(loadConfig(join(tempDir, 'repos.yaml'))).rejects.toThrow(ZodError);
+  });
+});
