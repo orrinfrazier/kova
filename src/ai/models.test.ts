@@ -925,4 +925,213 @@ describe('models', () => {
       expect(reresolved.provider).toBe('google');
     });
   });
+
+  describe('isConsensusPool', () => {
+    it('returns true for a pool config object', async () => {
+      const { isConsensusPool } = await import('./models.js');
+      expect(isConsensusPool({ pool: ['large', { provider: 'openai', model: 'gpt-4o' }] })).toBe(true);
+    });
+
+    it('returns false for a tier string', async () => {
+      const { isConsensusPool } = await import('./models.js');
+      expect(isConsensusPool('large')).toBe(false);
+    });
+
+    it('returns false for an override object', async () => {
+      const { isConsensusPool } = await import('./models.js');
+      expect(isConsensusPool({ provider: 'openai', model: 'gpt-4o' })).toBe(false);
+    });
+
+    it('returns false for a bare model string', async () => {
+      const { isConsensusPool } = await import('./models.js');
+      expect(isConsensusPool('claude-sonnet-4-6')).toBe(false);
+    });
+  });
+
+  describe('resolveConsensusPool', () => {
+    it('resolves all pool members and the adjudicator', async () => {
+      process.env.ANTHROPIC_API_KEY = 'sk-ant-test';
+      const { resolveConsensusPool } = await import('./models.js');
+
+      const result = resolveConsensusPool({
+        pool: ['large', { provider: 'openai', model: 'gpt-4o' }, { provider: 'google', model: 'gemini-2.5-pro' }],
+        adjudicator: 'large',
+      });
+      expect(result.pool).toHaveLength(3);
+      expect(result.pool[0]?.id).toBe('claude-opus-4-6');
+      expect(result.pool[0]?.provider).toBe('anthropic');
+      expect(result.pool[1]?.id).toBe('gpt-4o');
+      expect(result.pool[1]?.provider).toBe('openai');
+      expect(result.pool[2]?.id).toBe('gemini-2.5-pro');
+      expect(result.pool[2]?.provider).toBe('google');
+      expect(result.adjudicator.id).toBe('claude-opus-4-6');
+      delete process.env.ANTHROPIC_API_KEY;
+    });
+
+    it('defaults adjudicator to large tier when not specified', async () => {
+      const { resolveConsensusPool } = await import('./models.js');
+
+      const result = resolveConsensusPool({
+        pool: ['large', { provider: 'openai', model: 'gpt-4o' }],
+      });
+      expect(result.adjudicator.id).toBe('claude-opus-4-6');
+      expect(result.adjudicator.provider).toBe('anthropic');
+    });
+
+    it('supports a pool of bare model strings', async () => {
+      const { resolveConsensusPool } = await import('./models.js');
+
+      const result = resolveConsensusPool({
+        pool: ['openai:gpt-4o', 'anthropic:claude-opus-4-6'],
+      });
+      expect(result.pool[0]?.provider).toBe('openai');
+      expect(result.pool[1]?.provider).toBe('anthropic');
+    });
+  });
+
+  describe('resolveWaveModel with pool config', () => {
+    it('throws a clear error when called on a pool config', async () => {
+      const { resolveWaveModel } = await import('./models.js');
+
+      expect(() =>
+        resolveWaveModel({
+          pool: ['large', { provider: 'openai', model: 'gpt-4o' }],
+        } as never),
+      ).toThrow(/consensus pool|resolveConsensusPool/i);
+    });
+  });
+
+  describe('validateModelConfig with consensus pool', () => {
+    it('passes for a pool config where every member resolves', async () => {
+      process.env.ANTHROPIC_API_KEY = 'sk-ant-test';
+      process.env.OPENAI_API_KEY = 'sk-test';
+      const { validateModelConfig } = await import('./models.js');
+
+      expect(() =>
+        validateModelConfig({
+          path: '/tmp/test',
+          rules: {
+            coverage: 80,
+            auto_merge: false,
+            max_issues_per_run: 10,
+            ci_merge: 'require' as const,
+            concurrency: 1,
+          },
+          model: {
+            assess: 'large',
+            spec: 'large',
+            test: 'medium',
+            impl: 'medium',
+            quality: 'small',
+            review: {
+              pool: ['large', { provider: 'openai', model: 'gpt-4o' }],
+              adjudicator: 'large',
+            },
+            brainstorm: 'large',
+          },
+          isolation: 'worktree',
+        }),
+      ).not.toThrow();
+      delete process.env.ANTHROPIC_API_KEY;
+      delete process.env.OPENAI_API_KEY;
+    });
+
+    it('throws naming wave + pool member index when a member resolves but has no key', async () => {
+      process.env.ANTHROPIC_API_KEY = 'sk-ant-test';
+      delete process.env.OPENAI_API_KEY;
+      const { validateModelConfig } = await import('./models.js');
+
+      expect(() =>
+        validateModelConfig({
+          path: '/tmp/test',
+          rules: {
+            coverage: 80,
+            auto_merge: false,
+            max_issues_per_run: 10,
+            ci_merge: 'require' as const,
+            concurrency: 1,
+          },
+          model: {
+            assess: 'large',
+            spec: 'large',
+            test: 'medium',
+            impl: 'medium',
+            quality: 'small',
+            review: {
+              pool: ['large', { provider: 'openai', model: 'gpt-4o' }],
+              adjudicator: 'large',
+            },
+            brainstorm: 'large',
+          },
+          isolation: 'worktree',
+        }),
+      ).toThrow(/review.*pool\[1\]|pool\[1\].*review/i);
+      delete process.env.ANTHROPIC_API_KEY;
+    });
+
+    it('throws naming wave + adjudicator when adjudicator has no key', async () => {
+      process.env.ANTHROPIC_API_KEY = 'sk-ant-test';
+      delete process.env.OPENAI_API_KEY;
+      const { validateModelConfig } = await import('./models.js');
+
+      expect(() =>
+        validateModelConfig({
+          path: '/tmp/test',
+          rules: {
+            coverage: 80,
+            auto_merge: false,
+            max_issues_per_run: 10,
+            ci_merge: 'require' as const,
+            concurrency: 1,
+          },
+          model: {
+            assess: 'large',
+            spec: 'large',
+            test: 'medium',
+            impl: 'medium',
+            quality: 'small',
+            review: {
+              pool: ['large', 'large'],
+              adjudicator: { provider: 'openai', model: 'gpt-4o' },
+            },
+            brainstorm: 'large',
+          },
+          isolation: 'worktree',
+        }),
+      ).toThrow(/review.*adjudicator|adjudicator.*review/i);
+      delete process.env.ANTHROPIC_API_KEY;
+    });
+
+    it('throws naming wave + pool member index when a member is unresolvable', async () => {
+      process.env.ANTHROPIC_API_KEY = 'sk-ant-test';
+      const { validateModelConfig } = await import('./models.js');
+
+      expect(() =>
+        validateModelConfig({
+          path: '/tmp/test',
+          rules: {
+            coverage: 80,
+            auto_merge: false,
+            max_issues_per_run: 10,
+            ci_merge: 'require' as const,
+            concurrency: 1,
+          },
+          model: {
+            assess: 'large',
+            spec: 'large',
+            test: 'medium',
+            impl: 'medium',
+            quality: 'small',
+            review: {
+              pool: ['large', { provider: 'fake-provider', model: 'nonexistent' }],
+              adjudicator: 'large',
+            },
+            brainstorm: 'large',
+          },
+          isolation: 'worktree',
+        }),
+      ).toThrow(/review.*pool\[1\]|Unknown model/i);
+      delete process.env.ANTHROPIC_API_KEY;
+    });
+  });
 });
