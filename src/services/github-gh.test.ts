@@ -104,6 +104,8 @@ const ISSUE_FIXTURE = {
   labels: [{ name: 'bug' }, { name: 'urgent' }],
   url: 'https://github.com/owner/repo/issues/42',
   milestone: { title: 'v0.35 — Org-Scale Orchestration' },
+  createdAt: '2026-04-01T08:30:00Z',
+  updatedAt: '2026-05-15T14:22:00Z',
 };
 
 const ISSUE_LIST_FIXTURE = [
@@ -115,6 +117,8 @@ const ISSUE_LIST_FIXTURE = [
     labels: [{ name: 'feature' }],
     url: 'https://github.com/owner/repo/issues/99',
     milestone: null,
+    createdAt: '2026-05-20T10:00:00Z',
+    updatedAt: '2026-05-21T11:00:00Z',
   },
 ];
 
@@ -153,13 +157,13 @@ beforeEach(() => resetMock());
 /* ---------- fetchIssues ------------------------------------------ */
 
 describe('fetchIssues', () => {
-  it('constructs correct gh arguments without filter (includes milestone field)', async () => {
+  it('constructs correct gh arguments without filter (includes milestone, createdAt, updatedAt fields)', async () => {
     setResponse('gh issue list', { stdout: JSON.stringify(ISSUE_LIST_FIXTURE) });
     await fetchIssues('/repo');
 
     expect(calls).toHaveLength(1);
     expect(calls[0]?.command).toBe(
-      'gh issue list --state open --json number,title,body,labels,url,milestone --limit 50',
+      'gh issue list --state open --json number,title,body,labels,url,milestone,createdAt,updatedAt --limit 50',
     );
     expect(calls[0]?.cwd).toBe('/repo');
   });
@@ -213,9 +217,13 @@ describe('fetchIssues', () => {
       labels: ['bug', 'urgent'],
       url: 'https://github.com/owner/repo/issues/42',
       milestone: 'v0.35 — Org-Scale Orchestration',
+      createdAt: '2026-04-01T08:30:00Z',
+      updatedAt: '2026-05-15T14:22:00Z',
     });
     expect(issues[1]?.labels).toEqual(['feature']);
     expect(issues[1]?.milestone).toBeNull();
+    expect(issues[1]?.createdAt).toBe('2026-05-20T10:00:00Z');
+    expect(issues[1]?.updatedAt).toBe('2026-05-21T11:00:00Z');
   });
 
   it('returns empty array for empty list', async () => {
@@ -233,12 +241,14 @@ describe('fetchIssues', () => {
 /* ---------- fetchIssue ------------------------------------------- */
 
 describe('fetchIssue', () => {
-  it('constructs correct gh arguments with issue number (includes milestone field)', async () => {
+  it('constructs correct gh arguments with issue number (includes milestone, createdAt, updatedAt fields)', async () => {
     setResponse('gh issue view', { stdout: JSON.stringify(ISSUE_FIXTURE) });
     await fetchIssue('/repo', 42);
 
     expect(calls).toHaveLength(1);
-    expect(calls[0]?.command).toBe('gh issue view 42 --json number,title,body,labels,url,milestone');
+    expect(calls[0]?.command).toBe(
+      'gh issue view 42 --json number,title,body,labels,url,milestone,createdAt,updatedAt',
+    );
     expect(calls[0]?.cwd).toBe('/repo');
   });
 
@@ -253,6 +263,8 @@ describe('fetchIssue', () => {
       labels: ['bug', 'urgent'],
       url: 'https://github.com/owner/repo/issues/42',
       milestone: 'v0.35 — Org-Scale Orchestration',
+      createdAt: '2026-04-01T08:30:00Z',
+      updatedAt: '2026-05-15T14:22:00Z',
     });
   });
 

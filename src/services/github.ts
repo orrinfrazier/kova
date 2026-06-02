@@ -29,7 +29,7 @@ export async function fetchIssues(repoPath: string, filter?: string, options?: F
     '--state',
     'open',
     '--json',
-    'number,title,body,labels,url,milestone',
+    'number,title,body,labels,url,milestone,createdAt,updatedAt',
     '--limit',
     String(fetchLimit),
   ];
@@ -50,6 +50,8 @@ export async function fetchIssues(repoPath: string, filter?: string, options?: F
     labels: Array<{ name: string }>;
     url: string;
     milestone?: { title?: string } | null;
+    createdAt?: string;
+    updatedAt?: string;
   }>;
 
   return raw.map((issue) => ({
@@ -59,13 +61,15 @@ export async function fetchIssues(repoPath: string, filter?: string, options?: F
     labels: issue.labels.map((l) => l.name),
     url: issue.url,
     milestone: issue.milestone?.title ?? null,
+    ...(issue.createdAt !== undefined ? { createdAt: issue.createdAt } : {}),
+    ...(issue.updatedAt !== undefined ? { updatedAt: issue.updatedAt } : {}),
   }));
 }
 
 export async function fetchIssue(repoPath: string, issueNumber: number): Promise<Issue> {
   const result = await $({
     cwd: repoPath,
-  })`gh issue view ${issueNumber} --json number,title,body,labels,url,milestone`;
+  })`gh issue view ${issueNumber} --json number,title,body,labels,url,milestone,createdAt,updatedAt`;
   const raw = JSON.parse(result.stdout) as {
     number: number;
     title: string;
@@ -73,6 +77,8 @@ export async function fetchIssue(repoPath: string, issueNumber: number): Promise
     labels: Array<{ name: string }>;
     url: string;
     milestone?: { title?: string } | null;
+    createdAt?: string;
+    updatedAt?: string;
   };
 
   return {
@@ -82,6 +88,8 @@ export async function fetchIssue(repoPath: string, issueNumber: number): Promise
     labels: raw.labels.map((l) => l.name),
     url: raw.url,
     milestone: raw.milestone?.title ?? null,
+    ...(raw.createdAt !== undefined ? { createdAt: raw.createdAt } : {}),
+    ...(raw.updatedAt !== undefined ? { updatedAt: raw.updatedAt } : {}),
   };
 }
 
