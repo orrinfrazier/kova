@@ -297,6 +297,74 @@ describe('resolveThinkingLevel', () => {
   });
 });
 
+describe('getWaveTools with pipelineTool config (issue #300)', () => {
+  it('appends execute_pipeline to impl wave when enabled', () => {
+    const tools = getWaveTools('impl', '/tmp', { pipelineTool: { enabled: true } });
+    const names = tools.map((t) => t.name);
+    expect(names).toContain('execute_pipeline');
+    // Standard impl tools still present
+    expect(names).toContain('read');
+    expect(names).toContain('bash');
+  });
+
+  it('appends execute_pipeline to quality wave when enabled', () => {
+    const tools = getWaveTools('quality', '/tmp', { pipelineTool: { enabled: true } });
+    const names = tools.map((t) => t.name);
+    expect(names).toContain('execute_pipeline');
+    expect(names).toContain('bash');
+    expect(names).toContain('read');
+  });
+
+  it('does NOT append execute_pipeline to assess wave when enabled', () => {
+    const tools = getWaveTools('assess', '/tmp', { pipelineTool: { enabled: true } });
+    const names = tools.map((t) => t.name);
+    expect(names).not.toContain('execute_pipeline');
+  });
+
+  it('does NOT append execute_pipeline to spec wave when enabled', () => {
+    const tools = getWaveTools('spec', '/tmp', { pipelineTool: { enabled: true } });
+    const names = tools.map((t) => t.name);
+    expect(names).not.toContain('execute_pipeline');
+  });
+
+  it('does NOT append execute_pipeline to test wave when enabled', () => {
+    const tools = getWaveTools('test', '/tmp', { pipelineTool: { enabled: true } });
+    const names = tools.map((t) => t.name);
+    expect(names).not.toContain('execute_pipeline');
+  });
+
+  it('does NOT append execute_pipeline to review wave when enabled', () => {
+    const tools = getWaveTools('review', '/tmp', { pipelineTool: { enabled: true } });
+    const names = tools.map((t) => t.name);
+    expect(names).not.toContain('execute_pipeline');
+  });
+
+  it('default (no flag) does NOT include execute_pipeline (backward compat)', () => {
+    const tools = getWaveTools('impl', '/tmp');
+    const names = tools.map((t) => t.name);
+    expect(names).not.toContain('execute_pipeline');
+  });
+
+  it('disabled flag does NOT include execute_pipeline', () => {
+    const tools = getWaveTools('impl', '/tmp', { pipelineTool: { enabled: false } });
+    const names = tools.map((t) => t.name);
+    expect(names).not.toContain('execute_pipeline');
+  });
+
+  it('pipelineTool composes with customTools on impl wave', () => {
+    const customTools: CustomTool[] = [
+      { name: 'run-migrations', description: 'Run DB migrations', command: 'npm run db:migrate' },
+    ];
+    const tools = getWaveTools('impl', '/tmp', {
+      customTools,
+      pipelineTool: { enabled: true },
+    });
+    const names = tools.map((t) => t.name);
+    expect(names).toContain('run-migrations');
+    expect(names).toContain('execute_pipeline');
+  });
+});
+
 describe('getWaveTools with playwright config', () => {
   it('review wave includes bash when playwright is enabled', () => {
     const tools = getWaveTools('review', '/tmp', { playwright: { enabled: true } });
