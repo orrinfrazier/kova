@@ -429,6 +429,20 @@ export interface Issue {
    * from "milestone not loaded".
    */
   milestone?: string | null;
+  /**
+   * ISO 8601 timestamp when the issue was opened.
+   * `undefined` is reserved for legacy/test code paths — production fetchers
+   * (`fetchIssues` / `fetchIssue`) always populate it so the freshness factor
+   * in `scoreIssue` can compute staleness (issue #286).
+   */
+  createdAt?: string;
+  /**
+   * ISO 8601 timestamp of the last activity on the issue (edit, comment, label
+   * change). Used by `scoreIssue` to award `freshness_bonus` when an issue has
+   * gone ≥30 days without activity (issue #286). Same `undefined`-is-legacy
+   * convention as `createdAt`.
+   */
+  updatedAt?: string;
 }
 
 export type WaveName = 'assess' | 'spec' | 'test' | 'impl' | 'quality' | 'review' | 'ship' | 'brainstorm';
