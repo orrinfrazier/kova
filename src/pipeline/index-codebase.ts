@@ -15,6 +15,7 @@ import {
   saveLastIndexedSha,
 } from '../services/git-diff.js';
 import { upsertChunks } from '../services/vectordb.js';
+import type { VectorDBConfig } from '../types/config.js';
 import { log } from '../utils/logger.js';
 
 export interface IndexOptions {
@@ -22,6 +23,14 @@ export interface IndexOptions {
   full?: boolean;
   connectionUrl?: string | undefined;
   repoName?: string | undefined;
+  /**
+   * VectorDB config — when supplied (and enabled with a reindex_endpoint), chunks
+   * for each indexed file are POSTed to the real embedding sink so the index
+   * reflects in subsequent `queryCodeContext` lookups. When omitted, upsertChunks
+   * degrades to a no-op, preserving the existing CLI behavior for callers that
+   * have not yet wired through their config.
+   */
+  vectordb?: VectorDBConfig | undefined;
 }
 
 export interface IndexResult {
@@ -43,7 +52,7 @@ function isCodegraphCandidate(filePath: string): boolean {
 }
 
 export async function indexCodebase(options: IndexOptions): Promise<IndexResult> {
-  const { repoPath, full = false } = options;
+  const { repoPath, full = false, vectordb } = options;
   const start = Date.now();
 
   const incremental = !full;
@@ -73,7 +82,7 @@ export async function indexCodebase(options: IndexOptions): Promise<IndexResult>
       const source = await readFile(absolutePath, 'utf-8');
       const chunks = chunkFile(source, filePath);
       if (chunks.length > 0) {
-        await upsertChunks(repoPath, filePath, chunks);
+        await upsertChunks(repoPath, filePath, chunks, vectordb);
         totalChunks += chunks.length;
       }
 
