@@ -35,6 +35,7 @@ import { appendHistoryEntry, readHistory } from '../services/history.js';
 import { validateIsolation } from '../services/isolation.js';
 import { detectTooling } from '../services/language-detect.js';
 import * as metrics from '../services/metrics.js';
+import { formatPatterns, PatternStore, upsertPatternFromEpisode } from '../services/pattern-store.js';
 import { applyScopeToState, detectScope, formatScopeLogLine } from '../services/pipeline-scope.js';
 import { ensureScreenshotsDir, isPlaywrightEnabled, resolvePlaywrightEnv } from '../services/playwright.js';
 import { formatPRContext, type OpenPR } from '../services/pr-context.js';
@@ -667,6 +668,17 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       }
     }
 
+    // Pattern aggregation (#267): query top recurring (diagnosis × module) patterns
+    // for this repo and inject into the assess/spec wave context. Best-effort —
+    // disabled when episodes is off; absent DB returns no patterns silently.
+    let patternContext: string | undefined;
+    if (config.episodes?.enabled) {
+      const patterns = queryPatternContext(workDir, config.episodes, repoName);
+      if (patterns.length > 0) {
+        patternContext = formatPatterns(patterns);
+      }
+    }
+
     // WAVE A: Assess
     if (!shouldSkip('assess')) {
       const waveStart = Date.now();
@@ -682,6 +694,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           {
             ...(episodicContext != null && { episodicContext }),
             ...(repoContextText != null && { repoContextText }),
+            ...(patternContext != null && { patternContext }),
           },
         ),
         toOutputFormat(AssessResultSchema),
@@ -797,6 +810,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           ...(playbookContext != null && { playbookContext }),
           ...(codebaseContext != null && { codebaseContext }),
           ...(repoSearchText != null && { repoSearchText }),
+          ...(patternContext != null && { patternContext }),
         }),
         toOutputFormat(SpecResultSchema),
         mcpHandles,
@@ -1633,6 +1647,11 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       // best-effort — any failure is logged-and-swallowed so it never breaks
       // the existing REST recordEpisode path.
       upsertEpisodeFTS(workDir, config.episodes, episode, flog);
+
+      // Aggregate the episode into the recurring-pattern table (#267). Local,
+      // best-effort — failures logged + swallowed so a flaky DB never breaks
+      // the existing record/ship path.
+      upsertEpisodePattern(workDir, config.episodes, episode, flog);
     }
 
     // PR feedback collection: collect review comments after ship
@@ -1827,6 +1846,64 @@ function upsertEpisodeFTS(
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     logger.warn(`[episode-fts] Failed to upsert episode: ${msg}`);
+  } finally {
+    store?.close();
+  }
+}
+
+/* ================================================================== */
+/*  Pattern aggregation (#267) — helpers                               */
+/* ================================================================== */
+
+/**
+ * Resolve the on-disk path for the local pattern aggregation DB. Defaults to
+ * `{workDir}/.kova/patterns.db` — co-located with the FTS index for cleanup.
+ */
+function resolvePatternStorePath(workDir: string): string {
+  return joinPath(workDir, '.kova', 'patterns.db');
+}
+
+/**
+ * Open the local PatternStore, run `queryTopPatterns(repo)`, return the rows.
+ * Best-effort: any open/query failure returns []. Absent DB is the normal
+ * first-run state and produces a silent empty result.
+ */
+function queryPatternContext(
+  workDir: string,
+  config: EpisodicMemoryConfig,
+  repo: string,
+): import('../services/pattern-store.js').PatternRecord[] {
+  if (!config.enabled) return [];
+  let store: PatternStore | null = null;
+  try {
+    store = new PatternStore(resolvePatternStorePath(workDir));
+    return store.queryTopPatterns(repo, { limit: config.max_episodes });
+  } catch {
+    return [];
+  } finally {
+    store?.close();
+  }
+}
+
+/**
+ * Aggregate the completed episode into the pattern store. Best-effort: open or
+ * upsert failures are logged and swallowed so they never break the existing
+ * recordEpisode path.
+ */
+function upsertEpisodePattern(
+  workDir: string,
+  config: EpisodicMemoryConfig,
+  episode: EpisodeRecord,
+  logger: { warn: (msg: string) => void },
+): void {
+  if (!config.enabled) return;
+  let store: PatternStore | null = null;
+  try {
+    store = new PatternStore(resolvePatternStorePath(workDir));
+    upsertPatternFromEpisode(store, episode);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    logger.warn(`[pattern-store] Failed to upsert pattern: ${msg}`);
   } finally {
     store?.close();
   }
