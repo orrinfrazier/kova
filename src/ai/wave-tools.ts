@@ -4,7 +4,7 @@
 // Quality gets bash + read for running checks.
 // Ship is orchestrator-only (git operations via commitAndPush) — no AI agent spawned.
 
-import type { AgentTool, ThinkingLevel } from '@mariozechner/pi-agent-core';
+import type { AgentTool, ThinkingLevel } from '@earendil-works/pi-agent-core';
 import {
   createBashTool,
   createEditTool,
@@ -12,7 +12,7 @@ import {
   createGrepTool,
   createReadTool,
   createWriteTool,
-} from '@mariozechner/pi-coding-agent';
+} from '@earendil-works/pi-coding-agent';
 import type { CustomTool, RepoConfig, WaveName } from '../types/index.js';
 import { createPipelineTool, type PipelineToolOptions } from './pipeline-tool.js';
 

@@ -165,13 +165,13 @@ const mockTestRunner = vi.fn().mockResolvedValue({
 });
 
 // Mock the Agent class from pi-agent-core — vi.fn() works as constructor with `new`
-vi.mock('@mariozechner/pi-agent-core', () => ({
+vi.mock('@earendil-works/pi-agent-core', () => ({
   Agent: mockAgentConstructor,
 }));
 
 // Mock streamSimple (passed to Agent but never called since Agent is mocked)
-vi.mock('@mariozechner/pi-ai', async (importOriginal) => {
-  const original = await importOriginal<typeof import('@mariozechner/pi-ai')>();
+vi.mock('@earendil-works/pi-ai', async (importOriginal) => {
+  const original = await importOriginal<typeof import('@earendil-works/pi-ai')>();
   return {
     ...original,
     streamSimple: vi.fn(),
@@ -179,8 +179,8 @@ vi.mock('@mariozechner/pi-ai', async (importOriginal) => {
 });
 
 // Mock only convertToLlm from pi-coding-agent; keep real tool creators for wave-tools.ts
-vi.mock('@mariozechner/pi-coding-agent', async (importOriginal) => {
-  const original = await importOriginal<typeof import('@mariozechner/pi-coding-agent')>();
+vi.mock('@earendil-works/pi-coding-agent', async (importOriginal) => {
+  const original = await importOriginal<typeof import('@earendil-works/pi-coding-agent')>();
   return {
     ...original,
     convertToLlm: (msgs: unknown[]) => msgs,

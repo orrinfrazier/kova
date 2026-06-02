@@ -8,7 +8,7 @@
 // pi-mono today; kova#310 will extract a full `PiAgentRuntime` with event/message
 // translation, and kova#NEW-13 will add a ClaudeCliRuntime alternative.
 
-import type { AgentTool } from '@mariozechner/pi-agent-core';
+import type { AgentTool } from '@earendil-works/pi-agent-core';
 import type { z } from 'zod';
 import type { EventBus } from '../services/event-bus/bus.js';
 import type { EventWaveName } from '../services/event-bus/schema.js';

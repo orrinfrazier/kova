@@ -12,8 +12,8 @@
 // `getWaveTools` in `./wave-tools.ts`.
 
 import { runInNewContext } from 'node:vm';
-import type { AgentTool, AgentToolResult } from '@mariozechner/pi-agent-core';
-import { Type } from '@sinclair/typebox';
+import type { AgentTool, AgentToolResult } from '@earendil-works/pi-agent-core';
+import { Type } from 'typebox';
 
 // biome-ignore lint/suspicious/noExplicitAny: pi-mono AgentTool uses any for tool parameter schemas
 type AnyTool = AgentTool<any>;
@@ -155,8 +155,14 @@ export function createPipelineTool(
     label: 'execute_pipeline',
     description: DESCRIPTION,
     parameters: PIPELINE_TOOL_PARAMETERS,
-    async execute(_toolCallId: string, params: { script: string }): Promise<AgentToolResult<undefined>> {
-      const script = typeof params?.script === 'string' ? params.script : '';
+    async execute(_toolCallId: string, params: unknown): Promise<AgentToolResult<undefined>> {
+      const script =
+        params != null &&
+        typeof params === 'object' &&
+        'script' in params &&
+        typeof (params as { script: unknown }).script === 'string'
+          ? (params as { script: string }).script
+          : '';
       const lines: string[] = [];
       const state = { calls: 0, maxCalls };
       const sandboxConsole = makeSandboxConsole(lines);

@@ -16,7 +16,7 @@
 // lint/type errors anywhere in the repo — both are intentionally unrestricted).
 
 import { isAbsolute, relative, resolve } from 'node:path';
-import type { BeforeToolCallContext, BeforeToolCallResult } from '@mariozechner/pi-agent-core';
+import type { BeforeToolCallContext, BeforeToolCallResult } from '@earendil-works/pi-agent-core';
 
 export interface PieceScopeGuardOptions {
   /** Working directory for resolving relative tool-arg paths. */

@@ -25,9 +25,9 @@
  * `AgentRuntime` interface, not pi-mono symbols directly.
  */
 
-import { Agent } from '@mariozechner/pi-agent-core';
-import { streamSimple } from '@mariozechner/pi-ai';
-import { convertToLlm } from '@mariozechner/pi-coding-agent';
+import { Agent } from '@earendil-works/pi-agent-core';
+import { streamSimple } from '@earendil-works/pi-ai';
+import { convertToLlm } from '@earendil-works/pi-coding-agent';
 import type { AgentMessage, AgentRuntime, AgentRuntimeConfig, AgentRuntimeFactory, RuntimeEvent } from './types.js';
 
 /**

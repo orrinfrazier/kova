@@ -5,11 +5,11 @@
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import type { AgentTool, AgentToolResult } from '@mariozechner/pi-agent-core';
+import type { AgentTool, AgentToolResult } from '@earendil-works/pi-agent-core';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import type { Tool as MCPTool } from '@modelcontextprotocol/sdk/types.js';
-import { type TSchema, Type } from '@sinclair/typebox';
+import { type TSchema, Type } from 'typebox';
 import type { MCPConfig, MCPServerConfig } from '../types/config.js';
 import { log } from '../utils/logger.js';
 import type { AIWaveName } from './wave-tools.js';
@@ -175,10 +175,11 @@ export function mcpToolToAgentTool(serverName: string, mcpTool: MCPTool, client:
     description: mcpTool.description ?? mcpTool.name,
     label: `[MCP:${serverName}] ${mcpTool.name}`,
     parameters,
-    async execute(_toolCallId: string, params: Record<string, unknown>): Promise<AgentToolResult<unknown>> {
+    async execute(_toolCallId: string, params: unknown): Promise<AgentToolResult<unknown>> {
+      const args = (params != null && typeof params === 'object' ? params : {}) as Record<string, unknown>;
       const result = await client.callTool({
         name: mcpTool.name,
-        arguments: params,
+        arguments: args,
       });
 
       const resultContent = Array.isArray(result.content) ? result.content : [];

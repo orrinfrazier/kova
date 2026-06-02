@@ -1,7 +1,7 @@
 // afterToolCall hook — truncates large tool results to stay within a token budget.
 // Wired into spawnWaveAgent() via the pi-agent-core Agent constructor.
 
-import type { AfterToolCallContext, AfterToolCallResult } from '@mariozechner/pi-agent-core';
+import type { AfterToolCallContext, AfterToolCallResult } from '@earendil-works/pi-agent-core';
 
 /** Default token budget for tool results. Results exceeding this are truncated. */
 export const DEFAULT_TOKEN_BUDGET = 8_000;

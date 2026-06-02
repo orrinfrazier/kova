@@ -7,7 +7,7 @@ const mockSteer = vi.fn();
 const mockSubscribe = vi.fn().mockReturnValue(vi.fn());
 const mockAgentState = { messages: [] as unknown[], errorMessage: undefined as string | undefined };
 
-vi.mock('@mariozechner/pi-agent-core', () => {
+vi.mock('@earendil-works/pi-agent-core', () => {
   const MockAgent = vi.fn();
   MockAgent.mockImplementation(function (this: Record<string, unknown>) {
     Object.assign(this, {
@@ -24,11 +24,11 @@ vi.mock('@mariozechner/pi-agent-core', () => {
   return { Agent: MockAgent };
 });
 
-vi.mock('@mariozechner/pi-ai', () => ({
+vi.mock('@earendil-works/pi-ai', () => ({
   streamSimple: vi.fn(),
 }));
 
-vi.mock('@mariozechner/pi-coding-agent', () => ({
+vi.mock('@earendil-works/pi-coding-agent', () => ({
   convertToLlm: vi.fn(),
 }));
 
@@ -59,7 +59,7 @@ describe('defaultAgentRuntimeFactory (PiAgentRuntime stub)', () => {
 
   it('create() forwards systemPrompt, model, tools to the underlying Agent', async () => {
     const { defaultAgentRuntimeFactory } = await import('./index.js');
-    const { Agent } = await import('@mariozechner/pi-agent-core');
+    const { Agent } = await import('@earendil-works/pi-agent-core');
 
     const model = { id: 'gpt-4o', provider: 'openai', contextWindow: 128_000 } as never;
     const tools = [{ name: 't1' }, { name: 't2' }] as never[];

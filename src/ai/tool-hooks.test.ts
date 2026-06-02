@@ -1,4 +1,4 @@
-import type { AfterToolCallContext } from '@mariozechner/pi-agent-core';
+import type { AfterToolCallContext } from '@earendil-works/pi-agent-core';
 import { describe, expect, it } from 'vitest';
 import { createAfterToolCallHook, DEFAULT_TOKEN_BUDGET, estimateTokens, truncateContent } from './tool-hooks.js';
 

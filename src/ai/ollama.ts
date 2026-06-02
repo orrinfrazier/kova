@@ -2,7 +2,7 @@
 // Models are registered as `openai-completions` with baseUrl pointing to Ollama's /v1 endpoint,
 // so pi-ai's existing OpenAI completions streaming handles the actual HTTP calls.
 
-import type { Model, OpenAICompletionsCompat } from '@mariozechner/pi-ai';
+import type { Model, OpenAICompletionsCompat } from '@earendil-works/pi-ai';
 
 const DEFAULT_OLLAMA_URL = 'http://localhost:11434';
 
