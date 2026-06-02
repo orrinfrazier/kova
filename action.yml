@@ -36,6 +36,18 @@ inputs:
   focus:
     description: 'Comma-separated focus areas for brainstorm mode'
     required: false
+  trigger_phrase:
+    description: 'Phrase that triggers kova when found in an issue comment (e.g. "@kova"). Empty disables comment-based triggering.'
+    required: false
+    default: '@kova'
+  label_trigger:
+    description: 'Label whose addition to an issue triggers a fix run. Empty disables label-based triggering.'
+    required: false
+    default: 'kova'
+  assignee_trigger:
+    description: 'GitHub username whose assignment to an issue triggers a fix run. Leading "@" is stripped. Empty disables assignee-based triggering.'
+    required: false
+    default: ''
   anthropic_api_key:
     description: 'Anthropic API key'
     required: true
@@ -84,9 +96,59 @@ runs:
         KOVA_BUDGET: ${{ inputs.budget }}
         KOVA_FORCE: ${{ inputs.force }}
         KOVA_FOCUS: ${{ inputs.focus }}
+        KOVA_TRIGGER_PHRASE: ${{ inputs.trigger_phrase }}
+        KOVA_LABEL_TRIGGER: ${{ inputs.label_trigger }}
+        KOVA_ASSIGNEE_TRIGGER: ${{ inputs.assignee_trigger }}
+        ACTION_PATH: ${{ github.action_path }}
       run: |
         KOVA="node ${{ github.action_path }}/dist/cli/index.js"
         ARGS=""
+
+        # Event-aware trigger detection.
+        # If the workflow was triggered explicitly (workflow_dispatch with a
+        # mode/issue_number, or `all: true`), today's behavior is preserved.
+        # Otherwise we inspect GITHUB_EVENT_PATH for a matching label/assignee/
+        # comment trigger. No match => exit 0 silently (no kova run).
+        if [ -f "$GITHUB_EVENT_PATH" ]; then
+          DETECTION=$(node -e '
+            const fs = require("fs");
+            const path = require("path");
+            const actionPath = process.env.ACTION_PATH;
+            const { detectMode } = require(path.join(actionPath, "dist/action/index.js"));
+            const payload = JSON.parse(fs.readFileSync(process.env.GITHUB_EVENT_PATH, "utf8"));
+            const result = detectMode({
+              eventName: process.env.GITHUB_EVENT_NAME || "",
+              eventPayload: payload,
+              config: {
+                trigger_phrase: process.env.KOVA_TRIGGER_PHRASE || "",
+                label_trigger: process.env.KOVA_LABEL_TRIGGER || "",
+                assignee_trigger: process.env.KOVA_ASSIGNEE_TRIGGER || "",
+              },
+              explicit: {
+                mode: process.env.KOVA_MODE || undefined,
+                issue_number: process.env.KOVA_ISSUE || undefined,
+                all: process.env.KOVA_ALL === "true",
+              },
+            });
+            process.stdout.write(JSON.stringify(result || {}));
+          ' 2>/tmp/kova-detect.err) || {
+            echo "::warning::detectMode failed: $(cat /tmp/kova-detect.err 2>/dev/null)"
+            DETECTION=""
+          }
+          if [ -n "$DETECTION" ] && [ "$DETECTION" != "{}" ]; then
+            DETECTED_MODE=$(echo "$DETECTION" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const o=JSON.parse(s);process.stdout.write(o.mode||"")})')
+            DETECTED_ISSUE=$(echo "$DETECTION" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const o=JSON.parse(s);process.stdout.write(o.issue_number||"")})')
+            DETECTED_SOURCE=$(echo "$DETECTION" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const o=JSON.parse(s);process.stdout.write(o.source||"")})')
+            echo "Kova trigger detected: mode=$DETECTED_MODE issue=$DETECTED_ISSUE source=$DETECTED_SOURCE"
+            KOVA_MODE="$DETECTED_MODE"
+            [ -n "$DETECTED_ISSUE" ] && KOVA_ISSUE="$DETECTED_ISSUE"
+          elif [ -z "$KOVA_ISSUE" ] && [ "$KOVA_ALL" != "true" ] && [ "$KOVA_MODE" = "fix" ]; then
+            # No explicit fix target and no event trigger matched — exit cleanly.
+            echo "No kova trigger matched event $GITHUB_EVENT_NAME; skipping."
+            echo "status=skipped" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+        fi
 
         # Global options
         if [ -n "$KOVA_CONFIG" ]; then
