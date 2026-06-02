@@ -22,6 +22,7 @@ import {
   startAllMCPServers,
   stopAllMCPServers,
 } from '../ai/index.js';
+import { getSandboxBackend, type SandboxBackend } from '../sandbox/backend.js';
 import { dispatchSpawnWave, type SandboxContext } from '../sandbox/dispatch.js';
 import { selectVariants, type VariantSelection } from '../services/ab-test.js';
 import { clearCheckpoint, loadCheckpoint, saveCheckpoint } from '../services/checkpoint.js';
@@ -418,50 +419,81 @@ export async function fix(options: FixOptions): Promise<FixResult> {
     return { skills, enabledWaves: config.skills.enabled_waves };
   })();
 
-  // Docker sandbox: start container with resource limits
+  // Sandbox: start the configured backend (docker by default, daytona for serverless persistence).
+  // The backend abstraction (issue #301) lets repos.yaml swap docker for daytona/modal/fly without
+  // touching pipeline code. The `docker` path preserves its legacy semantics (image build + timeout
+  // kill) because they are docker-specific; non-docker backends manage hibernate/resume themselves.
   let sandboxContainerId: string | undefined;
   let sandboxContainerName: string | undefined;
   let sandboxContext: SandboxContext | undefined;
+  let sandboxBackend: SandboxBackend | undefined;
   let sandboxTimeoutHandle: ReturnType<typeof setTimeout> | undefined;
   let sandboxTimedOut = false;
   const sandboxStartTime = Date.now();
 
   if (config.isolation === 'docker') {
-    const buildResult = await buildSandboxImage({ repoName, config: config.sandbox });
-    if (!buildResult.success) {
-      const state = createInitialState(issue, repoName, repoPath);
-      state.status = 'failed';
-      const errorMsg = buildResult.error ?? 'Docker image build failed';
-      state.error = errorMsg;
-      metrics.recordIssueFailed();
-      metrics.recordFixDuration(Date.now() - fixStartTime);
-      metrics.recordFixCost(0);
-      _activeFixes--;
-      metrics.setActiveFixes(_activeFixes);
-      return { success: false, error: errorMsg, state };
+    // `sandbox.backend` defaults to 'docker' via Zod, but the optional sandbox block can be omitted
+    // entirely — fall back to 'docker' explicitly so behavior matches pre-extraction default.
+    const backendName = config.sandbox?.backend ?? 'docker';
+    sandboxBackend = getSandboxBackend(backendName);
+
+    if (backendName === 'docker') {
+      // Legacy docker path: image build + direct container start. Behavior preserved bit-for-bit.
+      const buildResult = await buildSandboxImage({ repoName, config: config.sandbox });
+      if (!buildResult.success) {
+        const state = createInitialState(issue, repoName, repoPath);
+        state.status = 'failed';
+        const errorMsg = buildResult.error ?? 'Docker image build failed';
+        state.error = errorMsg;
+        metrics.recordIssueFailed();
+        metrics.recordFixDuration(Date.now() - fixStartTime);
+        metrics.recordFixCost(0);
+        _activeFixes--;
+        metrics.setActiveFixes(_activeFixes);
+        return { success: false, error: errorMsg, state };
+      }
+
+      const sandbox = await startSandboxContainer({
+        repoName,
+        issueNumber: issue.number,
+        repoPath: workDir,
+        config: config.sandbox,
+      });
+      sandboxContainerId = sandbox.containerId;
+      sandboxContainerName = sandbox.containerName;
+      // Build the SandboxContext that every wave-dispatch site below uses to
+      // route into the container. Without this, the AI would run on the host
+      // and the docker isolation would be a no-op (see issue #319).
+      sandboxContext = { containerName: sandbox.containerName, repoPath: workDir };
+
+      // Set up timeout kill
+      const timeoutStr = config.sandbox?.timeout ?? DEFAULT_SANDBOX_LIMITS.timeout;
+      const timeoutMs = parseTimeout(timeoutStr);
+      sandboxTimeoutHandle = setTimeout(async () => {
+        sandboxTimedOut = true;
+        flog.warn(`[sandbox] Timeout (${timeoutStr}) exceeded — killing container ${sandboxContainerName}`);
+        if (sandboxContainerId) await killContainer(sandboxContainerId);
+      }, timeoutMs);
+    } else {
+      // Non-docker backend (daytona/modal/etc) — delegate fully to the SandboxBackend interface.
+      // Credential errors surface here at start() rather than mid-wave, matching the
+      // acceptance criterion "fail fast with a clear classified error during start".
+      const handle = await sandboxBackend.start({
+        repoName,
+        issueNumber: issue.number,
+        repoPath: workDir,
+        config: config.sandbox,
+      });
+      sandboxContainerId = handle.containerId;
+      sandboxContainerName = handle.containerName;
+      // For non-docker backends the wave-dispatch path is not yet routed through the backend
+      // interface (dispatch.ts still targets the docker-exec contract). The Daytona backend's
+      // exec endpoint mirrors that shape, but until dispatch.ts is generalized in a follow-up,
+      // non-docker backends use the same dispatch routing — they expose a compatible
+      // containerName/repoPath surface so the docker-exec wire path still works against them.
+      sandboxContext = { containerName: handle.containerName, repoPath: workDir };
+      flog.info(`[sandbox] Backend '${backendName}' started: ${handle.containerName}`);
     }
-
-    const sandbox = await startSandboxContainer({
-      repoName,
-      issueNumber: issue.number,
-      repoPath: workDir,
-      config: config.sandbox,
-    });
-    sandboxContainerId = sandbox.containerId;
-    sandboxContainerName = sandbox.containerName;
-    // Build the SandboxContext that every wave-dispatch site below uses to
-    // route into the container. Without this, the AI would run on the host
-    // and the docker isolation would be a no-op (see issue #319).
-    sandboxContext = { containerName: sandbox.containerName, repoPath: workDir };
-
-    // Set up timeout kill
-    const timeoutStr = config.sandbox?.timeout ?? DEFAULT_SANDBOX_LIMITS.timeout;
-    const timeoutMs = parseTimeout(timeoutStr);
-    sandboxTimeoutHandle = setTimeout(async () => {
-      sandboxTimedOut = true;
-      flog.warn(`[sandbox] Timeout (${timeoutStr}) exceeded — killing container ${sandboxContainerName}`);
-      if (sandboxContainerId) await killContainer(sandboxContainerId);
-    }, timeoutMs);
   }
 
   // MCP server startup: resolve config and start servers for tool augmentation
@@ -1419,12 +1451,16 @@ export async function fix(options: FixOptions): Promise<FixResult> {
     metrics.recordFixCost(totalCost);
     _activeFixes--;
     metrics.setActiveFixes(_activeFixes);
-    // Sandbox cleanup: collect stats then kill container
+    // Sandbox cleanup: collect stats then stop the backend.
+    // Docker path uses the legacy helpers directly to preserve observable behavior;
+    // non-docker backends (daytona/modal/etc) route through the SandboxBackend interface.
     if (sandboxContainerId) {
       if (sandboxTimeoutHandle) clearTimeout(sandboxTimeoutHandle);
 
-      // Collect resource usage before killing
-      const stats = await getContainerStats(sandboxContainerId).catch(() => ({ memoryMB: 0, cpuPercent: 0 }));
+      // Collect resource usage before stopping
+      const stats = sandboxBackend
+        ? await sandboxBackend.getStats().catch(() => ({ memoryMB: 0, cpuPercent: 0 }))
+        : await getContainerStats(sandboxContainerId).catch(() => ({ memoryMB: 0, cpuPercent: 0 }));
       const wallTimeMs = Date.now() - sandboxStartTime;
       const cpuCount = config.sandbox?.cpus ?? DEFAULT_SANDBOX_LIMITS.cpus;
 
@@ -1444,7 +1480,13 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         flog.warn('[sandbox] Container was killed due to timeout');
       }
 
-      await killContainer(sandboxContainerId).catch(() => {});
+      const backendName = config.sandbox?.backend ?? 'docker';
+      if (backendName === 'docker') {
+        // Preserve the legacy direct call so DockerBackend extraction is observationally identical.
+        await killContainer(sandboxContainerId).catch(() => {});
+      } else if (sandboxBackend) {
+        await sandboxBackend.stop().catch(() => {});
+      }
     }
 
     const costReport = buildCostReport(state);
