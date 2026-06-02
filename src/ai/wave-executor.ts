@@ -13,6 +13,7 @@ import type { z } from 'zod';
 import type { WaveHandoff, WaveModelConfig, WaveName } from '../types/index.js';
 import { log } from '../utils/logger.js';
 import { createTransformContext } from './context-transform.js';
+import { createDestructiveEditGuard, type DestructiveEditGuardOptions } from './destructive-edit-guard.js';
 import { classifyError, isSpendingCapBehavior, KovaError } from './errors.js';
 import { getModelString, resolveModelFromString, resolveWaveModel } from './models.js';
 import { isOllamaProvider, resolveOllamaApiKey } from './ollama.js';
@@ -23,6 +24,7 @@ import {
   type AssistantTurn,
   defaultAgentRuntimeFactory,
   type RuntimeAfterToolCallHook,
+  type RuntimeBeforeToolCallHook,
   type RuntimeTransformContext,
   type ThinkingLevel,
 } from './runtime/index.js';
@@ -107,6 +109,13 @@ export interface SpawnWaveAgentConfig {
    * are wired the same way.
    */
   runtimeFactory?: AgentRuntimeFactory;
+  /**
+   * Destructive-edit guard options. Set to configure thresholds, or `false` to disable.
+   * Default: enabled with built-in thresholds (60% write ratio, 20 lines for trivial edit replacement).
+   * The guard rejects Write/Edit tool calls that would delete large portions of files unless
+   * `allowDestructive: true` is passed in the tool args.
+   */
+  destructiveEditGuard?: Omit<DestructiveEditGuardOptions, 'cwd'> | false;
 }
 
 export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig): Promise<WaveHandoff<T>> {
@@ -126,6 +135,7 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
     contextThreshold: rawThreshold = 0.9,
     toolResultTruncation,
     runtimeFactory = defaultAgentRuntimeFactory,
+    destructiveEditGuard,
   } = config;
 
   const timeoutMs = explicitTimeout ?? DEFAULT_WAVE_TIMEOUTS[wave];
@@ -145,13 +155,20 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
   const afterToolCallHook =
     toolResultTruncation === false ? undefined : createAfterToolCallHook(toolResultTruncation ?? undefined);
 
+  // Destructive-edit guard: rejects Write/Edit calls that would wipe out large
+  // portions of files. Only active on waves that have edit/write tools (test, impl).
+  // Disabled via `destructiveEditGuard: false`; otherwise uses defaults plus any
+  // caller-provided overrides.
+  const beforeToolCallHook =
+    destructiveEditGuard === false ? undefined : createDestructiveEditGuard({ cwd, ...(destructiveEditGuard ?? {}) });
+
   // Construct via the AgentRuntime factory (kova#309). The default factory
   // wraps pi-mono Agent; kova#310 will extract a full PiAgentRuntime adapter.
   //
-  // `createTransformContext` and `createAfterToolCallHook` return pi-mono-typed
-  // functions today. They are structurally compatible with the kova hooks,
-  // but cross the package boundary, so we widen at the call site (the adapter
-  // narrows back to pi-mono types). Cleaned up in kova#310 when the adapter
+  // `createTransformContext`, `createAfterToolCallHook`, and `createDestructiveEditGuard`
+  // return pi-mono-typed functions today. They are structurally compatible with the
+  // kova hooks, but cross the package boundary, so we widen at the call site (the
+  // adapter narrows back to pi-mono types). Cleaned up in kova#310 when the adapter
   // owns the translation in one place.
   const agent = runtimeFactory.create({
     systemPrompt: effectiveSystemPrompt,
@@ -162,6 +179,9 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
     transformContext: createTransformContext(model.contextWindow) as unknown as RuntimeTransformContext,
     ...(afterToolCallHook && {
       afterToolCall: afterToolCallHook as unknown as RuntimeAfterToolCallHook,
+    }),
+    ...(beforeToolCallHook && {
+      beforeToolCall: beforeToolCallHook as unknown as RuntimeBeforeToolCallHook,
     }),
   });
 
