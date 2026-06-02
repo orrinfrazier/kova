@@ -163,6 +163,13 @@ export interface PieceTILoopConfig {
   projectContext?: ProjectContext | undefined;
   testRunner?: TestRunner | undefined;
   diffRunner?: DiffRunner | undefined;
+  /**
+   * Optional file reader for MISSING_CONTEXT diagnosis (issue #284).
+   * When the mid-loop diagnosis is MISSING_CONTEXT, paths cited in the
+   * failure output are read via this reader and injected into the impl
+   * context. Defaults to `defaultFileReader` (fs.readFile).
+   */
+  fileReader?: FileReader | undefined;
   /** Route every wave through the docker sandbox container when set. */
   sandbox?: SandboxContext | undefined;
   /**
@@ -181,6 +188,12 @@ export interface PieceTILoopResult {
   cost: number;
   attempts: number;
   diagnosis?: TILoopDiagnosis;
+  /**
+   * True when mid-loop diagnosis was SPEC_WRONG and the loop broke early.
+   * The orchestrator should re-run spec rather than burn more retries.
+   * Issue #284 — parity with runTILoop.
+   */
+  shouldRespec?: boolean;
 }
 
 export interface ParallelPieceTILoopConfig {
@@ -497,6 +510,115 @@ export function classifyDiagnosis(failureOutputs: string[], thrashingSignal?: Th
   return 'APPROACH_WRONG';
 }
 
+// --- Shared mid-loop diagnosis helper (Issue #284) ---
+//
+// Both runTILoop (single piece) and runPieceTILoop (per-piece, used for 2+
+// pieces) need the same logic to translate a list of failure outputs +
+// modified-files history into either an escalation hint, a missing-context
+// hint (with injected file contents), or an early-break signal for SPEC_WRONG.
+//
+// Before this helper existed, runTILoop handled all four diagnoses while
+// runPieceTILoop only handled APPROACH_WRONG — multi-piece issues silently
+// lost MISSING_CONTEXT file injection, STUCK partial-fix hinting, and
+// SPEC_WRONG early-break. See the spec on issue #284.
+
+export interface MidLoopDiagnosisInput {
+  /** All test failure outputs collected so far this loop. */
+  failureOutputs: string[];
+  /** Files modified per impl attempt (parallel to failureOutputs). Empty array → INSUFFICIENT_DATA thrashing. */
+  modifiedFilesPerAttempt: string[][];
+  /** Spec-listed files for the current piece (or all spec files for single-piece runTILoop). */
+  specFiles: string[];
+  /** Resolved working directory for file-reading (used when MISSING_CONTEXT cites relative paths). */
+  workDir: string;
+  /** Injectable file reader (defaults to fs.readFile via defaultFileReader). */
+  fileReader?: FileReader;
+}
+
+export interface MidLoopDiagnosisResult {
+  /** Hint to prepend to the impl context (APPROACH_WRONG / STUCK). */
+  escalationHint?: string;
+  /** Block of file contents to append to the impl context (MISSING_CONTEXT). */
+  missingContextHint?: string;
+  /** True when the helper detected SPEC_WRONG — caller should break the impl retry loop. */
+  shouldBreakForRespec: boolean;
+}
+
+/**
+ * Given the failure history of an impl retry loop, decide what hint (if any)
+ * to inject into the next impl context, and whether to break early for
+ * re-spec. Shared between runTILoop and runPieceTILoop so both loops respond
+ * to every diagnosis type identically. See issue #284.
+ */
+export async function applyMidLoopDiagnosis(input: MidLoopDiagnosisInput): Promise<MidLoopDiagnosisResult> {
+  const { failureOutputs, modifiedFilesPerAttempt, specFiles, workDir, fileReader = defaultFileReader } = input;
+
+  if (failureOutputs.length < 2) {
+    return { shouldBreakForRespec: false };
+  }
+
+  const thrashing = detectThrashing(modifiedFilesPerAttempt);
+  const diagnosis = classifyDiagnosis(failureOutputs, thrashing);
+  log.info(`[mid-loop-diagnosis] After ${failureOutputs.length} failures: ${diagnosis} (thrashing: ${thrashing})`);
+
+  switch (diagnosis) {
+    case 'APPROACH_WRONG': {
+      const prevAttempts = failureOutputs
+        .map((output, i) => `### Attempt ${i + 1}\n\`\`\`\n${output}\n\`\`\``)
+        .join('\n\n');
+      return {
+        escalationHint: `Diagnosis: APPROACH_WRONG — each attempt fails different tests.\nThe previous approach failed. Try a fundamentally different strategy.\n\n${prevAttempts}`,
+        shouldBreakForRespec: false,
+      };
+    }
+    case 'SPEC_WRONG': {
+      // Break early — spec needs re-running, no point trying more impl attempts.
+      return { shouldBreakForRespec: true };
+    }
+    case 'MISSING_CONTEXT': {
+      // Extract file paths from errors, read them, inject as context.
+      const lastOutput = failureOutputs.at(-1) ?? '';
+      const missingPaths = extractMissingFilePaths(lastOutput);
+      if (missingPaths.length === 0) {
+        // specFiles is unused for MISSING_CONTEXT today, but is reserved for
+        // future per-piece scoping (e.g. only inject files inside the piece).
+        void specFiles;
+        return { shouldBreakForRespec: false };
+      }
+      const fileContents: string[] = [];
+      for (const filePath of missingPaths) {
+        try {
+          const resolvedPath = path.isAbsolute(filePath) ? filePath : path.resolve(workDir, filePath);
+          const content = await fileReader(resolvedPath);
+          fileContents.push(`### ${filePath}\n\`\`\`\n${content}\n\`\`\``);
+        } catch {
+          log.warn(`[mid-loop-diagnosis] Could not read missing file: ${filePath}`);
+        }
+      }
+      if (fileContents.length === 0) {
+        return { shouldBreakForRespec: false };
+      }
+      return {
+        missingContextHint: `## Missing Context — Injected Files\n\nThe previous attempt failed because these files were referenced but not available to you:\n\n${fileContents.join('\n\n')}`,
+        shouldBreakForRespec: false,
+      };
+    }
+    case 'STUCK': {
+      // Inject partial-fix hint — focus on passing a subset of tests.
+      const lastOutput = failureOutputs.at(-1) ?? '';
+      const failedMatch = lastOutput.match(/(\d+)\s+failed/);
+      const passedMatch = lastOutput.match(/(\d+)\s+passed/);
+      const failedCount = failedMatch?.[1] ? Number.parseInt(failedMatch[1], 10) : 0;
+      const passedCount = passedMatch?.[1] ? Number.parseInt(passedMatch[1], 10) : 0;
+      const countInfo = failedCount > 0 || passedCount > 0 ? ` (${failedCount} failing, ${passedCount} passing)` : '';
+      return {
+        escalationHint: `Diagnosis: STUCK — repeated attempts have not made progress${countInfo}.\nFocus on a partial fix: keep passing tests green and fix the easiest failing test first. It is acceptable to submit a partial solution that passes a subset of tests.`,
+        shouldBreakForRespec: false,
+      };
+    }
+  }
+}
+
 // --- Wave result conversion ---
 
 function toWaveResult(
@@ -604,62 +726,20 @@ export async function runTILoop(config: TILoopConfig): Promise<TILoopResult> {
       }
     }
 
-    // Diagnosis-driven strategy after 2+ failures
+    // Diagnosis-driven strategy after 2+ failures — delegated to shared helper (issue #284)
     if (failureOutputs.length >= 2) {
-      const midThrashing = detectThrashing(modifiedFilesPerAttempt);
-      const midDiagnosis = classifyDiagnosis(failureOutputs, midThrashing);
-      log.info(
-        `[ti-loop] Mid-loop diagnosis after ${failureOutputs.length} failures: ${midDiagnosis} (thrashing: ${midThrashing})`,
-      );
-
-      switch (midDiagnosis) {
-        case 'APPROACH_WRONG': {
-          // Existing behavior: inject escalation hint with previous attempts
-          const prevAttempts = failureOutputs
-            .map((output, i) => `### Attempt ${i + 1}\n\`\`\`\n${output}\n\`\`\``)
-            .join('\n\n');
-          escalationHint = `Diagnosis: APPROACH_WRONG — each attempt fails different tests.\nThe previous approach failed. Try a fundamentally different strategy.\n\n${prevAttempts}`;
-          break;
-        }
-        case 'SPEC_WRONG': {
-          // Break early — spec needs re-running, no point trying more impl attempts
-          shouldBreakForRespec = true;
-          break;
-        }
-        case 'MISSING_CONTEXT': {
-          // Extract file paths from errors, read them, inject as context
-          const lastOutput = failureOutputs.at(-1) ?? '';
-          const missingPaths = extractMissingFilePaths(lastOutput);
-          if (missingPaths.length > 0) {
-            const fileContents: string[] = [];
-            for (const filePath of missingPaths) {
-              try {
-                const resolvedPath = path.isAbsolute(filePath) ? filePath : path.resolve(workDir, filePath);
-                const content = await fileReader(resolvedPath);
-                fileContents.push(`### ${filePath}\n\`\`\`\n${content}\n\`\`\``);
-              } catch {
-                log.warn(`[ti-loop] Could not read missing file: ${filePath}`);
-              }
-            }
-            if (fileContents.length > 0) {
-              missingContextHint = `## Missing Context — Injected Files\n\nThe previous attempt failed because these files were referenced but not available to you:\n\n${fileContents.join('\n\n')}`;
-            }
-          }
-          break;
-        }
-        case 'STUCK': {
-          // Inject partial-fix hint — focus on passing a subset of tests
-          const lastOutput = failureOutputs.at(-1) ?? '';
-          const failedMatch = lastOutput.match(/(\d+)\s+failed/);
-          const passedMatch = lastOutput.match(/(\d+)\s+passed/);
-          const failedCount = failedMatch?.[1] ? Number.parseInt(failedMatch[1], 10) : 0;
-          const passedCount = passedMatch?.[1] ? Number.parseInt(passedMatch[1], 10) : 0;
-          const countInfo =
-            failedCount > 0 || passedCount > 0 ? ` (${failedCount} failing, ${passedCount} passing)` : '';
-          escalationHint = `Diagnosis: STUCK — repeated attempts have not made progress${countInfo}.\nFocus on a partial fix: keep passing tests green and fix the easiest failing test first. It is acceptable to submit a partial solution that passes a subset of tests.`;
-          break;
-        }
-      }
+      const specArtifact = waveResults.spec?.artifact;
+      const specFiles = isSpecResult(specArtifact) ? specArtifact.pieces.flatMap((p) => p.files) : [];
+      const midResult = await applyMidLoopDiagnosis({
+        failureOutputs,
+        modifiedFilesPerAttempt,
+        specFiles,
+        workDir,
+        fileReader,
+      });
+      escalationHint = midResult.escalationHint ?? escalationHint;
+      missingContextHint = midResult.missingContextHint;
+      shouldBreakForRespec = midResult.shouldBreakForRespec;
     }
 
     // SPEC_WRONG: break early — caller will re-run spec
@@ -757,6 +837,8 @@ export async function runPieceTILoop(config: PieceTILoopConfig): Promise<PieceTI
     projectContext,
     maxRetries = 3,
     testRunner = defaultTestRunner,
+    diffRunner = defaultDiffRunner,
+    fileReader = defaultFileReader,
     sandbox,
     cacheContext,
   } = config;
@@ -796,15 +878,22 @@ export async function runPieceTILoop(config: PieceTILoopConfig): Promise<PieceTI
   const testWaveResult = toWaveResult('test', testExecResult);
   cost += testExecResult.cost;
 
-  // Step 2: Impl retry loop — piece-scoped context
+  // Step 2: Impl retry loop — piece-scoped context.
+  // Issue #284: mirrors runTILoop's full-fidelity diagnosis switch via the
+  // shared applyMidLoopDiagnosis helper. Previously only APPROACH_WRONG was
+  // handled; multi-piece issues now also benefit from MISSING_CONTEXT file
+  // injection, STUCK partial-fix hints, and SPEC_WRONG early break.
   const failureOutputs: string[] = [];
+  const modifiedFilesPerAttempt: string[][] = [];
   let implWaveResult: WaveResult | undefined;
   let testsPassing = false;
+  let shouldBreakForRespec = false;
 
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     log.info(`[piece-ti-loop] Piece ${pieceIndex}: impl attempt ${attempt + 1}/${maxRetries}`);
 
     let escalationHint: string | undefined;
+    let missingContextHint: string | undefined;
 
     // Early diagnosis after first failure via static analysis (saves 1 retry cycle)
     if (failureOutputs.length === 1) {
@@ -814,21 +903,33 @@ export async function runPieceTILoop(config: PieceTILoopConfig): Promise<PieceTI
       }
     }
 
-    // Existing 2-failure diagnosis for APPROACH_WRONG
+    // Diagnosis-driven strategy after 2+ failures — shared helper with runTILoop (issue #284)
     if (failureOutputs.length >= 2) {
-      const midDiagnosis = classifyDiagnosis(failureOutputs);
-      if (midDiagnosis === 'APPROACH_WRONG') {
-        const prevAttempts = failureOutputs
-          .map((output, i) => `### Attempt ${i + 1}\n\`\`\`\n${output}\n\`\`\``)
-          .join('\n\n');
-        escalationHint = `Diagnosis: APPROACH_WRONG — each attempt fails different tests.\nTry a fundamentally different strategy.\n\n${prevAttempts}`;
-      }
+      const midResult = await applyMidLoopDiagnosis({
+        failureOutputs,
+        modifiedFilesPerAttempt,
+        specFiles: piece.files,
+        workDir,
+        fileReader,
+      });
+      escalationHint = midResult.escalationHint ?? escalationHint;
+      missingContextHint = midResult.missingContextHint;
+      shouldBreakForRespec = midResult.shouldBreakForRespec;
     }
 
-    const implContext = buildPieceContext('impl', piece, {
+    // SPEC_WRONG: break early — caller will re-run spec
+    if (shouldBreakForRespec) {
+      log.info(`[piece-ti-loop] Piece ${pieceIndex}: SPEC_WRONG detected mid-loop — breaking early for re-spec`);
+      break;
+    }
+
+    let implContext = buildPieceContext('impl', piece, {
       ...(escalationHint != null && { escalationHint }),
       ...(failureOutputs.length > 0 && { lastFailureOutput: failureOutputs.at(-1) }),
     });
+    if (missingContextHint != null) {
+      implContext += `\n\n${missingContextHint}`;
+    }
 
     const implSystemPrompt = await loadPrompt('impl', repoConfig.tools, projectContext, resolvedPromptsDir);
     const implExecResult = await dispatchExecuteWave(
@@ -853,6 +954,10 @@ export async function runPieceTILoop(config: PieceTILoopConfig): Promise<PieceTI
     implWaveResult = toWaveResult('impl', implExecResult);
     cost += implExecResult.cost;
 
+    // Capture modified files after impl, before test run (issue #284 — feeds thrashing detection)
+    const modifiedFiles = await diffRunner(workDir);
+    modifiedFilesPerAttempt.push(modifiedFiles);
+
     // Run tests via bash
     log.info(`[piece-ti-loop] Piece ${pieceIndex}: running tests`);
     const testRun = await testRunner(testCmd, workDir);
@@ -867,11 +972,21 @@ export async function runPieceTILoop(config: PieceTILoopConfig): Promise<PieceTI
     failureOutputs.push(testRun.output);
   }
 
-  // Diagnosis if all retries exhausted
+  // Final diagnosis if all retries exhausted (or broke early for re-spec).
+  // When broken early, the helper already returned SPEC_WRONG; surface it.
   let diagnosis: TILoopDiagnosis | undefined;
-  if (!testsPassing && failureOutputs.length >= 2) {
-    diagnosis = classifyDiagnosis(failureOutputs);
-    log.error(`[piece-ti-loop] Piece ${pieceIndex}: all retries exhausted — diagnosis: ${diagnosis}`);
+  let shouldRespec = false;
+  if (!testsPassing && shouldBreakForRespec) {
+    diagnosis = 'SPEC_WRONG';
+    shouldRespec = true;
+    log.error(`[piece-ti-loop] Piece ${pieceIndex}: SPEC_WRONG — will re-spec`);
+  } else if (!testsPassing && failureOutputs.length >= 2) {
+    const finalThrashing = detectThrashing(modifiedFilesPerAttempt);
+    diagnosis = classifyDiagnosis(failureOutputs, finalThrashing);
+    shouldRespec = diagnosis === 'SPEC_WRONG';
+    log.error(
+      `[piece-ti-loop] Piece ${pieceIndex}: all retries exhausted — diagnosis: ${diagnosis}, thrashing: ${finalThrashing}${shouldRespec ? ', will re-spec' : ''}`,
+    );
   } else if (!testsPassing) {
     diagnosis = 'STUCK';
   }
@@ -886,6 +1001,7 @@ export async function runPieceTILoop(config: PieceTILoopConfig): Promise<PieceTI
     cost,
     attempts,
     ...(diagnosis != null && { diagnosis }),
+    ...(shouldRespec && { shouldRespec }),
   };
 }
 
@@ -979,6 +1095,9 @@ export async function runParallelPieceTILoop(config: ParallelPieceTILoopConfig):
         repoConfig,
         projectContext,
         testRunner,
+        // Issue #284: forward diffRunner so thrashing detection has signal and
+        // SPEC_WRONG diagnoses surface here too (not just in the single-piece path).
+        ...(config.diffRunner != null && { diffRunner: config.diffRunner }),
         ...(config.testCommand != null && { testCommand: config.testCommand }),
         ...(sandbox != null && { sandbox }),
         ...(cacheContext != null && { cacheContext }),
@@ -1021,6 +1140,15 @@ export async function runParallelPieceTILoop(config: ParallelPieceTILoopConfig):
     turns: pieceResults.reduce((sum, r) => sum + r.implWaveResult.turns, 0),
   };
 
+  // Issue #284: if any piece returned SPEC_WRONG, surface shouldRespec so the
+  // orchestrator (fix.ts) can re-run spec instead of burning further retries —
+  // matches the single-piece passthrough that already lives a few lines above.
+  const anyRespecNeeded = pieceResults.some((r) => r.shouldRespec === true);
+  // Prefer the SPEC_WRONG piece's diagnosis when present, otherwise fall back
+  // to the first failure's diagnosis (preserves existing behavior).
+  const respecPiece = pieceResults.find((r) => r.shouldRespec === true);
+  const surfacedDiagnosis = respecPiece?.diagnosis ?? firstFailure?.diagnosis;
+
   return {
     testWaveResult: aggregatedTestResult,
     implWaveResult: aggregatedImplResult,
@@ -1028,7 +1156,8 @@ export async function runParallelPieceTILoop(config: ParallelPieceTILoopConfig):
     totalCost,
     attempts: maxAttempts,
     pieceResults,
-    ...(firstFailure?.diagnosis != null && { diagnosis: firstFailure.diagnosis }),
+    ...(surfacedDiagnosis != null && { diagnosis: surfacedDiagnosis }),
+    ...(anyRespecNeeded && { shouldRespec: true }),
     modifiedFilesPerAttempt: [],
   };
 }

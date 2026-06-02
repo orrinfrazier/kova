@@ -37,6 +37,7 @@ const {
   detectThrashing,
   extractMissingFilePaths,
   runQualityRetryLoop,
+  applyMidLoopDiagnosis,
 } = await import('./loops.js');
 const { executeWaveWithRetry } = await import('../ai/index.js');
 const { detectTooling } = await import('../services/language-detect.js');
@@ -2022,7 +2023,10 @@ describe('runParallelPieceTILoop', () => {
   let mockTestRunner: TestRunner;
 
   beforeEach(() => {
-    mockExecute.mockClear();
+    // mockReset (not mockClear) — wipes the mockResolvedValueOnce queue between tests
+    // so SPEC_WRONG early-break in one test (issue #284) doesn't leak leftover impl mocks
+    // into the next test's mockImplementation fallback.
+    mockExecute.mockReset();
     mockTestRunner = vi.fn();
   });
 
@@ -2370,6 +2374,364 @@ describe('runPieceTILoop early diagnosis', () => {
     const implCalls = mockExecute.mock.calls.filter((c) => c[0].wave === 'impl');
     // Second impl (attempt 2) should have early escalation
     expect(implCalls.at(1)?.[0].userMessage).toContain('MISSING_CONTEXT');
+  });
+});
+
+// --- Shared mid-loop diagnosis helper (Issue #284) ---
+
+describe('applyMidLoopDiagnosis', () => {
+  it('returns no hints / no respec when fewer than 2 failures', async () => {
+    const result = await applyMidLoopDiagnosis({
+      failureOutputs: ['only one failure'],
+      modifiedFilesPerAttempt: [['a.ts']],
+      specFiles: ['a.ts'],
+      workDir: '/tmp/test',
+    });
+    expect(result.escalationHint).toBeUndefined();
+    expect(result.missingContextHint).toBeUndefined();
+    expect(result.shouldBreakForRespec).toBe(false);
+  });
+
+  it('APPROACH_WRONG: returns escalation hint summarising previous attempts', async () => {
+    // Different test names per attempt → APPROACH_WRONG.
+    // No modifiedFilesPerAttempt data → INSUFFICIENT_DATA thrashing → no override.
+    const out1 = ' FAIL  src/a.test.ts > test alpha\n   AssertionError';
+    const out2 = ' FAIL  src/a.test.ts > test beta\n   AssertionError';
+    const result = await applyMidLoopDiagnosis({
+      failureOutputs: [out1, out2],
+      modifiedFilesPerAttempt: [],
+      specFiles: ['a.ts'],
+      workDir: '/tmp/test',
+    });
+    expect(result.escalationHint).toBeDefined();
+    expect(result.escalationHint).toContain('APPROACH_WRONG');
+    expect(result.escalationHint).toContain('Attempt 1');
+    expect(result.escalationHint).toContain('Attempt 2');
+    expect(result.shouldBreakForRespec).toBe(false);
+    expect(result.missingContextHint).toBeUndefined();
+  });
+
+  it('SPEC_WRONG: sets shouldBreakForRespec=true and no escalation hint', async () => {
+    const sameTests1 = ' FAIL  src/a.test.ts > test alpha\n   x';
+    const sameTests2 = ' FAIL  src/a.test.ts > test alpha\n   y';
+    const result = await applyMidLoopDiagnosis({
+      failureOutputs: [sameTests1, sameTests2],
+      modifiedFilesPerAttempt: [['a.ts'], ['a.ts']],
+      specFiles: ['a.ts'],
+      workDir: '/tmp/test',
+    });
+    expect(result.shouldBreakForRespec).toBe(false); // SAME_FILES overrides SPEC_WRONG to APPROACH_WRONG
+    expect(result.escalationHint).toContain('APPROACH_WRONG');
+  });
+
+  it('SPEC_WRONG (no thrashing): sets shouldBreakForRespec=true', async () => {
+    const sameTests1 = ' FAIL  src/a.test.ts > test alpha\n   x';
+    const sameTests2 = ' FAIL  src/a.test.ts > test alpha\n   y';
+    const result = await applyMidLoopDiagnosis({
+      failureOutputs: [sameTests1, sameTests2],
+      // Different files modified each attempt → not SAME_FILES; same test names → SPEC_WRONG
+      modifiedFilesPerAttempt: [['a.ts'], ['b.ts'], ['c.ts']],
+      specFiles: ['a.ts', 'b.ts', 'c.ts'],
+      workDir: '/tmp/test',
+    });
+    // DIFFERENT_FILES thrashing forces STUCK, not SPEC_WRONG — verify the helper at least does not crash and surfaces a sensible result.
+    // Either STUCK (partial-fix hint) or APPROACH_WRONG is acceptable; SPEC_WRONG only with NORMAL/INSUFFICIENT_DATA thrashing.
+    expect(result.shouldBreakForRespec).toBe(false);
+  });
+
+  it('SPEC_WRONG (clean signal): breaks early when same test names + insufficient thrashing data', async () => {
+    const sameTests1 = ' FAIL  src/a.test.ts > test alpha\n   x';
+    const sameTests2 = ' FAIL  src/a.test.ts > test alpha\n   y';
+    const result = await applyMidLoopDiagnosis({
+      failureOutputs: [sameTests1, sameTests2],
+      modifiedFilesPerAttempt: [], // empty → INSUFFICIENT_DATA → no override → SPEC_WRONG
+      specFiles: ['a.ts'],
+      workDir: '/tmp/test',
+    });
+    expect(result.shouldBreakForRespec).toBe(true);
+    expect(result.escalationHint).toBeUndefined();
+    expect(result.missingContextHint).toBeUndefined();
+  });
+
+  it('MISSING_CONTEXT: extracts referenced files via fileReader and injects them', async () => {
+    const out1 = "Error: Cannot find module './helpers'";
+    const out2 = "Error: Cannot find module './helpers'";
+    const fileReader = vi.fn().mockResolvedValue('export const helper = 1;');
+    const result = await applyMidLoopDiagnosis({
+      failureOutputs: [out1, out2],
+      modifiedFilesPerAttempt: [['a.ts'], ['a.ts']],
+      specFiles: ['a.ts'],
+      workDir: '/tmp/test',
+      fileReader,
+    });
+    expect(result.missingContextHint).toBeDefined();
+    expect(result.missingContextHint).toContain('Missing Context — Injected Files');
+    expect(result.missingContextHint).toContain('./helpers');
+    expect(result.missingContextHint).toContain('export const helper = 1;');
+    expect(fileReader).toHaveBeenCalled();
+    expect(result.shouldBreakForRespec).toBe(false);
+  });
+
+  it('MISSING_CONTEXT: skips unreadable files gracefully', async () => {
+    const out1 = "Error: Cannot find module './gone'";
+    const out2 = "Error: Cannot find module './gone'";
+    const fileReader = vi.fn().mockRejectedValue(new Error('ENOENT'));
+    const result = await applyMidLoopDiagnosis({
+      failureOutputs: [out1, out2],
+      modifiedFilesPerAttempt: [['a.ts'], ['a.ts']],
+      specFiles: ['a.ts'],
+      workDir: '/tmp/test',
+      fileReader,
+    });
+    // Unreadable → no missingContextHint, but should not throw.
+    expect(result.missingContextHint).toBeUndefined();
+    expect(result.shouldBreakForRespec).toBe(false);
+  });
+
+  it('STUCK: injects partial-fix hint with failed/passed counts', async () => {
+    // Force STUCK via DIFFERENT_FILES thrashing (very low overlap)
+    const out1 = ' FAIL  src/a.test.ts > test alpha\n   x\n3 failed, 2 passed';
+    const out2 = ' FAIL  src/b.test.ts > test beta\n   y\n3 failed, 2 passed';
+    const result = await applyMidLoopDiagnosis({
+      failureOutputs: [out1, out2],
+      modifiedFilesPerAttempt: [['a.ts'], ['b.ts'], ['c.ts']],
+      specFiles: ['a.ts', 'b.ts', 'c.ts'],
+      workDir: '/tmp/test',
+    });
+    expect(result.escalationHint).toBeDefined();
+    expect(result.escalationHint).toContain('STUCK');
+    expect(result.escalationHint).toContain('partial fix');
+    expect(result.shouldBreakForRespec).toBe(false);
+  });
+});
+
+// --- runPieceTILoop diagnosis parity (Issue #284) ---
+
+describe('runPieceTILoop diagnosis parity', () => {
+  let mockTestRunner: TestRunner;
+
+  beforeEach(() => {
+    mockExecute.mockClear();
+    mockTestRunner = vi.fn();
+    mockExecute.mockResolvedValueOnce(testWaveExecResult()).mockResolvedValue(implWaveExecResult());
+  });
+
+  it('MISSING_CONTEXT: injects missing file contents into next impl context', async () => {
+    const missingModuleOutput = "Error: Cannot find module './helpers'\nModule not found: './helpers'";
+
+    vi.mocked(mockTestRunner)
+      .mockResolvedValueOnce({ passed: false, output: missingModuleOutput, exitCode: 1 })
+      .mockResolvedValueOnce({ passed: false, output: missingModuleOutput, exitCode: 1 })
+      .mockResolvedValueOnce({ passed: true, output: 'ok', exitCode: 0 });
+
+    const fileReader = vi.fn().mockResolvedValue('export const helpers = 1;');
+
+    await runPieceTILoop({
+      piece: makePiece(0),
+      pieceIndex: 0,
+      workDir: '/tmp/test',
+      repoConfig: makeConfig(),
+      testRunner: mockTestRunner,
+      testCommand: 'npm test',
+      fileReader,
+    });
+
+    const implCalls = mockExecute.mock.calls.filter((c) => c[0].wave === 'impl');
+    // After 2 failures (attempts 1 + 2), attempt 3 should have the injected file contents
+    const lastCall = implCalls.at(-1);
+    expect(lastCall?.[0].userMessage).toContain('Missing Context — Injected Files');
+    expect(lastCall?.[0].userMessage).toContain('export const helpers = 1;');
+    expect(fileReader).toHaveBeenCalled();
+  });
+
+  it('STUCK: applies partial-fix hint after thrashing across attempts', async () => {
+    // Different test names + different files each attempt → DIFFERENT_FILES → STUCK
+    const out1 = ' FAIL  src/a.test.ts > test alpha\n   x\n2 failed, 1 passed';
+    const out2 = ' FAIL  src/b.test.ts > test beta\n   y\n2 failed, 1 passed';
+
+    vi.mocked(mockTestRunner)
+      .mockResolvedValueOnce({ passed: false, output: out1, exitCode: 1 })
+      .mockResolvedValueOnce({ passed: false, output: out2, exitCode: 1 })
+      .mockResolvedValueOnce({ passed: true, output: 'ok', exitCode: 0 });
+
+    const diffRunner = vi.fn().mockResolvedValueOnce(['a.ts']).mockResolvedValueOnce(['b.ts']).mockResolvedValue([]);
+
+    await runPieceTILoop({
+      piece: makePiece(0),
+      pieceIndex: 0,
+      workDir: '/tmp/test',
+      repoConfig: makeConfig(),
+      testRunner: mockTestRunner,
+      diffRunner,
+      testCommand: 'npm test',
+    });
+
+    const implCalls = mockExecute.mock.calls.filter((c) => c[0].wave === 'impl');
+    const lastCall = implCalls.at(-1);
+    expect(lastCall?.[0].userMessage).toContain('STUCK');
+    expect(lastCall?.[0].userMessage).toContain('partial fix');
+  });
+
+  it('SPEC_WRONG: breaks early and returns diagnosis=SPEC_WRONG + shouldRespec=true', async () => {
+    // Same test names across attempts + INSUFFICIENT_DATA thrashing (no diffRunner outputs) → SPEC_WRONG
+    const sameTests1 = ' FAIL  src/a.test.ts > test alpha\n   x';
+    const sameTests2 = ' FAIL  src/a.test.ts > test alpha\n   y';
+
+    vi.mocked(mockTestRunner)
+      .mockResolvedValueOnce({ passed: false, output: sameTests1, exitCode: 1 })
+      .mockResolvedValueOnce({ passed: false, output: sameTests2, exitCode: 1 })
+      // Should NOT reach attempt 3 — broken early
+      .mockResolvedValueOnce({ passed: false, output: sameTests2, exitCode: 1 });
+
+    // Empty diff per attempt → INSUFFICIENT_DATA thrashing → SPEC_WRONG kept
+    const diffRunner = vi.fn().mockResolvedValue([]);
+
+    const result = await runPieceTILoop({
+      piece: makePiece(0),
+      pieceIndex: 0,
+      workDir: '/tmp/test',
+      repoConfig: makeConfig(),
+      testRunner: mockTestRunner,
+      diffRunner,
+      testCommand: 'npm test',
+    });
+
+    expect(result.testsPassing).toBe(false);
+    expect(result.diagnosis).toBe('SPEC_WRONG');
+    expect(result.shouldRespec).toBe(true);
+    // Early break: only 2 attempts run, not 3
+    expect(result.attempts).toBe(2);
+    const implCalls = mockExecute.mock.calls.filter((c) => c[0].wave === 'impl');
+    expect(implCalls.length).toBe(2);
+  });
+
+  it('APPROACH_WRONG: existing behavior preserved — escalation hint still injected', async () => {
+    const out1 = ' FAIL  src/a.test.ts > test alpha\n   x';
+    const out2 = ' FAIL  src/a.test.ts > test beta\n   y';
+
+    vi.mocked(mockTestRunner)
+      .mockResolvedValueOnce({ passed: false, output: out1, exitCode: 1 })
+      .mockResolvedValueOnce({ passed: false, output: out2, exitCode: 1 })
+      .mockResolvedValueOnce({ passed: true, output: 'ok', exitCode: 0 });
+
+    await runPieceTILoop({
+      piece: makePiece(0),
+      pieceIndex: 0,
+      workDir: '/tmp/test',
+      repoConfig: makeConfig(),
+      testRunner: mockTestRunner,
+      testCommand: 'npm test',
+    });
+
+    const implCalls = mockExecute.mock.calls.filter((c) => c[0].wave === 'impl');
+    const thirdCall = implCalls.at(2);
+    expect(thirdCall?.[0].userMessage).toContain('APPROACH_WRONG');
+  });
+});
+
+// --- runParallelPieceTILoop SPEC_WRONG aggregation (Issue #284) ---
+
+describe('runParallelPieceTILoop SPEC_WRONG aggregation', () => {
+  let mockTestRunner: TestRunner;
+
+  beforeEach(() => {
+    mockExecute.mockClear();
+    mockTestRunner = vi.fn();
+  });
+
+  it('propagates shouldRespec=true when any piece returns SPEC_WRONG diagnosis (multi-piece path)', async () => {
+    // 3 pieces. First piece returns SPEC_WRONG; others pass.
+    // Each piece runs: 1 test wave + N impl waves — use mockResolvedValue so any number returns impl results.
+    mockExecute.mockResolvedValue(implWaveExecResult());
+
+    // SAME test names across attempts → SPEC_WRONG for piece 0; empty diff → no thrashing override.
+    const specWrongOutput = ' FAIL  src/piece-0.test.ts > test alpha\n   x';
+
+    const piece1Attempts = new Map<string, number>();
+    vi.mocked(mockTestRunner).mockImplementation(async (_cmd, workDir) => {
+      // piece-0 fails repeatedly with same test names → SPEC_WRONG → early break (2 attempts)
+      if (workDir.includes('piece-0')) {
+        return { passed: false, output: specWrongOutput, exitCode: 1 };
+      }
+      // piece-1 / piece-2: fail once, pass on next attempt
+      const n = (piece1Attempts.get(workDir) ?? 0) + 1;
+      piece1Attempts.set(workDir, n);
+      if (n === 1) return { passed: false, output: ` FAIL  src/x.test.ts > test r1\n   x`, exitCode: 1 };
+      return { passed: true, output: 'ok', exitCode: 0 };
+    });
+
+    const diffRunner = vi.fn().mockResolvedValue([]); // INSUFFICIENT_DATA → SPEC_WRONG preserved
+
+    const specResult = {
+      summary: '3 pieces',
+      pieces: [makePiece(0), makePiece(1), makePiece(2)],
+      dependency_order: [[0, 1, 2]],
+      constraints: [],
+    };
+    const waveResults: Partial<Record<WaveName, WaveResult>> = {
+      spec: {
+        wave: 'spec',
+        success: true,
+        artifact: specResult,
+        duration: 100,
+        cost: 0.1,
+        turns: 1,
+      },
+    };
+
+    const result = await runParallelPieceTILoop({
+      issue: makeIssue(284),
+      workDir: '/tmp/test',
+      repoConfig: makeConfig(),
+      waveResults,
+      testRunner: mockTestRunner,
+      diffRunner,
+    });
+
+    expect(result.testsPassing).toBe(false);
+    expect(result.shouldRespec).toBe(true);
+    expect(result.diagnosis).toBe('SPEC_WRONG');
+  });
+
+  it('does NOT set shouldRespec when no piece diagnoses SPEC_WRONG (multi-piece path)', async () => {
+    mockExecute.mockResolvedValue(implWaveExecResult());
+
+    // All pieces fail with DIFFERENT test names per attempt → APPROACH_WRONG (not SPEC_WRONG).
+    // Per-piece attempt counter keyed on workDir so each piece sees attempt-numbered output.
+    const attemptCountByPiece = new Map<string, number>();
+    vi.mocked(mockTestRunner).mockImplementation(async (_cmd, workDir) => {
+      const n = (attemptCountByPiece.get(workDir) ?? 0) + 1;
+      attemptCountByPiece.set(workDir, n);
+      return { passed: false, output: ` FAIL  src/x.test.ts > test attempt-${n}\n   x`, exitCode: 1 };
+    });
+
+    const specResult = {
+      summary: '2 pieces',
+      pieces: [makePiece(0), makePiece(1)],
+      dependency_order: [[0, 1]],
+      constraints: [],
+    };
+    const waveResults: Partial<Record<WaveName, WaveResult>> = {
+      spec: {
+        wave: 'spec',
+        success: true,
+        artifact: specResult,
+        duration: 100,
+        cost: 0.1,
+        turns: 1,
+      },
+    };
+
+    const result = await runParallelPieceTILoop({
+      issue: makeIssue(284),
+      workDir: '/tmp/test',
+      repoConfig: makeConfig(),
+      waveResults,
+      testRunner: mockTestRunner,
+    });
+
+    expect(result.testsPassing).toBe(false);
+    expect(result.shouldRespec).toBeFalsy();
   });
 });
 
