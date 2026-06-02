@@ -247,28 +247,31 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
       );
     }
 
-    // Extract cost from all assistant messages
-    let cost = 0;
-    const messages = agent.state.messages;
-    for (const msg of messages) {
-      if (isAssistantMessage(msg)) {
-        cost += msg.usage.cost.total;
+    // Helper: collect cost + last assistant text from current agent state.
+    const collectState = (): { cost: number; resultText: string | null } => {
+      let collected = 0;
+      const stateMessages = agent.state.messages;
+      for (const msg of stateMessages) {
+        if (isAssistantMessage(msg)) {
+          collected += msg.usage.cost.total;
+        }
       }
-    }
+      const last = [...stateMessages].reverse().find((m): m is AssistantMessage => isAssistantMessage(m));
+      const text = last
+        ? last.content
+            .filter((c) => c.type === 'text' && 'text' in c)
+            .map((c) => ('text' in c ? String(c.text) : ''))
+            .join('')
+        : null;
+      return { cost: collected, resultText: text };
+    };
 
-    // Get the final assistant text
-    let resultText: string | null = null;
-    const lastAssistant = [...messages].reverse().find((m): m is AssistantMessage => isAssistantMessage(m));
-    if (lastAssistant) {
-      resultText = lastAssistant.content
-        .filter((c) => c.type === 'text' && 'text' in c)
-        .map((c) => ('text' in c ? String(c.text) : ''))
-        .join('');
-    }
+    let { cost, resultText } = collectState();
 
     // Parse structured output if expected
     let structuredOutput: unknown | undefined;
     let zodValidationFailed = false;
+    let lastZodErrorMessage: string | undefined;
     if (outputFormat && resultText) {
       structuredOutput = parseStructuredOutput(resultText);
       if (!structuredOutput) {
@@ -277,9 +280,72 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
         const parseResult = outputFormat.zodSchema.safeParse(structuredOutput);
         if (!parseResult.success) {
           zodValidationFailed = true;
+          lastZodErrorMessage = parseResult.error.message;
           log.warn(`[${wave}] Zod validation failed for structured output: ${parseResult.error.message}`);
         }
       }
+    }
+
+    // Conversation repair loop: when structured output is required (zodSchema present) and the
+    // initial response either failed to parse or failed Zod validation, send a follow-up message
+    // asking the model to output ONLY the corrected JSON. The model already has the right answer
+    // in context — it just formatted it wrong. This is much cheaper than retrying the whole wave.
+    // Max 2 repair turns before giving up.
+    let repairAttempts = 0;
+    while (
+      outputFormat?.zodSchema != null &&
+      !aborted &&
+      !costCapExceeded &&
+      !contextExhausted &&
+      repairAttempts < MAX_REPAIR_ATTEMPTS &&
+      (zodValidationFailed || structuredOutput == null)
+    ) {
+      repairAttempts++;
+      const repairMessage = buildRepairTurnMessage(outputFormat?.schema, lastZodErrorMessage, structuredOutput == null);
+      log.warn(`[${wave}] Sending repair turn ${repairAttempts}/${MAX_REPAIR_ATTEMPTS} for invalid structured output`);
+
+      try {
+        await agent.prompt(repairMessage);
+      } catch (repairErr) {
+        log.warn(
+          `[${wave}] Repair turn ${repairAttempts} threw: ${repairErr instanceof Error ? repairErr.message : String(repairErr)}`,
+        );
+        break;
+      }
+
+      if (aborted || costCapExceeded || contextExhausted) break;
+
+      // Re-collect state, re-parse, re-validate.
+      const after = collectState();
+      cost = after.cost;
+      resultText = after.resultText;
+
+      structuredOutput = resultText ? parseStructuredOutput(resultText) : undefined;
+      zodValidationFailed = false;
+      lastZodErrorMessage = undefined;
+      if (structuredOutput && outputFormat?.zodSchema) {
+        const reValidate = outputFormat.zodSchema.safeParse(structuredOutput);
+        if (!reValidate.success) {
+          zodValidationFailed = true;
+          lastZodErrorMessage = reValidate.error.message;
+          log.warn(
+            `[${wave}] Repair turn ${repairAttempts} still has Zod validation failures: ${reValidate.error.message}`,
+          );
+        } else {
+          log.info(`[${wave}] Repair turn ${repairAttempts} succeeded — structured output now valid`);
+        }
+      } else if (structuredOutput == null) {
+        log.warn(`[${wave}] Repair turn ${repairAttempts} did not produce parseable JSON`);
+      }
+    }
+
+    // Cost cap may have tripped during repair turns — re-check before proceeding.
+    if (costCapExceeded) {
+      throw new KovaError(
+        `Wave ${wave} cost cap exceeded ($${accumulatedCost.toFixed(4)} >= $${maxCostUsd})`,
+        'billing',
+        false,
+      );
     }
 
     // Context exhaustion detected by monitoring — throw before other checks
@@ -331,6 +397,7 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
       confidence,
       artifact: (structuredOutput ?? resultText) as T,
       approach_notes: '',
+      ...(outputFormat?.zodSchema != null ? { repair_attempts: repairAttempts } : {}),
     };
   } catch (error) {
     if (error instanceof KovaError) throw error;
@@ -569,6 +636,36 @@ export function buildStructuredOutputInstructions(schema: Record<string, unknown
     '',
     'The `<json>` tags are REQUIRED. Do not include any text inside the tags other than the JSON object.',
   ].join('\n');
+}
+
+/** Maximum number of conversation repair turns when structured output validation fails. */
+export const MAX_REPAIR_ATTEMPTS = 2;
+
+/**
+ * Build a follow-up user message asking the agent to re-emit valid structured output.
+ *
+ * The model already has its reasoning + tool reads in context — only the output formatting
+ * was wrong. Asking for ONLY the corrected JSON costs a fraction of a full wave retry.
+ */
+export function buildRepairTurnMessage(
+  schema: Record<string, unknown> | undefined,
+  zodErrors: string | undefined,
+  parseFailed: boolean,
+): string {
+  const lines: string[] = [];
+  if (parseFailed) {
+    lines.push("Your response didn't match the required JSON schema: no valid JSON was found in your output.");
+  } else {
+    lines.push("Your response didn't match the required JSON schema.", `Validation errors: ${zodErrors ?? 'unknown'}`);
+  }
+  if (schema) {
+    lines.push('', 'Required schema:', '```json', JSON.stringify(schema, null, 2), '```');
+  }
+  lines.push(
+    '',
+    'Output ONLY the corrected JSON wrapped in <json>...</json> tags, with no other text before or after.',
+  );
+  return lines.join('\n');
 }
 
 /**

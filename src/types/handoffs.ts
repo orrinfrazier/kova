@@ -19,6 +19,8 @@ export const WaveHandoffSchema = z.object({
   approach_notes: z.string(),
   fallback_used: z.boolean().optional(),
   local_attempt_cost: z.number().optional(),
+  /** Number of structured-output repair turns used (0..2). Present when outputFormat+zodSchema was set. */
+  repair_attempts: z.number().int().min(0).max(2).optional(),
 });
 
 export type WaveHandoff<T = unknown> = Omit<z.infer<typeof WaveHandoffSchema>, 'artifact'> & {
