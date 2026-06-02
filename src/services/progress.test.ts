@@ -5,10 +5,13 @@ import type { FixState, Issue, WaveName } from '../types/index.js';
 
 const mockCreateIssueComment = vi.fn();
 const mockEditIssueComment = vi.fn();
+const mockUpsertTrackingComment = vi.fn();
 
 vi.mock('./github.js', () => ({
   createIssueComment: (...args: unknown[]) => mockCreateIssueComment(...args),
   editIssueComment: (...args: unknown[]) => mockEditIssueComment(...args),
+  upsertTrackingComment: (...args: unknown[]) => mockUpsertTrackingComment(...args),
+  DEFAULT_TRACKING_MARKER: '<!-- kova-tracking -->',
 }));
 
 const { ProgressTracker, formatProgressBody } = await import('./progress.js');
@@ -43,6 +46,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   mockCreateIssueComment.mockResolvedValue(12345);
   mockEditIssueComment.mockResolvedValue(undefined);
+  mockUpsertTrackingComment.mockResolvedValue(12345);
 });
 
 describe('formatProgressBody', () => {
@@ -99,8 +103,8 @@ describe('ProgressTracker', () => {
 
     await tracker.start();
 
-    expect(mockCreateIssueComment).toHaveBeenCalledOnce();
-    expect(mockCreateIssueComment).toHaveBeenCalledWith(
+    expect(mockUpsertTrackingComment).toHaveBeenCalledOnce();
+    expect(mockUpsertTrackingComment).toHaveBeenCalledWith(
       'owner/repo',
       42,
       expect.stringContaining('Kova is working on this issue'),
@@ -162,15 +166,15 @@ describe('ProgressTracker', () => {
       issue: makeIssue(42),
     });
 
-    // No start() call — should create comment instead of edit
+    // No start() call — should upsert (find-or-create) instead of edit by id
     await tracker.waveCompleted('assess', makeState(['assess']));
 
-    expect(mockCreateIssueComment).toHaveBeenCalledOnce();
+    expect(mockUpsertTrackingComment).toHaveBeenCalledOnce();
     expect(mockEditIssueComment).not.toHaveBeenCalled();
   });
 
   it('swallows errors from GitHub API (non-blocking)', async () => {
-    mockCreateIssueComment.mockRejectedValue(new Error('API rate limit'));
+    mockUpsertTrackingComment.mockRejectedValue(new Error('API rate limit'));
 
     const tracker = new ProgressTracker({
       repoPath: '/tmp/test',
