@@ -66,6 +66,40 @@ type Handoffs = Partial<Record<string, WaveResult>>;
 /**
  * Build focused context for a wave from previous handoff artifacts.
  * Each wave gets only the sections it needs — no raw JSON dumps.
+ *
+ * INVARIANT: builders consume TYPED ARTIFACT FIELDS ONLY — never raw
+ * pi-mono `Agent` state from a prior wave.
+ *
+ * Every formatter dispatched from this function (`buildAssessContext`,
+ * `buildSpecContext`, `buildTestContext`, `buildImplContext`,
+ * `buildQualityContext`, `buildReviewContext`, and any future addition)
+ * MUST read structured business-domain fields off the prior handoff's
+ * typed artifact via type guards (see `isAssistantMessage` and the
+ * per-wave artifact schemas in `src/types/waves.ts`). No formatter
+ * may accept raw `AssistantMessage[]`, `RuntimeEvent[]`, conversation
+ * transcripts, or any payload that holds a reference to a prior wave's
+ * `Agent` instance.
+ *
+ * Why this matters: this function is the lone bridge from the persisted
+ * handoff record (`WaveHandoff<T>`, see `src/types/handoffs.ts`) into the
+ * next wave's prompt. If a builder pulled `handoffs.spec.messages` (or any
+ * equivalent shape), prior-wave reasoning context would tunnel into a
+ * fresh wave's `Agent` and break the "fresh per wave" guarantee that
+ * `spawnWaveAgent` (`src/ai/wave-executor.ts`) is structured to provide.
+ *
+ * Violation shapes to reject in review:
+ *   - A new builder branch that types its handoff input as
+ *     `AssistantTurn[]`, `RuntimeEvent[]`, or a structurally equivalent
+ *     conversation log.
+ *   - A builder that does `handoffs.<wave>?.messages` /
+ *     `handoffs.<wave>?.conversation` / `handoffs.<wave>?.agent.*`.
+ *   - Loosening the `Handoffs` type alias to include arbitrary
+ *     `AssistantMessage[]` payloads.
+ *
+ * If a wave needs richer context than the prior artifact currently exposes,
+ * EXTEND THAT WAVE'S TYPED ARTIFACT (the `T` in `WaveHandoff<T>` produced
+ * by `spawnWaveAgent`). Do not reach for conversational state to fill the
+ * gap.
  */
 export function buildWaveContext(
   wave: WaveName,
