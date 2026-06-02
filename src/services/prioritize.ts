@@ -1,21 +1,63 @@
 // Issue prioritization — score issues and order by dependency + priority.
+//
+// Formula is the canonical issue-score spec
+// (~/.claude/skills/issue-score/SKILL.md §Formula). Keep this file in sync
+// with that table; brainstorm / reflect / triage consume the breakdown.
 
 import type { Issue } from '../types/index.js';
+
+/** Per-factor breakdown surfaced alongside the final score (issue #253). */
+export interface ScoreBreakdown {
+  base_priority: number;
+  dependency_bonus: number;
+  blocked_penalty: number;
+  quick_win_bonus: number;
+  rescope_bonus: number;
+}
 
 export interface PrioritizedIssue {
   issue: Issue;
   score: number;
   blockedBy: number[];
+  breakdown: ScoreBreakdown;
 }
 
+/**
+ * Canonical base scores per priority bucket (issue-score SKILL.md §Formula).
+ * `medium` and the no-priority default are both 30 — medium is the explicit
+ * label for "this is normal-priority, please rank it normally".
+ */
 const PRIORITY_SCORES: Record<string, number> = {
   critical: 80,
   high: 60,
-  medium: 40,
-  low: 20,
+  medium: 30,
+  low: 10,
 };
 
-const QUICK_WIN_LABELS = new Set(['low-complexity', 'good first issue']);
+const DEFAULT_PRIORITY = 30;
+const DEPENDENCY_BONUS_PER_DEPENDENT = 5;
+const DEPENDENCY_BONUS_CAP_DEPENDENTS = 5; // +25 max
+const BLOCKED_PENALTY = -10;
+const QUICK_WIN_BONUS = 5;
+const RESCOPE_BONUS = 20;
+
+const QUICK_WIN_LABELS = new Set(['low-complexity', 'good first issue', 'good-first-issue', 'quick-win']);
+const RESCOPE_LABELS = new Set(['rescoped']);
+const BLOCKED_LABELS = new Set(['blocked']);
+
+/**
+ * Normalize a label so callers can write either bare (`critical`) or
+ * prefixed (`priority:critical`) — both must work during the priority-label
+ * transition.
+ */
+function priorityKey(label: string): string | null {
+  const lower = label.toLowerCase().trim();
+  if (lower.startsWith('priority:')) {
+    return lower.slice('priority:'.length);
+  }
+  if (lower in PRIORITY_SCORES) return lower;
+  return null;
+}
 
 /** Extract issue numbers this issue depends on from body text. */
 export function parseDependencies(body: string): number[] {
@@ -32,36 +74,69 @@ export function parseDependencies(body: string): number[] {
   return [...seen];
 }
 
-/** Compute priority score for a single issue. */
-export function scoreIssue(issue: Issue, allIssues: Issue[]): number {
-  // Base score from priority label
-  let score = 40; // default when no priority label
+function basePriority(issue: Issue): number {
   for (const label of issue.labels) {
-    const labelLower = label.toLowerCase();
-    if (labelLower in PRIORITY_SCORES) {
-      score = PRIORITY_SCORES[labelLower] ?? 40;
-      break;
+    const key = priorityKey(label);
+    if (key !== null && key in PRIORITY_SCORES) {
+      return PRIORITY_SCORES[key] ?? DEFAULT_PRIORITY;
     }
   }
+  return DEFAULT_PRIORITY;
+}
 
-  // +10 if this issue blocks others
-  const blocksOthers = allIssues.some((other) => {
-    if (other.number === issue.number) return false;
-    return parseDependencies(other.body).includes(issue.number);
-  });
-  if (blocksOthers) score += 10;
+function dependencyBonus(issue: Issue, allIssues: Issue[]): number {
+  // Count distinct downstream dependents (other issues whose body says
+  // "blocked by #self" or "depends on #self"). Cap at the configured limit
+  // so a single mega-blocker can't dominate the ranking.
+  const dependentNumbers = new Set<number>();
+  for (const other of allIssues) {
+    if (other.number === issue.number) continue;
+    if (parseDependencies(other.body).includes(issue.number)) {
+      dependentNumbers.add(other.number);
+    }
+  }
+  const dependentCount = Math.min(dependentNumbers.size, DEPENDENCY_BONUS_CAP_DEPENDENTS);
+  return dependentCount * DEPENDENCY_BONUS_PER_DEPENDENT;
+}
 
-  // -10 if blocked by an open issue in the set
+function blockedPenalty(issue: Issue, allIssues: Issue[]): number {
+  // Penalty applies if either:
+  //   - the issue has a `blocked` label, OR
+  //   - the body says "blocked by #N" AND #N is still in the open set.
+  const hasBlockedLabel = issue.labels.some((l) => BLOCKED_LABELS.has(l.toLowerCase()));
+  if (hasBlockedLabel) return BLOCKED_PENALTY;
+
   const deps = parseDependencies(issue.body);
   const openNumbers = new Set(allIssues.map((i) => i.number));
   const isBlocked = deps.some((dep) => openNumbers.has(dep));
-  if (isBlocked) score -= 10;
+  return isBlocked ? BLOCKED_PENALTY : 0;
+}
 
-  // +5 for quick wins
-  const isQuickWin = issue.labels.some((l) => QUICK_WIN_LABELS.has(l.toLowerCase()));
-  if (isQuickWin) score += 5;
+function quickWinBonus(issue: Issue): number {
+  const hit = issue.labels.some((l) => QUICK_WIN_LABELS.has(l.toLowerCase()));
+  return hit ? QUICK_WIN_BONUS : 0;
+}
 
-  return score;
+function rescopeBonus(issue: Issue): number {
+  const hit = issue.labels.some((l) => RESCOPE_LABELS.has(l.toLowerCase()));
+  return hit ? RESCOPE_BONUS : 0;
+}
+
+/** Compute the per-factor breakdown for an issue. */
+export function scoreBreakdown(issue: Issue, allIssues: Issue[]): ScoreBreakdown {
+  return {
+    base_priority: basePriority(issue),
+    dependency_bonus: dependencyBonus(issue, allIssues),
+    blocked_penalty: blockedPenalty(issue, allIssues),
+    quick_win_bonus: quickWinBonus(issue),
+    rescope_bonus: rescopeBonus(issue),
+  };
+}
+
+/** Compute priority score for a single issue (sum of breakdown factors). */
+export function scoreIssue(issue: Issue, allIssues: Issue[]): number {
+  const b = scoreBreakdown(issue, allIssues);
+  return b.base_priority + b.dependency_bonus + b.blocked_penalty + b.quick_win_bonus + b.rescope_bonus;
 }
 
 /** Prioritize issues: topological sort by dependencies, then by score descending. */
@@ -92,10 +167,20 @@ export function prioritizeIssues(issues: Issue[]): PrioritizedIssue[] {
     inDegree.set(num, count);
   }
 
-  // Score each issue for secondary sort
+  // Score each issue (with breakdown) for secondary sort
+  const breakdowns = new Map<number, ScoreBreakdown>();
   const scores = new Map<number, number>();
   for (const issue of issues) {
-    scores.set(issue.number, scoreIssue(issue, issues));
+    const breakdown = scoreBreakdown(issue, issues);
+    breakdowns.set(issue.number, breakdown);
+    scores.set(
+      issue.number,
+      breakdown.base_priority +
+        breakdown.dependency_bonus +
+        breakdown.blocked_penalty +
+        breakdown.quick_win_bonus +
+        breakdown.rescope_bonus,
+    );
   }
 
   const queue: number[] = [];
@@ -136,6 +221,14 @@ export function prioritizeIssues(issues: Issue[]): PrioritizedIssue[] {
   return sorted.flatMap((num) => {
     const issue = issueMap.get(num);
     if (!issue) return [];
-    return [{ issue, score: scores.get(num) ?? 0, blockedBy: deps.get(num) ?? [] }];
+    const breakdown = breakdowns.get(num) ?? scoreBreakdown(issue, issues);
+    return [
+      {
+        issue,
+        score: scores.get(num) ?? 0,
+        blockedBy: deps.get(num) ?? [],
+        breakdown,
+      },
+    ];
   });
 }
