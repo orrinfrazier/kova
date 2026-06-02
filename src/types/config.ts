@@ -3,6 +3,25 @@ import { z } from 'zod';
 export const ModelTierSchema = z.enum(['small', 'medium', 'large']);
 export type ModelTier = z.infer<typeof ModelTierSchema>;
 
+/**
+ * Per-run pipeline mode (issue #282).
+ *
+ *  - `simple`: minimal pipeline for trivial changes; same model tiers as the
+ *    configured defaults, but `/fix` (the orchestrator) collapses agent spawning
+ *    to inline execution upstream. Wire-level behavior here is identity.
+ *  - `standard`: opt-back-up; uses the configured per-wave tiers exactly as
+ *    specified in repos.yaml. The default when no mode is selected.
+ *  - `economy`: routes test/impl/quality to the `small` tier without editing
+ *    repos.yaml. Spec/assess/review stay on their configured tiers — per
+ *    CLAUDE.md's phase-level model policy, reasoning waves never economize.
+ *  - `explore`: routes test/impl to `large` and increases the per-piece impl
+ *    retry budget so the review wave has more candidates to choose from.
+ *    Tracked as phase-1 implementation; full parallel-impl + review-as-judge
+ *    is a follow-up.
+ */
+export const PipelineModeSchema = z.enum(['simple', 'standard', 'economy', 'explore']);
+export type PipelineMode = z.infer<typeof PipelineModeSchema>;
+
 export const ThinkingLevelSchema = z.enum(['off', 'minimal', 'low', 'medium', 'high', 'xhigh']);
 export type ThinkingLevel = z.infer<typeof ThinkingLevelSchema>;
 

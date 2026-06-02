@@ -84,6 +84,7 @@ import type {
   FailedPiece,
   FixState,
   Issue,
+  PipelineMode,
   RepoConfig,
   SpecResult,
   WaveHandoff,
@@ -110,6 +111,7 @@ import {
   runReviewLoop,
   type TestRunner,
 } from './loops.js';
+import { applyPipelineMode, autoSelectMode, describeAutoSelection, MODE_EXTRA_IMPL_ATTEMPTS } from './mode.js';
 import { loadPrompt, resolvePromptsDir } from './prompts.js';
 import { loadWaveSkills } from './skills-loader.js';
 import {
@@ -135,6 +137,13 @@ export interface FixOptions {
   noComment?: boolean | undefined;
   pendingPRs?: OpenPR[] | undefined;
   testRunner?: TestRunner | undefined;
+  /**
+   * Per-run pipeline mode (issue #282). When `undefined`, fix() auto-selects
+   * after WAVE A from the feasibility grade + surface-area file count and
+   * logs the decision. Explicit values override auto-selection — the only
+   * mode never auto-selected is `explore`, which is opt-in only.
+   */
+  mode?: PipelineMode | undefined;
 }
 
 export interface FixResult {
@@ -332,7 +341,16 @@ let _activeFixes = 0;
 // --- Main ---
 
 export async function fix(options: FixOptions): Promise<FixResult> {
-  const { issue, repoPath, repoName, config, fresh, noComment, pendingPRs, testRunner } = options;
+  const { issue, repoPath, repoName, fresh, noComment, pendingPRs, testRunner } = options;
+  // `config` is reassignable in this function so we can swap in the
+  // mode-overridden RepoConfig after WAVE A resolves `--mode`. Pre-WAVE-A
+  // code paths (isolation check, sandbox startup, MCP wiring) see the input
+  // config; WAVE T/I/Q see the mode-overridden config. Issue #282.
+  let config: RepoConfig = options.config;
+  let resolvedMode: PipelineMode | undefined = options.mode;
+  // Extra impl attempts per piece, derived from the resolved mode. 0 for all
+  // modes except `explore`. Plumbed into runParallelPieceTILoop below.
+  let extraImplAttempts = 0;
   const fixStartTime = Date.now();
   _activeFixes++;
   metrics.setActiveFixes(_activeFixes);
@@ -635,6 +653,35 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       if (interrupted) return interrupted;
     }
 
+    // Pipeline mode resolution (issue #282). Runs after WAVE A so auto-select
+    // can read the feasibility grade + surface area. Explicit `options.mode`
+    // overrides — auto-select only when no `--mode` was passed. Applies the
+    // mode's per-wave tier overrides to `config` so every downstream wave
+    // (test, impl, quality) routes through the mode-selected tiers without
+    // editing repos.yaml.
+    const assessArtifact = state.waveResults.assess?.artifact as AssessResult | undefined;
+    if (resolvedMode != null) {
+      flog.info(`Pipeline mode: ${resolvedMode} (explicit via --mode).`);
+    } else if (assessArtifact != null) {
+      const fileCount = assessArtifact.surface_area.files.length;
+      resolvedMode = autoSelectMode(assessArtifact.grade, fileCount);
+      flog.info(
+        `Pipeline mode: ${resolvedMode} (auto-selected). ${describeAutoSelection(assessArtifact.grade, fileCount, resolvedMode)}`,
+      );
+    } else {
+      // Assess artifact missing (e.g. confidence too low for structured output).
+      // Fall back to standard — never economize when we can't see surface area.
+      resolvedMode = 'standard';
+      flog.info(`Pipeline mode: ${resolvedMode} (default — no assess artifact available).`);
+    }
+    config = applyPipelineMode(config, resolvedMode);
+    extraImplAttempts = MODE_EXTRA_IMPL_ATTEMPTS[resolvedMode];
+    if (extraImplAttempts > 0) {
+      flog.info(
+        `[mode] ${resolvedMode} — running up to ${3 + extraImplAttempts} impl attempts per piece (review selects winner).`,
+      );
+    }
+
     // Vector DB: query for relevant codebase context (before spec/impl waves)
     let codebaseContext: string | undefined;
     if (config.vectordb?.enabled) {
@@ -925,6 +972,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         cacheContext,
         ...(skipTestPhase && { skipTestPhase: true }),
         ...(skipImplPhase && { skipImplPhase: true }),
+        ...(extraImplAttempts > 0 && { extraImplAttempts }),
       });
 
       // Save handoffs for test and impl
@@ -996,6 +1044,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           cacheContext,
           ...(skipTestPhase && { skipTestPhase: true }),
           ...(skipImplPhase && { skipImplPhase: true }),
+          ...(extraImplAttempts > 0 && { extraImplAttempts }),
         });
         state.waveResults.test = retryTI.testWaveResult;
         state.waveResults.impl = retryTI.implWaveResult;
@@ -1191,6 +1240,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
             cacheContext,
             ...(skipTestPhase && { skipTestPhase: true }),
             ...(skipImplPhase && { skipImplPhase: true }),
+            ...(extraImplAttempts > 0 && { extraImplAttempts }),
           });
 
           state.waveResults.test = retryTI.testWaveResult;
