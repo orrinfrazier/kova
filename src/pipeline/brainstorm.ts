@@ -16,7 +16,15 @@ import {
   detectDiminishingReturns,
   loadHistory,
 } from '../services/brainstorm-history.js';
-import { type CrossRepoConfig, fetchCrossRepoIssues, formatCrossRepoContext } from '../services/cross-repo-issues.js';
+import {
+  type CrossRepoConfig,
+  classifyProposalsAgainstOpenIssues,
+  fetchCrossRepoIssues,
+  fetchSameRepoIssues,
+  formatCrossRepoContext,
+  formatSameRepoContext,
+  type ProposalSkipEntry,
+} from '../services/cross-repo-issues.js';
 import { loadProjectContext } from '../services/project-context.js';
 import type { BrainstormIssue, BrainstormResult, CoverageEntry, RepoConfig } from '../types/index.js';
 import { BrainstormResultSchema } from '../types/index.js';
@@ -46,6 +54,13 @@ export interface BrainstormReturn {
   success: boolean;
   issues: BrainstormIssue[];
   filtered: BrainstormIssue[];
+  /**
+   * Proposals dropped because they collide with an existing open issue in the
+   * same repo. Each entry records the proposal and the matched open-issue title.
+   * Undefined / empty when no same-repo dedup was performed or no collisions
+   * were found.
+   */
+  skipped?: ProposalSkipEntry[];
   summary?: string;
   cost: number;
   model: string;
@@ -89,12 +104,26 @@ export async function brainstorm(options: BrainstormOptions): Promise<Brainstorm
     }
   }
 
+  // Fetch same-repo open issues for in-repo dedup + post-hoc classification (best-effort)
+  let sameRepoIssues: Awaited<ReturnType<typeof fetchSameRepoIssues>> = [];
+  let sameRepoContext = '';
+  try {
+    sameRepoIssues = await fetchSameRepoIssues(repoPath);
+    sameRepoContext = formatSameRepoContext(sameRepoIssues);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    log.warn(`[brainstorm] Same-repo issue fetch failed (continuing): ${message}`);
+  }
+
   let userMessage = `Analyze the codebase at ${repoPath} and identify improvements. Read key files, understand the architecture, then produce a structured list of issues.`;
   if (focusAreas && focusAreas.length > 0) {
     userMessage += `\n\nIMPORTANT: ONLY generate issues within these focus areas: ${focusAreas.join(', ')}. Do not generate issues outside these categories.`;
   }
   if (crossRepoContext) {
     userMessage += crossRepoContext;
+  }
+  if (sameRepoContext) {
+    userMessage += sameRepoContext;
   }
 
   try {
@@ -123,10 +152,18 @@ export async function brainstorm(options: BrainstormOptions): Promise<Brainstorm
     }
 
     const artifact = handoff.artifact;
-    const passing = artifact.issues.filter((issue) => issue.confidence >= threshold);
-    const filtered = artifact.issues.filter((issue) => issue.confidence < threshold);
 
-    // Diminishing returns detection
+    // Classify proposals against currently-open same-repo issues. Skipped
+    // proposals are dropped from both `issues` and `filtered` and surfaced
+    // as a separate `skipped` list so the user sees what was already tracked.
+    const { kept, skipped } = classifyProposalsAgainstOpenIssues(artifact.issues, sameRepoIssues);
+
+    const passing = kept.filter((issue) => issue.confidence >= threshold);
+    const filtered = kept.filter((issue) => issue.confidence < threshold);
+
+    // Diminishing returns detection runs against ALL agent proposals
+    // (kept + skipped) — staleness is a property of agent output, not a
+    // property of post-classification kept set.
     const history = await loadHistory(repoPath);
     const report = detectDiminishingReturns(artifact.issues, history);
 
@@ -141,6 +178,7 @@ export async function brainstorm(options: BrainstormOptions): Promise<Brainstorm
       success: true,
       issues: passing,
       filtered,
+      skipped,
       summary: artifact.summary,
       cost: handoff.cost,
       model: handoff.model,
@@ -196,6 +234,15 @@ export function printBrainstormPreview(result: BrainstormReturn): void {
     console.log(`Filtered (below threshold): ${result.filtered.length}\n`);
     for (const issue of result.filtered) {
       console.log(`  - [${issue.confidence.toFixed(2)}] ${issue.title}`);
+    }
+    console.log();
+  }
+
+  if (result.skipped && result.skipped.length > 0) {
+    console.log(`Skipped as already-tracked: ${result.skipped.length}\n`);
+    for (const entry of result.skipped) {
+      console.log(`  - ${entry.proposal.title}`);
+      console.log(`     matched open issue: ${entry.matchedTitle}`);
     }
     console.log();
   }
