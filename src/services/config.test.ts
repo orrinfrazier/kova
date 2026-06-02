@@ -739,6 +739,45 @@ repos:
     const config = resolveRepoConfig('/tmp/repo');
     expect(config.model.fallback).toBeUndefined();
   });
+
+  it('accepts fallback: false to disable API fallback', async () => {
+    const yaml = `
+repos:
+  no-fallback-repo:
+    path: /tmp/no-fallback
+    model:
+      assess: claude-opus-4-6
+      fallback: false
+`;
+    await writeFile(join(tempDir, 'repos.yaml'), yaml);
+
+    const config = await loadConfig(join(tempDir, 'repos.yaml'));
+    const repo = config.repos['no-fallback-repo'];
+    expect(repo).toBeDefined();
+    if (!repo) return;
+
+    expect(repo.model.fallback).toBe(false);
+  });
+
+  it('accepts fallback: "none" string sentinel to disable API fallback', async () => {
+    const yaml = `
+repos:
+  none-fallback-repo:
+    path: /tmp/none-fallback
+    model:
+      assess: claude-opus-4-6
+      fallback: none
+`;
+    await writeFile(join(tempDir, 'repos.yaml'), yaml);
+
+    const config = await loadConfig(join(tempDir, 'repos.yaml'));
+    const repo = config.repos['none-fallback-repo'];
+    expect(repo).toBeDefined();
+    if (!repo) return;
+
+    // 'none' is normalized to false during parsing
+    expect(repo.model.fallback).toBe(false);
+  });
 });
 
 /* ------------------------------------------------------------------ */
