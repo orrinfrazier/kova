@@ -228,7 +228,14 @@ describe('DEFAULT_THINKING_LEVELS', () => {
 describe('resolveThinkingLevel', () => {
   const baseConfig: RepoConfig = {
     path: '/tmp/repo',
-    rules: { coverage: 80, auto_merge: false, max_issues_per_run: 10, ci_merge: 'require' as const, concurrency: 1 },
+    rules: {
+      coverage: 80,
+      auto_merge: false,
+      max_issues_per_run: 10,
+      ci_merge: 'require' as const,
+      review_merge: 'require' as const,
+      concurrency: 1,
+    },
     model: {
       assess: 'large',
       spec: 'large',

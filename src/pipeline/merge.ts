@@ -1,10 +1,32 @@
 // Merge pipeline — process kova PR stack in dependency order.
 
 import { resolveNonOverlappingConflicts } from '../services/conflict-resolver.js';
-import { fetchKovaPRsWithStatus, type KovaPRWithStatus, mergePR, rebasePROnDefault } from '../services/github.js';
+import {
+  fetchKovaPRsWithStatus,
+  fetchPRReviewState,
+  type KovaPRWithStatus,
+  mergePR,
+  type PRReviewState,
+  rebasePROnDefault,
+} from '../services/github.js';
 import { detectDefaultBranch } from '../services/worktree.js';
 import type { RepoConfig } from '../types/config.js';
 import { log } from '../utils/logger.js';
+
+/**
+ * Optional callback for resolving outstanding review threads before merging.
+ *
+ * When `review_merge: require` and a PR has a CHANGES_REQUESTED decision or
+ * unresolved blocking threads, runMerge invokes this callback (if provided)
+ * to attempt resolution (dispatch a resolution pass, push, reply to threads).
+ * Returns `true` if resolution succeeded (caller is expected to re-fetch state),
+ * `false` otherwise. The callback receives the PR and its current review state.
+ *
+ * Kept as an injection point so the merge pipeline does not directly depend on
+ * the full STIR review-loop (runReviewLoop requires an Issue object the merge
+ * pipeline doesn't have).
+ */
+export type ReviewResolver = (pr: KovaPRWithStatus, state: PRReviewState) => Promise<boolean>;
 
 export interface MergeOptions {
   repoPath: string;
@@ -13,6 +35,9 @@ export interface MergeOptions {
   prNumber?: number | undefined;
   dryRun?: boolean | undefined;
   ciOverride?: 'require' | 'warn' | undefined;
+  reviewOverride?: 'require' | 'warn' | undefined;
+  /** Optional resolver invoked when require-policy detects blocking reviews. */
+  resolveReviews?: ReviewResolver | undefined;
 }
 
 export interface MergeResult {
@@ -82,9 +107,23 @@ function topoSort(prs: KovaPRWithStatus[], deps: Map<number, number[]>): KovaPRW
   });
 }
 
+/** True when the review state should block a merge under `require` policy. */
+function reviewBlocks(state: PRReviewState): boolean {
+  return state.decision === 'CHANGES_REQUESTED' || state.blockingThreads.length > 0;
+}
+
+/** Human-readable reason string describing why a review state blocks merging. */
+function reviewBlockReason(state: PRReviewState): string {
+  if (state.decision === 'CHANGES_REQUESTED') {
+    return `review decision is 'CHANGES_REQUESTED' (${state.blockingThreads.length} unresolved thread(s))`;
+  }
+  return `${state.blockingThreads.length} unresolved review thread(s)`;
+}
+
 export async function runMerge(options: MergeOptions): Promise<MergeResult> {
-  const { repoPath, config, prNumber, dryRun = false } = options;
+  const { repoPath, config, prNumber, dryRun = false, resolveReviews } = options;
   const ciPolicy = options.ciOverride ?? config.rules.ci_merge ?? 'require';
+  const reviewPolicy = options.reviewOverride ?? config.rules.review_merge ?? 'require';
 
   const result: MergeResult = { merged: [], skipped: [], failed: [], dryRun };
 
@@ -137,6 +176,44 @@ export async function runMerge(options: MergeOptions): Promise<MergeResult> {
 
     if (ciPolicy === 'warn' && pr.ciStatus !== 'success' && pr.ciStatus !== 'unknown') {
       log.warn(`[merge] PR #${pr.number} has CI status '${pr.ciStatus}', proceeding anyway (ci_merge: warn)`);
+    }
+
+    // Review-state gate — fetch decision + unresolved threads, apply review_merge policy.
+    let reviewState = await fetchPRReviewState(repoPath, pr.number);
+    if (reviewBlocks(reviewState)) {
+      if (reviewPolicy === 'require') {
+        // Try one resolution pass if a resolver is supplied. Bounded to a single
+        // attempt — the STIR review-loop owns multi-iteration retries inside the
+        // resolver itself, not here.
+        let resolved = false;
+        if (resolveReviews) {
+          try {
+            const ok = await resolveReviews(pr, reviewState);
+            if (ok) {
+              reviewState = await fetchPRReviewState(repoPath, pr.number);
+              resolved = !reviewBlocks(reviewState);
+            }
+          } catch (error) {
+            log.warn(
+              `[merge] Review resolver threw for PR #${pr.number}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+        }
+
+        if (!resolved) {
+          const reason = reviewBlockReason(reviewState);
+          log.warn(`[merge] PR #${pr.number} blocked by reviews: ${reason}`);
+          result.failed.push({ number: pr.number, reason });
+          remainingPRNumbers.delete(pr.number);
+          continue;
+        }
+
+        log.info(`[merge] PR #${pr.number} reviews resolved, proceeding to merge`);
+      } else {
+        log.warn(
+          `[merge] PR #${pr.number} has blocking reviews (${reviewBlockReason(reviewState)}), proceeding anyway (review_merge: warn)`,
+        );
+      }
     }
 
     try {
