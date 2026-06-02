@@ -118,8 +118,20 @@ export const BrainstormIssueSchema = z.object({
 });
 export type BrainstormIssue = z.infer<typeof BrainstormIssueSchema>;
 
+// Coverage manifest entry — issue #280.
+// Each top-level source subdir reports whether the brainstorm pass examined it.
+export const CoverageEntrySchema = z.object({
+  unit: z.string(),
+  status: z.enum(['covered', 'skipped']),
+  reason: z.string().optional(),
+});
+export type CoverageEntry = z.infer<typeof CoverageEntrySchema>;
+
 export const BrainstormResultSchema = z.object({
   issues: z.array(BrainstormIssueSchema),
   summary: z.string(),
+  // Backward compat: older agent output without coverage still parses (defaults to []).
+  // Forward direction: the prompt asks the agent to populate this so scope is visible.
+  coverage: z.array(CoverageEntrySchema).default([]),
 });
 export type BrainstormResult = z.infer<typeof BrainstormResultSchema>;

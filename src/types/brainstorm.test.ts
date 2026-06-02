@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { BrainstormIssueSchema, BrainstormResultSchema } from './waves.js';
+import { BrainstormIssueSchema, BrainstormResultSchema, CoverageEntrySchema } from './waves.js';
 
 describe('BrainstormIssueSchema', () => {
   it('validates a well-formed brainstorm issue', () => {
@@ -165,6 +165,60 @@ describe('BrainstormResultSchema', () => {
     const result = BrainstormResultSchema.safeParse({
       issues: [],
     });
+    expect(result.success).toBe(false);
+  });
+
+  it('defaults coverage to an empty array when omitted (backward compat)', () => {
+    const result = BrainstormResultSchema.safeParse({
+      issues: [],
+      summary: 'ok',
+    });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.coverage).toEqual([]);
+    }
+  });
+
+  it('accepts a populated coverage array', () => {
+    const result = BrainstormResultSchema.safeParse({
+      issues: [],
+      summary: 'ok',
+      coverage: [
+        { unit: 'src/ai', status: 'covered' },
+        { unit: 'src/utils', status: 'skipped', reason: 'no findings' },
+      ],
+    });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.coverage).toHaveLength(2);
+      expect(result.data.coverage[0]?.unit).toBe('src/ai');
+      expect(result.data.coverage[1]?.status).toBe('skipped');
+    }
+  });
+});
+
+describe('CoverageEntrySchema', () => {
+  it('validates a covered entry without reason', () => {
+    const result = CoverageEntrySchema.safeParse({ unit: 'src/cli', status: 'covered' });
+    expect(result.success).toBe(true);
+  });
+
+  it('validates a skipped entry with reason', () => {
+    const result = CoverageEntrySchema.safeParse({
+      unit: 'src/utils',
+      status: 'skipped',
+      reason: 'logging helpers — out of scope for security pass',
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('rejects an unknown status', () => {
+    const result = CoverageEntrySchema.safeParse({ unit: 'src/ai', status: 'unknown' });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects a missing unit field', () => {
+    const result = CoverageEntrySchema.safeParse({ status: 'covered' });
     expect(result.success).toBe(false);
   });
 });

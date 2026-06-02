@@ -39,7 +39,7 @@ vi.mock('../services/brainstorm-history.js', () => ({
 }));
 
 // Dynamic import after mocks are set up
-const { brainstorm } = await import('./brainstorm.js');
+const { brainstorm, printBrainstormPreview } = await import('./brainstorm.js');
 
 const DEFAULT_CONFIG: RepoConfig = {
   path: '/tmp/repo',
@@ -82,7 +82,7 @@ const SAMPLE_ISSUES = [
   },
 ];
 
-function makeBrainstormHandoff(issues: unknown[]): WaveHandoff {
+function makeBrainstormHandoff(issues: unknown[], coverage: unknown[] = []): WaveHandoff {
   return {
     wave: 'brainstorm',
     timestamp: new Date().toISOString(),
@@ -90,7 +90,7 @@ function makeBrainstormHandoff(issues: unknown[]): WaveHandoff {
     cost: 0.05,
     turns: 10,
     confidence: 'high',
-    artifact: { issues, summary: 'Found improvements' },
+    artifact: { issues, summary: 'Found improvements', coverage },
     approach_notes: '',
   };
 }
@@ -422,5 +422,124 @@ describe('brainstorm', () => {
       expect(result.success).toBe(true);
       expect(result.issues).toHaveLength(1);
     });
+  });
+
+  // --- Coverage manifest passthrough (issue #280) ---
+
+  describe('coverage manifest', () => {
+    it('passes coverage entries from the agent artifact through to the result', async () => {
+      const coverage = [
+        { unit: 'src/ai', status: 'covered' as const },
+        { unit: 'src/utils', status: 'skipped' as const, reason: 'no findings' },
+      ];
+      mockSpawnWaveAgent.mockResolvedValueOnce(makeBrainstormHandoff(SAMPLE_ISSUES, coverage));
+
+      const result = await brainstorm({ repoPath: '/tmp/repo', config: DEFAULT_CONFIG });
+
+      expect(result.success).toBe(true);
+      expect(result.coverage).toHaveLength(2);
+      expect(result.coverage?.[0]?.unit).toBe('src/ai');
+      expect(result.coverage?.[1]?.status).toBe('skipped');
+      expect(result.coverage?.[1]?.reason).toBe('no findings');
+    });
+
+    it('defaults coverage to an empty array when the agent omits it (backward compat)', async () => {
+      // Older agent output without coverage field at all
+      mockSpawnWaveAgent.mockResolvedValueOnce({
+        wave: 'brainstorm',
+        timestamp: new Date().toISOString(),
+        model: 'test-model',
+        cost: 0.05,
+        turns: 10,
+        confidence: 'high',
+        artifact: { issues: SAMPLE_ISSUES, summary: 'Found improvements' },
+        approach_notes: '',
+      });
+
+      const result = await brainstorm({ repoPath: '/tmp/repo', config: DEFAULT_CONFIG });
+
+      expect(result.success).toBe(true);
+      expect(result.coverage).toEqual([]);
+    });
+  });
+});
+
+describe('printBrainstormPreview coverage rendering', () => {
+  it('prints the coverage map with covered and skipped entries', () => {
+    const logs: string[] = [];
+    const orig = console.log;
+    console.log = (...args: unknown[]) => {
+      logs.push(args.map((a) => String(a)).join(' '));
+    };
+    try {
+      printBrainstormPreview({
+        success: true,
+        issues: [],
+        filtered: [],
+        summary: 'Found improvements',
+        cost: 0.05,
+        model: 'test-model',
+        coverage: [
+          { unit: 'src/ai', status: 'covered' },
+          { unit: 'src/utils', status: 'skipped', reason: 'no findings' },
+        ],
+      });
+    } finally {
+      console.log = orig;
+    }
+    const output = logs.join('\n');
+    expect(output).toContain('Coverage');
+    expect(output).toContain('src/ai');
+    expect(output).toContain('covered');
+    expect(output).toContain('src/utils');
+    expect(output).toContain('skipped');
+    expect(output).toContain('no findings');
+  });
+
+  it('prints a visible "none reported" signal when coverage is empty', () => {
+    const logs: string[] = [];
+    const orig = console.log;
+    console.log = (...args: unknown[]) => {
+      logs.push(args.map((a) => String(a)).join(' '));
+    };
+    try {
+      printBrainstormPreview({
+        success: true,
+        issues: [],
+        filtered: [],
+        summary: 'Found improvements',
+        cost: 0.05,
+        model: 'test-model',
+        coverage: [],
+      });
+    } finally {
+      console.log = orig;
+    }
+    const output = logs.join('\n');
+    expect(output).toContain('Coverage');
+    expect(output).toContain('none reported');
+  });
+
+  it('also prints a "none reported" signal when coverage is undefined', () => {
+    const logs: string[] = [];
+    const orig = console.log;
+    console.log = (...args: unknown[]) => {
+      logs.push(args.map((a) => String(a)).join(' '));
+    };
+    try {
+      printBrainstormPreview({
+        success: true,
+        issues: [],
+        filtered: [],
+        summary: 'Found improvements',
+        cost: 0.05,
+        model: 'test-model',
+      });
+    } finally {
+      console.log = orig;
+    }
+    const output = logs.join('\n');
+    expect(output).toContain('Coverage');
+    expect(output).toContain('none reported');
   });
 });

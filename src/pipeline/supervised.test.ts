@@ -17,8 +17,10 @@ import type { BrainstormIssue, RepoConfig } from '../types/index.js';
 /* ------------------------------------------------------------------ */
 
 const mockBrainstorm = vi.fn();
+const mockPrintCoverageMap = vi.fn();
 vi.mock('./brainstorm.js', () => ({
   brainstorm: (...args: unknown[]) => mockBrainstorm(...args),
+  printCoverageMap: (...args: unknown[]) => mockPrintCoverageMap(...args),
 }));
 
 /* ------------------------------------------------------------------ */
@@ -198,6 +200,7 @@ function setupWriteSuccess() {
 
 beforeEach(() => {
   mockBrainstorm.mockReset();
+  mockPrintCoverageMap.mockReset();
   mockApproveIssues.mockReset();
   mockCreateIssue.mockReset();
   mockFetchIssues.mockReset();
@@ -780,6 +783,84 @@ describe('runSupervised — brainstorm dependency resolution (issue #279)', () =
 
     const body = mockCreateIssue.mock.calls[0]?.[2] as string;
     expect(body).not.toContain('Blocked by #');
+  });
+});
+
+describe('runSupervised — coverage checkpoint (issue #280)', () => {
+  it('asks the user to confirm coverage is complete before approving issues', async () => {
+    setupNoSession();
+    setupWriteSuccess();
+    mockBrainstorm.mockResolvedValue(makeBrainstormReturn());
+    mockApproveIssues.mockResolvedValue(makeApprovalResult());
+    mockCreateIssue.mockResolvedValue({ number: 1, url: 'https://github.com/test/issues/1' });
+    mockConfirm.mockResolvedValue(true);
+    mockFixByNumbers.mockResolvedValue(makeLoopResult());
+
+    await runSupervised({ repoPath: '/tmp/repo', repoName: 'test-repo', config: DEFAULT_CONFIG });
+
+    // confirm should now be called at LEAST twice: once for coverage, once for fix phase.
+    expect(mockConfirm.mock.calls.length).toBeGreaterThanOrEqual(2);
+    // The first confirm call is the coverage checkpoint.
+    const firstCall = mockConfirm.mock.calls[0]?.[0] as { message?: string };
+    expect(firstCall?.message).toMatch(/scope|coverage/i);
+  });
+
+  it('stops cleanly when the user declines the coverage checkpoint', async () => {
+    setupNoSession();
+    setupWriteSuccess();
+    mockBrainstorm.mockResolvedValue(makeBrainstormReturn());
+    // First confirm = scope/coverage = declined
+    mockConfirm.mockResolvedValueOnce(false);
+
+    const result = await runSupervised({ repoPath: '/tmp/repo', repoName: 'test-repo', config: DEFAULT_CONFIG });
+
+    expect(result.success).toBe(false);
+    // Nothing was approved, created, or fixed.
+    expect(mockApproveIssues).not.toHaveBeenCalled();
+    expect(mockCreateIssue).not.toHaveBeenCalled();
+    expect(mockFixByNumbers).not.toHaveBeenCalled();
+  });
+
+  it('stops cleanly when the user cancels (Ctrl-C) the coverage checkpoint', async () => {
+    const cancelSymbol = Symbol('cancel');
+    setupNoSession();
+    setupWriteSuccess();
+    mockBrainstorm.mockResolvedValue(makeBrainstormReturn());
+    mockConfirm.mockResolvedValueOnce(cancelSymbol);
+    mockIsCancel.mockImplementation((v) => v === cancelSymbol);
+
+    const result = await runSupervised({ repoPath: '/tmp/repo', repoName: 'test-repo', config: DEFAULT_CONFIG });
+
+    expect(result.success).toBe(false);
+    expect(mockApproveIssues).not.toHaveBeenCalled();
+    expect(mockCreateIssue).not.toHaveBeenCalled();
+    expect(mockFixByNumbers).not.toHaveBeenCalled();
+  });
+
+  it('skips the coverage checkpoint when yes=true (auto-approve)', async () => {
+    setupNoSession();
+    setupWriteSuccess();
+    mockBrainstorm.mockResolvedValue(makeBrainstormReturn());
+    mockApproveIssues.mockResolvedValue(makeApprovalResult());
+    mockCreateIssue.mockResolvedValue({ number: 1, url: 'https://github.com/test/issues/1' });
+    // Only the fix-phase confirm should fire
+    mockConfirm.mockResolvedValue(true);
+    mockFixByNumbers.mockResolvedValue(makeLoopResult());
+
+    await runSupervised({ repoPath: '/tmp/repo', repoName: 'test-repo', config: DEFAULT_CONFIG, yes: true });
+
+    // With yes=true, neither the coverage checkpoint nor the fix-phase confirm should ask the user.
+    // Existing semantics: --yes auto-approves both prompts.
+    // Verify nothing asks about scope.
+    const scopeAsks = mockConfirm.mock.calls.filter((c) => {
+      const arg = c[0] as { message?: string } | undefined;
+      return typeof arg?.message === 'string' && /scope|coverage/i.test(arg.message);
+    });
+    expect(scopeAsks).toHaveLength(0);
+
+    // And the flow still proceeds to create + fix
+    expect(mockCreateIssue).toHaveBeenCalled();
+    expect(mockFixByNumbers).toHaveBeenCalled();
   });
 });
 
