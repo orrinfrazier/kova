@@ -31,6 +31,7 @@ import { log } from '../utils/logger.js';
 import { executePiecesInBatches } from './batch-scheduler.js';
 import { buildPieceContext, buildWaveContext } from './context.js';
 import { loadPrompt, resolvePromptsDir } from './prompts.js';
+import { loadReviewPersonaPrompt, selectReviewerPersona } from './review-persona.js';
 
 const exec = promisify(execCb);
 
@@ -1149,12 +1150,41 @@ export async function runReviewLoop(config: ReviewLoopConfig): Promise<ReviewLoo
   }
   const forceFailFromOrchestrator = prescan.blocking || baseline.blocking;
 
+  // Pick the reviewer persona ONCE per loop entry — labels + assess
+  // modules_affected drive the choice, generalist is the fallback. The
+  // persona prompt is read-only (same tools as the existing generic review.md).
+  const assessArtifact = waveResults.assess?.artifact;
+  const modulesAffected =
+    assessArtifact != null &&
+    typeof assessArtifact === 'object' &&
+    'surface_area' in assessArtifact &&
+    assessArtifact.surface_area != null &&
+    typeof assessArtifact.surface_area === 'object' &&
+    'modules_affected' in assessArtifact.surface_area &&
+    Array.isArray((assessArtifact.surface_area as { modules_affected?: unknown }).modules_affected)
+      ? ((assessArtifact.surface_area as { modules_affected: unknown[] }).modules_affected.filter(
+          (m): m is string => typeof m === 'string',
+        ) as string[])
+      : [];
+  const persona = selectReviewerPersona({
+    labels: issue.labels ?? [],
+    modulesAffected,
+  });
+  log.info(`[review-loop] Persona: ${persona}`);
+
   for (let iteration = 0; iteration < maxIterations; iteration++) {
     log.info(`[review-loop] Iteration ${iteration + 1}/${maxIterations}`);
 
     // Step 1: Fresh review agent — no prior review bias.
     // Pre-scan + baseline are injected as DATA (not re-derived by the model).
-    const reviewSystemPrompt = await loadPrompt('review', repoConfig.tools, projectContext, resolvedPromptsDir);
+    const reviewSystemPrompt = await loadReviewPersonaPrompt(
+      persona,
+      // Review wave is read-only — never receives customTools (loadPrompt
+      // only appends them to impl/quality anyway).
+      undefined,
+      projectContext,
+      resolvedPromptsDir,
+    );
     const prescanContext = buildPrescanContext();
     const baseUserMessage = buildWaveContext('review', issue, waveResults, {
       ...(reviewFeedbackContext != null && { reviewFeedbackContext }),
