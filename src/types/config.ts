@@ -29,7 +29,23 @@ export type ThinkingLevel = z.infer<typeof ThinkingLevelSchema>;
 export const IsolationModeSchema = z.enum(['worktree', 'docker', 'none']);
 export type IsolationMode = z.infer<typeof IsolationModeSchema>;
 
+/**
+ * Sandbox execution backends (issue #301).
+ *
+ * - `docker`: local Docker container, no persistence. The historical default.
+ * - `daytona`: serverless workspace with stop-on-idle hibernation and resume.
+ *   Filesystem is snapshotted across runs (keyed by repo+issue), so an idle
+ *   run costs ~nothing while preserving state for the next resume.
+ *
+ * Unknown values reject at config-load time so a typo in repos.yaml fails
+ * fast rather than surfacing during a wave dispatch.
+ */
+export const SandboxBackendSchema = z.enum(['docker', 'daytona']);
+export type SandboxBackendName = z.infer<typeof SandboxBackendSchema>;
+
 export const SandboxConfigSchema = z.object({
+  /** Execution backend selector. Default `docker` keeps existing behavior. */
+  backend: SandboxBackendSchema.default('docker'),
   image: z.string().default('node:20-bookworm'),
   extra_packages: z.array(z.string()).default([]),
   restrict_network: z.boolean().default(false),
