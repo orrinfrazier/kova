@@ -18,7 +18,7 @@ import {
 } from '../services/brainstorm-history.js';
 import { type CrossRepoConfig, fetchCrossRepoIssues, formatCrossRepoContext } from '../services/cross-repo-issues.js';
 import { loadProjectContext } from '../services/project-context.js';
-import type { BrainstormIssue, BrainstormResult, RepoConfig } from '../types/index.js';
+import type { BrainstormIssue, BrainstormResult, CoverageEntry, RepoConfig } from '../types/index.js';
 import { BrainstormResultSchema } from '../types/index.js';
 import { log } from '../utils/logger.js';
 import { loadPrompt, resolvePromptsDir } from './prompts.js';
@@ -51,6 +51,8 @@ export interface BrainstormReturn {
   model: string;
   error?: string;
   diminishingReturns?: DiminishingReturnsReport;
+  /** Coverage manifest from the agent — issue #280. Each top-level src subdir tagged covered/skipped. */
+  coverage?: CoverageEntry[];
 }
 
 export async function brainstorm(options: BrainstormOptions): Promise<BrainstormReturn> {
@@ -143,6 +145,11 @@ export async function brainstorm(options: BrainstormOptions): Promise<Brainstorm
       cost: handoff.cost,
       model: handoff.model,
       diminishingReturns: report,
+      // Pass coverage through. Schema default + this fallback together ensure
+      // `[]` for older agents that didn't emit a coverage field at all
+      // (the schema default applies on `.parse()`; this fallback covers paths
+      // where the artifact is constructed without going through parse).
+      coverage: artifact.coverage ?? [],
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -168,6 +175,10 @@ export function printBrainstormPreview(result: BrainstormReturn): void {
   if (result.summary) {
     console.log(`\n${result.summary}\n`);
   }
+
+  // Coverage manifest (issue #280): show which top-level units the agent examined
+  // BEFORE listing issues, so the user can judge scope completeness at a glance.
+  printCoverageMap(result.coverage);
 
   console.log(`Found ${result.issues.length} issue(s):\n`);
 
@@ -203,4 +214,27 @@ export function printBrainstormPreview(result: BrainstormReturn): void {
       console.log(`Suggestion: Only ${dr.novelCount} novel issue(s) generated. Consider stopping brainstorm cycles.`);
     }
   }
+}
+
+/**
+ * Render the brainstorm coverage manifest (issue #280).
+ *
+ * Each entry reports whether a top-level source unit was examined by the
+ * brainstorm agent. Skipped entries carry a reason. An empty/missing manifest
+ * is itself a signal — the user should not approve issue creation without
+ * knowing what scope was actually inspected.
+ */
+export function printCoverageMap(coverage: CoverageEntry[] | undefined): void {
+  console.log('Coverage:');
+  if (!coverage || coverage.length === 0) {
+    console.log('  (none reported)');
+    console.log();
+    return;
+  }
+  for (const entry of coverage) {
+    const tag = entry.status === 'covered' ? 'covered' : 'skipped';
+    const suffix = entry.status === 'skipped' && entry.reason ? ` — ${entry.reason}` : '';
+    console.log(`  - ${entry.unit}: ${tag}${suffix}`);
+  }
+  console.log();
 }

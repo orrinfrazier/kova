@@ -1,5 +1,5 @@
 // Supervised pipeline orchestrator.
-// Flow: brainstorm → approveIssues → createIssue → confirm pause → fixByNumbers
+// Flow: brainstorm → coverage checkpoint → approveIssues → createIssue → confirm pause → fixByNumbers
 
 import { confirm, intro, isCancel, note, outro } from '@clack/prompts';
 import { fs, path } from 'zx';
@@ -8,7 +8,7 @@ import { resolveBrainstormDependencies } from '../services/brainstorm-deps.js';
 import { createIssue, fetchIssues } from '../services/github.js';
 import type { RepoConfig } from '../types/index.js';
 import type { BrainstormReturn } from './brainstorm.js';
-import { brainstorm } from './brainstorm.js';
+import { brainstorm, printCoverageMap } from './brainstorm.js';
 import type { LoopResult } from './loop.js';
 import { fixByNumbers } from './loop.js';
 
@@ -106,6 +106,23 @@ export async function runSupervised(options: SupervisedOptions): Promise<Supervi
         createdIssues: [],
         error: brainstormResult.error ?? 'Brainstorm failed',
       };
+    }
+
+    // Coverage checkpoint (issue #280): show the scope ledger and ask the user
+    // to confirm coverage is complete BEFORE we approve / create any issues.
+    // The --yes flag bypasses this (same semantics as approval auto-approve).
+    if (!yes) {
+      printCoverageMap(brainstormResult.coverage);
+      const scopeOk = await confirm({ message: 'Scope is complete — proceed to file issues?' });
+      if (isCancel(scopeOk) || scopeOk === false) {
+        outro('Scope checkpoint declined — no issues filed.');
+        return {
+          success: false,
+          brainstormResult,
+          createdIssues: [],
+          error: 'Coverage checkpoint declined by user',
+        };
+      }
     }
 
     // Approval phase
