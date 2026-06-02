@@ -1074,6 +1074,22 @@ export function buildRepairTurnMessage(
  * Aggressive context trimmer for when context usage exceeds 80%.
  * Keeps the first user message and the last 3 tool-result/assistant turn pairs,
  * dropping intermediate messages to free context space.
+ *
+ * SHAPE ASSUMPTION (pi-ai runtime): identical to the caveat on
+ * `src/ai/context-transform.ts` — this trimmer treats `AgentMessage[]` as a
+ * flat list where tool results are top-level messages (pi-ai's denormalized
+ * `ToolResultMessage`). The slice-by-index approach is safe under that shape
+ * because each tool result occupies one message slot.
+ *
+ * Under Anthropic's native Messages API shape, tool results are content
+ * blocks inside a user message and one user message can carry multiple tool
+ * results plus other blocks. Porting this trimmer to the native shape
+ * requires trimming at the content-block level (and joining `tool_use_id`
+ * back to the prior assistant `tool_use` block if name-based filtering is
+ * ever added here), not at the message level.
+ *
+ * Planned cleanup: pi-mono's `compact()` / `shouldCompact()` (issue #296)
+ * will replace this trimmer and the sibling hook in `context-transform.ts`.
  */
 async function aggressiveTrimContext(messages: AgentMessage[]): Promise<AgentMessage[]> {
   // Keep at most the first message + last 6 messages (≈ 3 turn pairs)
