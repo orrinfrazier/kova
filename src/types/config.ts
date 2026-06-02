@@ -319,6 +319,14 @@ export const RepoConfigSchema = z.object({
       coverage: z.number().default(80),
       auto_merge: z.boolean().default(false),
       max_issues_per_run: z.number().default(10),
+      /**
+       * Issue #288 — `gh issue list --limit`. Decoupled from
+       * `max_issues_per_run` (the processing cap) so the loop can fetch a
+       * wider window, record every fetched issue in the coverage ledger,
+       * and report "N not attempted" rather than silently dropping them.
+       * Defaults to undefined → DEFAULT_FETCH_LIMIT (50) in github.ts.
+       */
+      gh_fetch_limit: z.number().int().positive().optional(),
       budget_usd: z.number().optional(),
       wave_cost_cap_usd: z.number().optional(),
       focus: z.array(z.string()).optional(),

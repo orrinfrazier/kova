@@ -9,9 +9,20 @@ $.verbose = false;
 export interface FetchIssuesOptions {
   /** Restrict the result set to issues assigned to the given milestone title. */
   milestone?: string | undefined;
+  /**
+   * Maximum number of issues to request from `gh issue list --limit`.
+   * Defaults to 50. Decoupled from the per-run processing cap so callers can
+   * widen the fetch window (and record every fetched issue in the coverage
+   * ledger) without raising how many issues are actually processed.
+   */
+  fetchLimit?: number | undefined;
 }
 
+/** Default for `gh issue list --limit` when no caller override is supplied. */
+export const DEFAULT_FETCH_LIMIT = 50;
+
 export async function fetchIssues(repoPath: string, filter?: string, options?: FetchIssuesOptions): Promise<Issue[]> {
+  const fetchLimit = options?.fetchLimit ?? DEFAULT_FETCH_LIMIT;
   const args = [
     'issue',
     'list',
@@ -20,7 +31,7 @@ export async function fetchIssues(repoPath: string, filter?: string, options?: F
     '--json',
     'number,title,body,labels,url,milestone',
     '--limit',
-    '50',
+    String(fetchLimit),
   ];
 
   if (filter) {

@@ -186,6 +186,21 @@ describe('fetchIssues', () => {
     expect(calls[0]?.command).toContain('--milestone v0.35');
   });
 
+  it('uses a configurable --limit when fetchLimit option is provided', async () => {
+    setResponse('gh issue list', { stdout: JSON.stringify(ISSUE_LIST_FIXTURE) });
+    await fetchIssues('/repo', undefined, { fetchLimit: 200 });
+
+    expect(calls[0]?.command).toContain('--limit 200');
+    expect(calls[0]?.command).not.toContain('--limit 50');
+  });
+
+  it('default --limit remains 50 when fetchLimit is omitted (backwards compatible)', async () => {
+    setResponse('gh issue list', { stdout: JSON.stringify(ISSUE_LIST_FIXTURE) });
+    await fetchIssues('/repo');
+
+    expect(calls[0]?.command).toContain('--limit 50');
+  });
+
   it('maps raw labels to string array and milestone title (or null)', async () => {
     setResponse('gh issue list', { stdout: JSON.stringify(ISSUE_LIST_FIXTURE) });
     const issues = await fetchIssues('/repo');
