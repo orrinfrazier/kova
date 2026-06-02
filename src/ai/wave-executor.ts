@@ -12,6 +12,7 @@ import type { AgentTool } from '@earendil-works/pi-agent-core';
 import type { z } from 'zod';
 import type { EventBus } from '../services/event-bus/bus.js';
 import type { EventWaveName } from '../services/event-bus/schema.js';
+import { createToolCallCounter, type ToolCallCounts } from '../services/tool-call-counter.js';
 import type { WaveHandoff, WaveModelConfig, WaveName } from '../types/index.js';
 import { log } from '../utils/logger.js';
 import { createTransformContext } from './context-transform.js';
@@ -250,6 +251,19 @@ export interface SpawnWaveAgentConfig {
    * `'short'` or `'none'` to opt out; pass `'long'` to opt a fast wave in.
    */
   cacheRetention?: CacheRetention;
+  /**
+   * Optional callback fired for every `tool_execution_start` event the
+   * runtime emits (issue #278). Used by the retrieval-quality eval harness
+   * (and any caller that wants per-tool telemetry) to mirror the agent's
+   * stream into its own accumulator. The aggregated counts are also surfaced
+   * directly on the returned handoff as `toolCallCounts`, so most callers
+   * don't need this hook — it's exposed for cases that want per-event
+   * granularity (e.g. interleaving counts with timestamps).
+   *
+   * `toolName` is forwarded from the runtime event verbatim; runtimes that
+   * omit the name pass `undefined` per `RuntimeEvent`.
+   */
+  onToolCall?: (toolName: string | undefined) => void;
 }
 
 export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig): Promise<WaveHandoff<T>> {
@@ -276,6 +290,7 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
     eventContext,
     sessionId,
     cacheRetention: explicitCacheRetention,
+    onToolCall,
   } = config;
 
   const timeoutMs = explicitTimeout ?? DEFAULT_WAVE_TIMEOUTS[wave];
@@ -370,6 +385,11 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
   // every assistant turn so we can compute the cache-hit share at completion.
   let totalInputTokens = 0;
   let totalCacheReadTokens = 0;
+  // Issue #278: per-wave tool-call counter — captures the agent's own tool
+  // calls (Read, Grep, Edit, Bash, …) so the retrieval-quality eval harness
+  // can measure whether injected codebaseContext reduced retrieval cost.
+  // Always instantiated; surfaces on the returned handoff as `toolCallCounts`.
+  const toolCallCounter = createToolCallCounter();
 
   // Fixed thresholds for graceful degradation
   const STEER_THRESHOLD = 0.7;
@@ -477,6 +497,16 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
     }
     if (event.type === 'tool_execution_start') {
       log.debug(`[${wave}] Tool: ${event.toolName}`);
+      // Issue #278: count the tool call + fan out to caller's optional hook.
+      toolCallCounter.record(event.toolName);
+      if (onToolCall) {
+        try {
+          onToolCall(event.toolName);
+        } catch (cbErr) {
+          // Caller hooks must never crash the wave. Log + continue.
+          log.debug(`[${wave}] onToolCall hook threw: ${cbErr instanceof Error ? cbErr.message : String(cbErr)}`);
+        }
+      }
     }
     if (event.type === 'turn_end' && turnCount >= maxTurns && !aborted) {
       aborted = true;
@@ -694,6 +724,9 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
         }
       : undefined;
 
+    // Issue #278: snapshot tool-call counts captured during this wave.
+    const toolCallCounts: ToolCallCounts = toolCallCounter.snapshot();
+
     return {
       wave,
       timestamp: new Date().toISOString(),
@@ -706,6 +739,7 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
       approach_notes: '',
       ...(outputFormat?.zodSchema != null ? { repair_attempts: repairAttempts } : {}),
       ...(structuredOutputMetrics != null ? { structured_output_metrics: structuredOutputMetrics } : {}),
+      toolCallCounts,
     };
   } catch (error) {
     if (error instanceof KovaError) throw error;

@@ -79,6 +79,19 @@ export const WaveHandoffSchema = z.object({
    * handoffs without this field still load.
    */
   structured_output_metrics: StructuredOutputMetricsSchema.optional(),
+  /**
+   * Per-wave aggregated tool-call telemetry (issue #278). Captures the
+   * agent's own tool calls (Read, Grep, Edit, Bash, …) so the retrieval-quality
+   * eval harness can measure whether injected context reduced retrieval cost.
+   * Populated on every spawnWaveAgent run; omitted on legacy handoffs.
+   */
+  toolCallCounts: z
+    .object({
+      total: z.number().int().min(0),
+      reads: z.number().int().min(0),
+      byTool: z.record(z.string(), z.number().int().min(0)),
+    })
+    .optional(),
 });
 
 export type WaveHandoff<T = unknown> = Omit<z.infer<typeof WaveHandoffSchema>, 'artifact'> & {

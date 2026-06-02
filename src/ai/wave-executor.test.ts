@@ -2839,3 +2839,121 @@ describe('spawnWaveAgent cache-read telemetry (issue #297)', () => {
     infoSpy.mockRestore();
   });
 });
+
+// Issue #278: per-wave tool-call telemetry. spawnWaveAgent forwards each
+// tool_execution_start event to an optional onToolCall callback and surfaces
+// the aggregated counts on the returned handoff. This is the stream-parser
+// half of the retrieval-quality eval harness.
+describe('tool-call telemetry (issue #278)', () => {
+  let subscribeCb: ((event: unknown) => void) | undefined;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env.ANTHROPIC_API_KEY = 'test-key';
+    subscribeCb = undefined;
+    mockSubscribe.mockImplementation((cb: (event: unknown) => void) => {
+      subscribeCb = cb;
+      return vi.fn();
+    });
+    mockAgentState = { messages: [], errorMessage: undefined };
+    mockPrompt.mockImplementation(async () => {
+      // Emit a sequence of tool_execution_start events, then one assistant
+      // turn so the wave completes normally.
+      subscribeCb?.({ type: 'tool_execution_start', toolName: 'Read' });
+      subscribeCb?.({ type: 'tool_execution_start', toolName: 'Read' });
+      subscribeCb?.({ type: 'tool_execution_start', toolName: 'Grep' });
+      subscribeCb?.({ type: 'tool_execution_start', toolName: 'Edit' });
+      mockAgentState.messages.push({
+        role: 'assistant',
+        content: [{ type: 'text', text: 'done' }],
+        usage: { cost: { total: 0.01 } },
+      });
+      subscribeCb?.({
+        type: 'turn_end',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'done' }],
+          usage: { input: 100, cost: { total: 0.01 } },
+        },
+      });
+    });
+  });
+
+  afterEach(() => {
+    delete process.env.ANTHROPIC_API_KEY;
+  });
+
+  it('invokes onToolCall for every tool_execution_start event', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+    const observed: string[] = [];
+
+    await spawnWaveAgent({
+      wave: 'impl',
+      model: 'claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Message.',
+      cwd: '/tmp/test',
+      onToolCall: (toolName) => {
+        if (toolName) observed.push(toolName);
+      },
+    });
+
+    expect(observed).toEqual(['Read', 'Read', 'Grep', 'Edit']);
+  });
+
+  it('exposes aggregated toolCallCounts on the returned handoff', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+    const handoff = await spawnWaveAgent({
+      wave: 'impl',
+      model: 'claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Message.',
+      cwd: '/tmp/test',
+    });
+
+    expect(handoff.toolCallCounts).toBeDefined();
+    expect(handoff.toolCallCounts?.total).toBe(4);
+    expect(handoff.toolCallCounts?.reads).toBe(2);
+    expect(handoff.toolCallCounts?.byTool.Read).toBe(2);
+    expect(handoff.toolCallCounts?.byTool.Grep).toBe(1);
+    expect(handoff.toolCallCounts?.byTool.Edit).toBe(1);
+  });
+
+  it('still returns a zero-state counts object when no tool calls happened', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+    mockPrompt.mockImplementation(async () => {
+      mockAgentState.messages.push({
+        role: 'assistant',
+        content: [{ type: 'text', text: 'done' }],
+        usage: { cost: { total: 0.01 } },
+      });
+      subscribeCb?.({
+        type: 'turn_end',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'done' }],
+          usage: { input: 50, cost: { total: 0.01 } },
+        },
+      });
+    });
+
+    const handoff = await spawnWaveAgent({
+      wave: 'spec',
+      model: 'claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Message.',
+      cwd: '/tmp/test',
+    });
+
+    expect(handoff.toolCallCounts).toBeDefined();
+    expect(handoff.toolCallCounts?.total).toBe(0);
+    expect(handoff.toolCallCounts?.reads).toBe(0);
+    expect(handoff.toolCallCounts?.byTool).toEqual({});
+  });
+});
