@@ -1,4 +1,5 @@
 import type { Issue } from '../types/index.js';
+import { partitionTierByFootprint } from './file-footprint.js';
 
 export interface IssueFixResult {
   issueNumber: number;
@@ -13,6 +14,15 @@ export interface ConcurrencyOptions {
   budget?: number;
   costAccumulator: { current: number };
   shutdownRequested?: () => boolean;
+  /**
+   * Predicted file-footprints keyed by issue number. When provided AND
+   * concurrency > 1, each tier is partitioned via `partitionTierByFootprint`
+   * so that issues touching overlapping files run sequentially while
+   * disjoint-footprint issues stay parallel.
+   *
+   * Behavior is unchanged when this is omitted or when concurrency === 1.
+   */
+  footprints?: Map<number, string[]>;
 }
 
 /**
@@ -30,11 +40,16 @@ export async function runFixesWithConcurrency(
   executor: FixExecutor,
   options: ConcurrencyOptions,
 ): Promise<IssueFixResult[]> {
-  const { concurrency, budget, costAccumulator, shutdownRequested } = options;
+  const { concurrency, budget, costAccumulator, shutdownRequested, footprints } = options;
 
   const resultMap = new Map<number, IssueFixResult>();
 
   const isBudgetExceeded = (): boolean => budget !== undefined && costAccumulator.current >= budget;
+
+  // File-overlap conflict avoidance is only meaningful when more than one fix
+  // could run concurrently. When concurrency === 1 or no footprint map was
+  // supplied, treat each tier as a single sub-tier (preserves prior behavior).
+  const partitionEnabled = concurrency > 1 && footprints !== undefined;
 
   for (let tierIdx = 0; tierIdx < dependencyTiers.length; tierIdx++) {
     const tier = dependencyTiers[tierIdx];
@@ -78,17 +93,58 @@ export async function runFixesWithConcurrency(
       break;
     }
 
-    const tierResults = await runTierWithSemaphore(
-      tier,
-      issues,
-      executor,
-      concurrency,
-      isBudgetExceeded,
-      shutdownRequested,
-    );
+    // When file-overlap avoidance is active, split this tier into sub-tiers
+    // where each sub-tier contains only issues with disjoint footprints.
+    // Sub-tiers run sequentially; within each, the existing semaphore
+    // parallelism applies. When partitioning is disabled (concurrency === 1
+    // OR no footprint map), the tier runs as one unit — preserving the prior
+    // shutdown/budget callback cadence exactly.
+    const subTiers: number[][] = partitionEnabled
+      ? partitionTierByFootprint(tier, (tierIndex) => {
+          const issue = issues[tierIndex];
+          return issue ? (footprints.get(issue.number) ?? []) : [];
+        })
+      : [tier];
 
-    for (const result of tierResults) {
-      resultMap.set(result.issueNumber, result);
+    for (let subIdx = 0; subIdx < subTiers.length; subIdx++) {
+      const subTier = subTiers[subIdx];
+      if (!subTier || subTier.length === 0) continue;
+
+      // Re-check shutdown / budget BETWEEN sub-tiers (not before the first)
+      // so file-overlap-induced serialization respects the same cancellation
+      // surface as a real tier boundary. Skipping the check before subIdx=0
+      // preserves the original single-tier call-count contract.
+      if (subIdx > 0 && (shutdownRequested?.() || isBudgetExceeded())) {
+        const errMsg = shutdownRequested?.() ? 'skipped: shutdown requested' : 'skipped: budget exceeded';
+        for (let s = subIdx; s < subTiers.length; s++) {
+          const remaining = subTiers[s];
+          if (!remaining) continue;
+          for (const idx of remaining) {
+            const issue = issues[idx];
+            if (issue && !resultMap.has(issue.number)) {
+              resultMap.set(issue.number, {
+                issueNumber: issue.number,
+                success: false,
+                error: errMsg,
+              });
+            }
+          }
+        }
+        break;
+      }
+
+      const tierResults = await runTierWithSemaphore(
+        subTier,
+        issues,
+        executor,
+        concurrency,
+        isBudgetExceeded,
+        shutdownRequested,
+      );
+
+      for (const result of tierResults) {
+        resultMap.set(result.issueNumber, result);
+      }
     }
   }
 
