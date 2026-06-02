@@ -32,6 +32,7 @@ import { appendHistoryEntry, readHistory } from '../services/history.js';
 import { validateIsolation } from '../services/isolation.js';
 import { detectTooling } from '../services/language-detect.js';
 import * as metrics from '../services/metrics.js';
+import { applyScopeToState, detectScope, formatScopeLogLine } from '../services/pipeline-scope.js';
 import { ensureScreenshotsDir, isPlaywrightEnabled, resolvePlaywrightEnv } from '../services/playwright.js';
 import { formatPRContext, type OpenPR } from '../services/pr-context.js';
 import { ProgressTracker } from '../services/progress.js';
@@ -467,6 +468,21 @@ export async function fix(options: FixOptions): Promise<FixResult> {
   } else {
     state = createInitialState(issue, repoName, repoPath, worktree?.path);
   }
+
+  // Smart phase detection (issue #283): decide pipeline scope, persist on
+  // state, and mark scope-skipped waves as already-completed so `shouldSkip`
+  // short-circuits them. Detection runs only on first entry (not on resume);
+  // resumed state already carries `pipelineScope`.
+  if (state.pipelineScope == null) {
+    const scopeResult = await detectScope({ issue, workDir });
+    applyScopeToState(state, scopeResult.scope, scopeResult.reason);
+    flog.info(`[fix] ${formatScopeLogLine(scopeResult.scope, scopeResult.reason)}`);
+    await saveCheckpoint(workDir, state);
+  } else {
+    flog.info(`[fix] ${formatScopeLogLine(state.pipelineScope, state.pipelineScopeReason ?? '(resumed)')}`);
+  }
+  const skipTestPhase = state.pipelineScope === 'IMPL_ONLY' || state.pipelineScope === 'REFACTOR';
+  const skipImplPhase = state.pipelineScope === 'TEST_ONLY';
 
   const shouldSkip = (wave: WaveName): boolean => state.completedWaves.includes(wave);
   const prContext = formatPRContext(pendingPRs ?? []);
@@ -907,6 +923,8 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         ...(serialFallback && { maxConcurrent: 1 }),
         ...(sandboxContext != null && { sandbox: sandboxContext }),
         cacheContext,
+        ...(skipTestPhase && { skipTestPhase: true }),
+        ...(skipImplPhase && { skipImplPhase: true }),
       });
 
       // Save handoffs for test and impl
@@ -976,6 +994,8 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           ...(testRunner != null && { testRunner }),
           ...(sandboxContext != null && { sandbox: sandboxContext }),
           cacheContext,
+          ...(skipTestPhase && { skipTestPhase: true }),
+          ...(skipImplPhase && { skipImplPhase: true }),
         });
         state.waveResults.test = retryTI.testWaveResult;
         state.waveResults.impl = retryTI.implWaveResult;
@@ -1169,6 +1189,8 @@ export async function fix(options: FixOptions): Promise<FixResult> {
             ...(testRunner != null && { testRunner }),
             ...(sandboxContext != null && { sandbox: sandboxContext }),
             cacheContext,
+            ...(skipTestPhase && { skipTestPhase: true }),
+            ...(skipImplPhase && { skipImplPhase: true }),
           });
 
           state.waveResults.test = retryTI.testWaveResult;

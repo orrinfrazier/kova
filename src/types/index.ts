@@ -16,6 +16,7 @@ export type {
   ModelTier,
   OllamaModel,
   OllamaProvider,
+  PipelineScope,
   PlaywrightConfig,
   Providers,
   RepoConfig,

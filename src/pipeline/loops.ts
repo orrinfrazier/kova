@@ -78,6 +78,18 @@ export interface TILoopConfig {
    * sessionId of the form `kova-<repo>-<issue>-<wave>`.
    */
   cacheContext?: { repo: string; issue: string | number };
+  /**
+   * Issue #283 — when true, skip the test-writing wave inside the TI loop
+   * and run impl against tests that already exist in the worktree. Used by
+   * pipeline-scope IMPL_ONLY and REFACTOR.
+   */
+  skipTestPhase?: boolean | undefined;
+  /**
+   * Issue #283 — when true, skip the impl wave and impl retry loop. Used by
+   * pipeline-scope TEST_ONLY: the orchestrator wants tests written but no
+   * implementation. The returned `implWaveResult` is a synthetic skip-marker.
+   */
+  skipImplPhase?: boolean | undefined;
 }
 
 export interface TILoopResult {
@@ -178,6 +190,20 @@ export interface PieceTILoopConfig {
    * `kova-<repo>-<issue>-<wave>`.
    */
   cacheContext?: { repo: string; issue: string | number } | undefined;
+  /**
+   * When true, skip the test-writing wave and run impl only against tests
+   * that already exist in the worktree. Used by pipeline-scope IMPL_ONLY and
+   * REFACTOR (issue #283). The returned `testWaveResult` is a synthetic
+   * skip-marker; impl still runs the test command via `testRunner` to gate
+   * its retries.
+   */
+  skipTestPhase?: boolean | undefined;
+  /**
+   * Issue #283 — when true, skip the impl wave and impl retry loop. Used by
+   * pipeline-scope TEST_ONLY. The returned `implWaveResult` is a synthetic
+   * skip-marker.
+   */
+  skipImplPhase?: boolean | undefined;
 }
 
 export interface PieceTILoopResult {
@@ -217,6 +243,17 @@ export interface ParallelPieceTILoopConfig {
    * fix.ts via `buildWaveSessionId(...)`.
    */
   cacheContext?: { repo: string; issue: string | number };
+  /**
+   * Issue #283 — when true, skip the test-writing wave per piece and rely on
+   * the existing test suite as the regression net. Forwarded to every per-
+   * piece TI loop. Used by pipeline-scope IMPL_ONLY and REFACTOR.
+   */
+  skipTestPhase?: boolean | undefined;
+  /**
+   * Issue #283 — when true, skip the impl wave per piece. Used by
+   * pipeline-scope TEST_ONLY.
+   */
+  skipImplPhase?: boolean | undefined;
 }
 
 export interface ParallelPieceTILoopResult {
@@ -663,6 +700,8 @@ export async function runTILoop(config: TILoopConfig): Promise<TILoopResult> {
     fileReader = defaultFileReader,
     sandbox,
     cacheContext,
+    skipTestPhase = false,
+    skipImplPhase = false,
   } = config;
   // Issue #297: build per-wave sessionIds once so every dispatched call gets
   // a stable cache-affinity key without re-deriving the slug on each turn.
@@ -677,30 +716,69 @@ export async function runTILoop(config: TILoopConfig): Promise<TILoopResult> {
   log.info(`[ti-loop] Test command: ${testCmd}`);
 
   let totalCost = 0;
-
-  // Step 1: Spawn test agent — writes tests, verifies they fail
-  log.info('[ti-loop] Running test wave (write failing tests)');
   const resolvedPromptsDir = resolvePromptsDir(repoConfig.path, repoConfig.prompts_dir);
-  const testSystemPrompt = await loadPrompt('test', repoConfig.tools, projectContext, resolvedPromptsDir);
-  const testExecResult = await dispatchExecuteWave(
-    {
-      wave: 'test',
-      systemPrompt: testSystemPrompt,
-      userMessage: buildWaveContext('test', issue, waveResults),
-      cwd: workDir,
-      modelTier: repoConfig.model.test,
-      thinkingLevel: resolveThinkingLevel(repoConfig, 'test'),
-      customTools: repoConfig.tools,
-      ...(testSessionId != null && { sessionId: testSessionId }),
-    },
-    sandbox,
-  );
 
-  const testWaveResult = toWaveResult('test', testExecResult);
-  totalCost += testExecResult.cost;
+  // Step 1: Spawn test agent — writes tests, verifies they fail.
+  // Issue #283: when the pipeline scope says to skip the test wave (IMPL_ONLY
+  // / REFACTOR), use a synthetic skip-result. Impl still gates on testRunner
+  // below so existing red tests guide the retry loop.
+  let testWaveResult: WaveResult;
+  if (skipTestPhase) {
+    log.info('[ti-loop] Test wave skipped by pipeline scope');
+    testWaveResult = {
+      wave: 'test',
+      success: true,
+      artifact: { skipped: true, reason: 'pipeline-scope' },
+      duration: 0,
+      cost: 0,
+      turns: 0,
+    };
+  } else {
+    log.info('[ti-loop] Running test wave (write failing tests)');
+    const testSystemPrompt = await loadPrompt('test', repoConfig.tools, projectContext, resolvedPromptsDir);
+    const testExecResult = await dispatchExecuteWave(
+      {
+        wave: 'test',
+        systemPrompt: testSystemPrompt,
+        userMessage: buildWaveContext('test', issue, waveResults),
+        cwd: workDir,
+        modelTier: repoConfig.model.test,
+        thinkingLevel: resolveThinkingLevel(repoConfig, 'test'),
+        customTools: repoConfig.tools,
+        ...(testSessionId != null && { sessionId: testSessionId }),
+      },
+      sandbox,
+    );
+
+    testWaveResult = toWaveResult('test', testExecResult);
+    totalCost += testExecResult.cost;
+  }
 
   // Prepare updated wave results with test for impl context building
   const updatedWaveResults = { ...waveResults, test: testWaveResult };
+
+  // Issue #283: TEST_ONLY scope — skip the impl retry loop entirely. Return a
+  // synthetic impl wave result and `testsPassing: true` (tests written; not
+  // yet expected to pass).
+  if (skipImplPhase) {
+    log.info('[ti-loop] Impl wave skipped by pipeline scope (TEST_ONLY)');
+    const implSkip: WaveResult = {
+      wave: 'impl',
+      success: true,
+      artifact: { skipped: true, reason: 'pipeline-scope' },
+      duration: 0,
+      cost: 0,
+      turns: 0,
+    };
+    return {
+      testWaveResult,
+      implWaveResult: implSkip,
+      testsPassing: true,
+      totalCost,
+      attempts: 0,
+      modifiedFilesPerAttempt: [],
+    };
+  }
 
   // Step 2: Impl retry loop — orchestrator runs tests via bash
   const failureOutputs: string[] = [];
@@ -841,6 +919,8 @@ export async function runPieceTILoop(config: PieceTILoopConfig): Promise<PieceTI
     fileReader = defaultFileReader,
     sandbox,
     cacheContext,
+    skipTestPhase = false,
+    skipImplPhase = false,
   } = config;
 
   if (maxRetries < 1) {
@@ -856,27 +936,67 @@ export async function runPieceTILoop(config: PieceTILoopConfig): Promise<PieceTI
   log.info(`[piece-ti-loop] Piece ${pieceIndex} (${piece.name}): test command: ${testCmd}`);
 
   let cost = 0;
-
-  // Step 1: Test agent — scoped to this piece only
-  log.info(`[piece-ti-loop] Piece ${pieceIndex}: running test wave`);
   const resolvedPromptsDir = resolvePromptsDir(repoConfig.path, repoConfig.prompts_dir);
-  const testSystemPrompt = await loadPrompt('test', repoConfig.tools, projectContext, resolvedPromptsDir);
-  const testExecResult = await dispatchExecuteWave(
-    {
-      wave: 'test',
-      systemPrompt: testSystemPrompt,
-      userMessage: buildPieceContext('test', piece),
-      cwd: workDir,
-      modelTier: repoConfig.model.test,
-      thinkingLevel: resolveThinkingLevel(repoConfig, 'test'),
-      customTools: repoConfig.tools,
-      ...(testSessionId != null && { sessionId: testSessionId }),
-    },
-    sandbox,
-  );
 
-  const testWaveResult = toWaveResult('test', testExecResult);
-  cost += testExecResult.cost;
+  // Step 1: Test agent — scoped to this piece only.
+  // Issue #283: when the pipeline scope says the test wave should be skipped
+  // (IMPL_ONLY / REFACTOR), use a synthetic skip-result and skip dispatching
+  // the test agent entirely. Impl still gates on `testRunner` below so
+  // existing red tests guide the retry loop.
+  let testWaveResult: WaveResult;
+  if (skipTestPhase) {
+    log.info(`[piece-ti-loop] Piece ${pieceIndex}: test wave skipped by pipeline scope`);
+    testWaveResult = {
+      wave: 'test',
+      success: true,
+      artifact: { skipped: true, reason: 'pipeline-scope' },
+      duration: 0,
+      cost: 0,
+      turns: 0,
+    };
+  } else {
+    log.info(`[piece-ti-loop] Piece ${pieceIndex}: running test wave`);
+    const testSystemPrompt = await loadPrompt('test', repoConfig.tools, projectContext, resolvedPromptsDir);
+    const testExecResult = await dispatchExecuteWave(
+      {
+        wave: 'test',
+        systemPrompt: testSystemPrompt,
+        userMessage: buildPieceContext('test', piece),
+        cwd: workDir,
+        modelTier: repoConfig.model.test,
+        thinkingLevel: resolveThinkingLevel(repoConfig, 'test'),
+        customTools: repoConfig.tools,
+        ...(testSessionId != null && { sessionId: testSessionId }),
+      },
+      sandbox,
+    );
+
+    testWaveResult = toWaveResult('test', testExecResult);
+    cost += testExecResult.cost;
+  }
+
+  // Issue #283: TEST_ONLY scope — skip the impl retry loop entirely. Return
+  // a synthetic impl wave result and `testsPassing: true` (tests written;
+  // not yet expected to pass).
+  if (skipImplPhase) {
+    log.info(`[piece-ti-loop] Piece ${pieceIndex}: impl wave skipped by pipeline scope`);
+    const implSkip: WaveResult = {
+      wave: 'impl',
+      success: true,
+      artifact: { skipped: true, reason: 'pipeline-scope' },
+      duration: 0,
+      cost: 0,
+      turns: 0,
+    };
+    return {
+      pieceIndex,
+      testWaveResult,
+      implWaveResult: implSkip,
+      testsPassing: true,
+      cost,
+      attempts: 0,
+    };
+  }
 
   // Step 2: Impl retry loop — piece-scoped context.
   // Issue #284: mirrors runTILoop's full-fidelity diagnosis switch via the
@@ -1024,6 +1144,8 @@ export async function runParallelPieceTILoop(config: ParallelPieceTILoopConfig):
     projectContext,
     sandbox,
     cacheContext,
+    skipTestPhase = false,
+    skipImplPhase = false,
   } = config;
 
   // Extract spec pieces
@@ -1050,6 +1172,8 @@ export async function runParallelPieceTILoop(config: ParallelPieceTILoopConfig):
       ...(config.testCommand != null && { testCommand: config.testCommand }),
       ...(sandbox != null && { sandbox }),
       ...(cacheContext != null && { cacheContext }),
+      ...(skipTestPhase && { skipTestPhase: true }),
+      ...(skipImplPhase && { skipImplPhase: true }),
     });
 
     return {
@@ -1101,6 +1225,8 @@ export async function runParallelPieceTILoop(config: ParallelPieceTILoopConfig):
         ...(config.testCommand != null && { testCommand: config.testCommand }),
         ...(sandbox != null && { sandbox }),
         ...(cacheContext != null && { cacheContext }),
+        ...(skipTestPhase && { skipTestPhase: true }),
+        ...(skipImplPhase && { skipImplPhase: true }),
       });
 
       pieceResults.push(result);
