@@ -272,6 +272,7 @@ function handoffToResult(handoff: WaveHandoff, provider?: string, promptHash?: s
     fallback_used: handoff.fallback_used || undefined,
     local_attempt_cost: handoff.local_attempt_cost,
     promptHash,
+    structured_output_metrics: handoff.structured_output_metrics,
   };
 }
 
@@ -1238,6 +1239,43 @@ export async function fix(options: FixOptions): Promise<FixResult> {
     // History: append run entry for analytics
     const shipResult = state.waveResults.ship?.artifact as { prUrl?: string } | undefined;
     const prUrlForHistory = shipResult?.prUrl;
+
+    // Aggregate per-wave structured-output telemetry for the history entry
+    // (issue #247). Skip waves that don't carry metrics so legacy/no-op waves
+    // don't appear with empty objects.
+    type HistoryWaveMetric = {
+      parse_method?:
+        | 'json-tag'
+        | 'json-tag-repaired'
+        | 'markdown-fence'
+        | 'markdown-fence-repaired'
+        | 'direct-parse'
+        | 'direct-parse-repaired'
+        | null
+        | undefined;
+      attempts: number;
+      success: boolean;
+      repair_attempts: number;
+      model?: string;
+    };
+    const structuredOutputMetrics: Record<string, HistoryWaveMetric> = {};
+    for (const [waveName, waveResult] of Object.entries(state.waveResults)) {
+      const metrics = waveResult?.structured_output_metrics;
+      if (!metrics) continue;
+      const entry: HistoryWaveMetric = {
+        attempts: metrics.attempts,
+        success: metrics.success,
+        repair_attempts: metrics.repair_attempts,
+      };
+      if (metrics.parse_method !== undefined) {
+        entry.parse_method = metrics.parse_method;
+      }
+      if (waveResult?.model != null) {
+        entry.model = waveResult.model;
+      }
+      structuredOutputMetrics[waveName] = entry;
+    }
+
     await appendHistoryEntry(repoPath, {
       timestamp: state.startedAt,
       repo: repoName,
@@ -1261,6 +1299,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           : 'failure',
       ...(Object.keys(promptHashes).length > 0 && { promptHashes }),
       ...(abTestVariants != null && Object.keys(abTestVariants).length > 0 && { abTestVariants }),
+      ...(Object.keys(structuredOutputMetrics).length > 0 && { structuredOutputMetrics }),
     }).catch((err) => {
       log.warn(`Failed to record history: ${err instanceof Error ? err.message : String(err)}`);
     });

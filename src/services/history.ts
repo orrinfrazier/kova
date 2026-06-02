@@ -11,6 +11,30 @@ const HistoryIssueSchema = z.object({
   error: z.string().optional(),
 });
 
+/**
+ * Per-wave structured-output metrics recorded with each run (issue #247).
+ * Aggregated per history entry so `kova history --stats` can compute success
+ * rates by parse method and by model across many runs.
+ */
+const HistoryStructuredOutputMetricsSchema = z.object({
+  parse_method: z
+    .enum([
+      'json-tag',
+      'json-tag-repaired',
+      'markdown-fence',
+      'markdown-fence-repaired',
+      'direct-parse',
+      'direct-parse-repaired',
+    ])
+    .nullable()
+    .optional(),
+  attempts: z.number().int().min(0),
+  success: z.boolean(),
+  repair_attempts: z.number().int().min(0),
+  /** Model id used for this wave (for per-model success-rate breakdowns). */
+  model: z.string().optional(),
+});
+
 export const HistoryEntrySchema = z.object({
   timestamp: z.string(),
   repo: z.string(),
@@ -21,9 +45,16 @@ export const HistoryEntrySchema = z.object({
   outcome: z.enum(['success', 'partial', 'failure']),
   promptHashes: z.record(z.string(), z.string()).optional(),
   abTestVariants: z.record(z.string(), z.string()).optional(),
+  /**
+   * Per-wave structured-output extraction telemetry (issue #247). Keyed by
+   * wave name (e.g. `assess`, `spec`, `review`). Backward-compatible: legacy
+   * history entries without this field still validate.
+   */
+  structuredOutputMetrics: z.record(z.string(), HistoryStructuredOutputMetricsSchema).optional(),
 });
 
 export type HistoryEntry = z.infer<typeof HistoryEntrySchema>;
+export type HistoryStructuredOutputMetric = z.infer<typeof HistoryStructuredOutputMetricsSchema>;
 
 export interface HistoryStats {
   totalRuns: number;
@@ -128,7 +159,75 @@ export function formatHistoryTable(entries: HistoryEntry[]): string {
   return lines.join('\n');
 }
 
-export function formatStatsTable(stats: HistoryStats): string {
+export interface StructuredOutputModelStats {
+  /** Total parse attempts attributable to this model. */
+  total: number;
+  /** Parses that ultimately produced a valid value. */
+  success: number;
+  /** Repair turns this model needed in aggregate. */
+  repairAttempts: number;
+}
+
+export interface StructuredOutputStats {
+  totalAttempts: number;
+  successfulParses: number;
+  /** 0..100 success rate as a percentage. */
+  successRate: number;
+  /** Repair turns used across all runs. */
+  totalRepairAttempts: number;
+  /** Count of successful parses bucketed by parse method. */
+  byMethod: Record<string, number>;
+  /** Per-model aggregates. Omitted entirely when no entry has a model id. */
+  byModel?: Record<string, StructuredOutputModelStats>;
+}
+
+/**
+ * Aggregate structured-output extraction telemetry across history entries
+ * (issue #247). Returns a zero-state object when no entry has metrics. Pure
+ * function (no I/O).
+ */
+export function computeStructuredOutputStats(entries: HistoryEntry[]): StructuredOutputStats {
+  const stats: StructuredOutputStats = {
+    totalAttempts: 0,
+    successfulParses: 0,
+    successRate: 0,
+    totalRepairAttempts: 0,
+    byMethod: {},
+  };
+
+  const byModel: Record<string, StructuredOutputModelStats> = {};
+  let sawModel = false;
+
+  for (const entry of entries) {
+    const metrics = entry.structuredOutputMetrics;
+    if (!metrics) continue;
+    for (const m of Object.values(metrics)) {
+      stats.totalAttempts += 1;
+      stats.totalRepairAttempts += m.repair_attempts;
+      if (m.success) {
+        stats.successfulParses += 1;
+        if (m.parse_method) {
+          stats.byMethod[m.parse_method] = (stats.byMethod[m.parse_method] ?? 0) + 1;
+        }
+      }
+      if (m.model) {
+        sawModel = true;
+        const bucket = byModel[m.model] ?? { total: 0, success: 0, repairAttempts: 0 };
+        bucket.total += 1;
+        if (m.success) bucket.success += 1;
+        bucket.repairAttempts += m.repair_attempts;
+        byModel[m.model] = bucket;
+      }
+    }
+  }
+
+  stats.successRate = stats.totalAttempts > 0 ? (stats.successfulParses / stats.totalAttempts) * 100 : 0;
+  if (sawModel) stats.byModel = byModel;
+
+  return stats;
+}
+
+export function formatStatsTable(stats: HistoryStats, entries?: HistoryEntry[]): string {
   const lines: string[] = [
     '| Metric               | Value    |',
     '|----------------------|----------|',
@@ -139,6 +238,47 @@ export function formatStatsTable(stats: HistoryStats): string {
     `| Issues attempted     | ${stats.totalIssuesAttempted} |`,
     `| PRs created          | ${stats.totalPrsCreated} |`,
   ];
+
+  // Structured-output extraction section (issue #247). Only rendered when
+  // the caller supplied entries AND at least one entry has metrics.
+  if (entries) {
+    const soStats = computeStructuredOutputStats(entries);
+    if (soStats.totalAttempts > 0) {
+      lines.push('');
+      lines.push('## Structured Output');
+      lines.push('| Metric               | Value    |');
+      lines.push('|----------------------|----------|');
+      lines.push(`| Parse attempts       | ${soStats.totalAttempts} |`);
+      lines.push(`| Successful parses    | ${soStats.successfulParses} |`);
+      lines.push(`| Parse success rate   | ${soStats.successRate.toFixed(1)}% |`);
+      lines.push(`| Repair turns used    | ${soStats.totalRepairAttempts} |`);
+      const methods = Object.entries(soStats.byMethod).sort((a, b) => b[1] - a[1]);
+      if (methods.length > 0) {
+        lines.push('');
+        lines.push('### By parse method');
+        lines.push('| Method                  | Count |');
+        lines.push('|-------------------------|-------|');
+        for (const [method, count] of methods) {
+          lines.push(`| ${method.padEnd(23)} | ${String(count).padStart(5)} |`);
+        }
+      }
+      if (soStats.byModel) {
+        const modelEntries = Object.entries(soStats.byModel).sort((a, b) => b[1].total - a[1].total);
+        if (modelEntries.length > 0) {
+          lines.push('');
+          lines.push('### By model');
+          lines.push('| Model                       | Attempts | Success | Repairs |');
+          lines.push('|-----------------------------|----------|---------|---------|');
+          for (const [model, agg] of modelEntries) {
+            const rate = agg.total > 0 ? ((agg.success / agg.total) * 100).toFixed(0) : '0';
+            lines.push(
+              `| ${model.padEnd(27)} | ${String(agg.total).padStart(8)} | ${String(`${agg.success} (${rate}%)`).padStart(7)} | ${String(agg.repairAttempts).padStart(7)} |`,
+            );
+          }
+        }
+      }
+    }
+  }
 
   return lines.join('\n');
 }

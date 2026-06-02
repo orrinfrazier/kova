@@ -411,8 +411,12 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
     let structuredOutput: unknown | undefined;
     let zodValidationFailed = false;
     let lastZodErrorMessage: string | undefined;
+    /** Track which extraction path produced the value (issue #247). */
+    let lastParseMethod: ParseMethod | undefined;
     if (outputFormat && resultText) {
-      structuredOutput = parseStructuredOutput(resultText);
+      const parsed = parseStructuredOutputWithMethod(resultText);
+      structuredOutput = parsed.value;
+      lastParseMethod = parsed.method;
       if (!structuredOutput) {
         log.warn(`[${wave}] Failed to parse structured output from response`);
       } else if (outputFormat.zodSchema) {
@@ -459,7 +463,14 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
       cost = after.cost;
       resultText = after.resultText;
 
-      structuredOutput = resultText ? parseStructuredOutput(resultText) : undefined;
+      if (resultText) {
+        const reparsed = parseStructuredOutputWithMethod(resultText);
+        structuredOutput = reparsed.value;
+        lastParseMethod = reparsed.method;
+      } else {
+        structuredOutput = undefined;
+        lastParseMethod = undefined;
+      }
       zodValidationFailed = false;
       lastZodErrorMessage = undefined;
       if (structuredOutput && outputFormat?.zodSchema) {
@@ -536,6 +547,19 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
     const parsed = structuredOutput != null;
     const artifact = parsed ? (structuredOutput as T) : ((resultText ?? '') as unknown as T);
 
+    // Structured-output telemetry (issue #247). Only attach when the wave was
+    // asked to produce structured output; pure pass-through waves don't have
+    // meaningful parse-method data.
+    const structuredOutputMetrics = outputFormat
+      ? {
+          parse_method: lastParseMethod ?? null,
+          attempts: 1 + repairAttempts,
+          success: parsed && !zodValidationFailed,
+          repair_attempts: repairAttempts,
+          zod_validation_failed: zodValidationFailed,
+        }
+      : undefined;
+
     return {
       wave,
       timestamp: new Date().toISOString(),
@@ -547,6 +571,7 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
       artifact,
       approach_notes: '',
       ...(outputFormat?.zodSchema != null ? { repair_attempts: repairAttempts } : {}),
+      ...(structuredOutputMetrics != null ? { structured_output_metrics: structuredOutputMetrics } : {}),
     };
   } catch (error) {
     if (error instanceof KovaError) throw error;
@@ -836,9 +861,36 @@ async function aggressiveTrimContext(messages: AgentMessage[]): Promise<AgentMes
   return [...head, ...tail];
 }
 
-export function parseStructuredOutput(text: string): unknown | undefined {
+/**
+ * Canonical parse-method labels for structured output extraction.
+ * Issue #247: tracked per-wave so we can measure which extraction paths
+ * each model relies on and whether repair passes are doing useful work.
+ */
+export type ParseMethod =
+  | 'json-tag'
+  | 'json-tag-repaired'
+  | 'markdown-fence'
+  | 'markdown-fence-repaired'
+  | 'direct-parse'
+  | 'direct-parse-repaired';
+
+export interface ParseStructuredOutputResult {
+  /** The parsed value, or `undefined` if no parse strategy succeeded. */
+  value: unknown | undefined;
+  /** Which parse path succeeded, or `undefined` when no strategy worked. */
+  method: ParseMethod | undefined;
+}
+
+/**
+ * Extract structured output from an LLM response and report which parse path
+ * was used. Issue #247: callers track this to compute per-method success rates.
+ *
+ * Tries `<json>...</json>` → markdown fence → direct parse, each with a fuzzy
+ * repair fallback. Pure function (no side effects beyond a debug log line).
+ */
+export function parseStructuredOutputWithMethod(text: string): ParseStructuredOutputResult {
   const trimmed = text.trim();
-  if (!trimmed) return undefined;
+  if (!trimmed) return { value: undefined, method: undefined };
 
   // 1. Primary: extract from <json>...</json> tags
   const tagMatch = trimmed.match(/<json>([\s\S]*?)<\/json>/);
@@ -847,13 +899,13 @@ export function parseStructuredOutput(text: string): unknown | undefined {
     try {
       const result = JSON.parse(inner);
       log.debug('[parse] Extracted structured output via json-tag');
-      return result;
+      return { value: result, method: 'json-tag' };
     } catch {
       // Try repair pass before falling through
       const repaired = tryRepairParse(inner);
       if (repaired !== undefined) {
         log.debug('[parse] Extracted structured output via json-tag-repaired');
-        return repaired;
+        return { value: repaired, method: 'json-tag-repaired' };
       }
     }
   }
@@ -865,12 +917,12 @@ export function parseStructuredOutput(text: string): unknown | undefined {
     try {
       const result = JSON.parse(inner);
       log.debug('[parse] Extracted structured output via markdown-fence');
-      return result;
+      return { value: result, method: 'markdown-fence' };
     } catch {
       const repaired = tryRepairParse(inner);
       if (repaired !== undefined) {
         log.debug('[parse] Extracted structured output via markdown-fence-repaired');
-        return repaired;
+        return { value: repaired, method: 'markdown-fence-repaired' };
       }
     }
   }
@@ -879,17 +931,26 @@ export function parseStructuredOutput(text: string): unknown | undefined {
   try {
     const result = JSON.parse(trimmed);
     log.debug('[parse] Extracted structured output via direct-parse');
-    return result;
+    return { value: result, method: 'direct-parse' };
   } catch {
     const repaired = tryRepairParse(trimmed);
     if (repaired !== undefined) {
       log.debug('[parse] Extracted structured output via direct-parse-repaired');
-      return repaired;
+      return { value: repaired, method: 'direct-parse-repaired' };
     }
   }
 
   // No greedy regex fallback — return undefined if none of the above worked
-  return undefined;
+  return { value: undefined, method: undefined };
+}
+
+/**
+ * Backward-compatible thin wrapper around {@link parseStructuredOutputWithMethod}
+ * that returns only the parsed value. Existing callers that don't need the
+ * parse-method label continue to work unchanged.
+ */
+export function parseStructuredOutput(text: string): unknown | undefined {
+  return parseStructuredOutputWithMethod(text).value;
 }
 
 /** Attempt to repair `input` then JSON.parse it. Returns undefined if still unparseable. */

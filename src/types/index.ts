@@ -22,6 +22,7 @@ export type {
   ReviewKnownIssue,
   SandboxConfig,
   SandboxResourceUsage,
+  StructuredOutputMetrics,
   ThinkingLevel,
   VectorDBConfig,
   WaveConsensusConfig,
@@ -58,7 +59,13 @@ export {
   WaveSingleModelConfigSchema,
 } from './config.js';
 export type { WaveHandoff } from './handoffs.js';
-export { loadAllHandoffs, loadHandoff, saveHandoff, WaveHandoffSchema } from './handoffs.js';
+export {
+  loadAllHandoffs,
+  loadHandoff,
+  StructuredOutputMetricsSchema,
+  saveHandoff,
+  WaveHandoffSchema,
+} from './handoffs.js';
 export type {
   CodeEmbeddingInsert,
   EpisodeInsert,

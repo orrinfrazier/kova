@@ -341,6 +341,29 @@ export interface Issue {
 
 export type WaveName = 'assess' | 'spec' | 'test' | 'impl' | 'quality' | 'review' | 'ship' | 'brainstorm';
 
+/**
+ * Per-wave structured-output extraction telemetry (issue #247).
+ *
+ * Mirrors `StructuredOutputMetricsSchema` in `types/handoffs.ts`. Duplicated
+ * here as a plain interface to keep `config.ts` zod-free (it's imported by
+ * places that don't want the zod runtime cost).
+ */
+export type ParseMethod =
+  | 'json-tag'
+  | 'json-tag-repaired'
+  | 'markdown-fence'
+  | 'markdown-fence-repaired'
+  | 'direct-parse'
+  | 'direct-parse-repaired';
+
+export interface StructuredOutputMetrics {
+  parse_method?: ParseMethod | null | undefined;
+  attempts: number;
+  success: boolean;
+  repair_attempts: number;
+  zod_validation_failed?: boolean | undefined;
+}
+
 export interface WaveResult {
   wave: WaveName;
   success: boolean;
@@ -353,6 +376,11 @@ export interface WaveResult {
   fallback_used?: boolean | undefined;
   local_attempt_cost?: number | undefined;
   promptHash?: string | undefined;
+  /**
+   * Per-wave structured-output telemetry (issue #247). Populated when the
+   * wave was invoked with an `outputFormat`; omitted otherwise.
+   */
+  structured_output_metrics?: StructuredOutputMetrics | undefined;
 }
 
 export interface FailedPiece {
