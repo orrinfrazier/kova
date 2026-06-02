@@ -33,6 +33,13 @@ import {
   resolveConfigPath,
   resolveRepoConfig,
 } from '../services/config.js';
+import {
+  buildSchedulerConfig,
+  listSchedules,
+  runSchedulerForever,
+  type SchedulerJobInvocation,
+  type SchedulerJobRunner,
+} from '../services/cron-scheduler.js';
 import { createIssue, fetchIssue, hasExistingWork } from '../services/github.js';
 import { computeStats, formatHistoryTable, formatStatsTable, readHistory } from '../services/history.js';
 import { initMetrics, shutdownMetrics } from '../services/metrics.js';
@@ -899,6 +906,152 @@ evalCmd
     const grouped = groupEntriesByContextArm(entries);
     const delta = computeContextArmDelta(grouped.on, grouped.off);
     console.log(formatContextArmDelta(delta));
+  });
+
+/* ------------------------------------------------------------------ */
+/*  Issue #303 — cron scheduler                                        */
+/*  `kova schedule start|list|stop` — unattended recurring runs.       */
+/* ------------------------------------------------------------------ */
+
+const schedule = program.command('schedule').description('Cron scheduler for unattended recurring runs');
+
+const DEFAULT_STATE_ROOT = (): string => {
+  const home = process.env.HOME ?? process.env.USERPROFILE ?? '/tmp';
+  return `${home}/.kova`;
+};
+
+function stopSignalPath(stateRoot: string): string {
+  return `${stateRoot}/.kova/schedule.stop`;
+}
+
+schedule
+  .command('start')
+  .description('Run the scheduler in the foreground, triggering jobs at their cron cadences')
+  .option('--interval <ms>', 'Poll interval in milliseconds (default 30000)', '30000')
+  .option('--state-root <path>', 'Directory holding the persisted schedule state file', DEFAULT_STATE_ROOT())
+  .option('--once', 'Run a single tick and exit (useful for cron-driven setups)')
+  .action(async (opts: { interval?: string; stateRoot?: string; once?: boolean }) => {
+    const kovaConfig = await tryLoadConfig(program.opts().config);
+    if (!kovaConfig) {
+      console.error('No repos.yaml config found — scheduler requires a config file');
+      process.exit(1);
+    }
+    const stateRoot = opts.stateRoot ?? DEFAULT_STATE_ROOT();
+    const intervalMs = Number.parseInt(opts.interval ?? '30000', 10);
+    if (!Number.isFinite(intervalMs) || intervalMs < 1000) {
+      console.error('--interval must be a positive integer >= 1000 (ms)');
+      process.exit(1);
+    }
+
+    const scheduleCfg = buildSchedulerConfig(kovaConfig, stateRoot);
+    const repoCount = Object.values(scheduleCfg.repos).filter((r) => r.schedule).length;
+    if (repoCount === 0) {
+      log.warn('No `schedule:` blocks found in repos.yaml — nothing to do');
+      return;
+    }
+    log.info(`Scheduler starting — ${repoCount} repo(s) with schedules, tick=${intervalMs}ms`);
+
+    // Job runner: dispatches the configured fix loop for the (repo, job).
+    const runner: SchedulerJobRunner = async (invocation: SchedulerJobInvocation) => {
+      const { repoName, jobName } = invocation;
+      const repoEntry = kovaConfig.repos[repoName];
+      if (!repoEntry) {
+        log.error(`[scheduler] no config entry for ${repoName} (job ${jobName})`);
+        return { success: false };
+      }
+      log.info(`[scheduler] triggering ${repoName}:${jobName}`);
+      registerOllamaProvidersFromConfig(repoEntry);
+      initMetrics(repoEntry.metrics);
+      try {
+        const result = await fixLoop({
+          repoPath: repoEntry.path,
+          repoName,
+          config: repoEntry,
+          maxIssues: repoEntry.rules.max_issues_per_run,
+        });
+        log.info(`[scheduler] ${repoName}:${jobName} done — ${result.succeeded}/${result.total} succeeded`);
+        return { success: result.failed === 0 };
+      } finally {
+        shutdownMetrics();
+      }
+    };
+
+    const abort = new AbortController();
+    // Watch a stop-signal file so `kova schedule stop` can drain a long-running daemon.
+    const stopPath = stopSignalPath(stateRoot);
+    const stopWatcher = setInterval(async () => {
+      try {
+        const { fs } = await import('zx');
+        if (await fs.pathExists(stopPath)) {
+          log.info('[scheduler] stop signal detected — draining');
+          abort.abort();
+          await fs.remove(stopPath).catch(() => {});
+        }
+      } catch {
+        // ignore — best effort
+      }
+    }, 2000);
+
+    installSignalHandlers();
+    const signalWatcher = setInterval(() => {
+      if (shutdownRequested()) abort.abort();
+    }, 500);
+
+    try {
+      if (opts.once) {
+        const { runSchedulerTick } = await import('../services/cron-scheduler.js');
+        const fired = await runSchedulerTick(scheduleCfg, runner);
+        log.info(`[scheduler] tick fired ${fired.length} job(s) — exiting (--once)`);
+      } else {
+        await runSchedulerForever(scheduleCfg, runner, { intervalMs, signal: abort.signal });
+      }
+    } finally {
+      clearInterval(stopWatcher);
+      clearInterval(signalWatcher);
+      removeSignalHandlers();
+    }
+  });
+
+schedule
+  .command('list')
+  .description('Print configured schedules and the last_run for each')
+  .option('--state-root <path>', 'Directory holding the persisted schedule state file', DEFAULT_STATE_ROOT())
+  .action(async (opts: { stateRoot?: string }) => {
+    const kovaConfig = await tryLoadConfig(program.opts().config);
+    if (!kovaConfig) {
+      console.error('No repos.yaml config found — scheduler requires a config file');
+      process.exit(1);
+    }
+    const scheduleCfg = buildSchedulerConfig(kovaConfig, opts.stateRoot ?? DEFAULT_STATE_ROOT());
+    const rows = await listSchedules(scheduleCfg);
+    if (rows.length === 0) {
+      console.log('No schedules configured. Add a `schedule:` block to repos.yaml.');
+      return;
+    }
+    const widthRepo = Math.max(4, ...rows.map((r) => r.repoName.length));
+    const widthJob = Math.max(3, ...rows.map((r) => r.jobName.length));
+    const widthCron = Math.max(4, ...rows.map((r) => r.cronExpr.length));
+    const pad = (s: string, n: number): string => s + ' '.repeat(Math.max(0, n - s.length));
+    console.log(`${pad('REPO', widthRepo)}  ${pad('JOB', widthJob)}  ${pad('CRON', widthCron)}  LAST RUN`);
+    for (const row of rows) {
+      console.log(
+        `${pad(row.repoName, widthRepo)}  ${pad(row.jobName, widthJob)}  ${pad(row.cronExpr, widthCron)}  ${row.lastRun ?? '(never)'}`,
+      );
+    }
+  });
+
+schedule
+  .command('stop')
+  .description('Signal a running scheduler to drain and exit (writes a stop sentinel)')
+  .option('--state-root <path>', 'Directory holding the persisted schedule state file', DEFAULT_STATE_ROOT())
+  .action(async (opts: { stateRoot?: string }) => {
+    const stateRoot = opts.stateRoot ?? DEFAULT_STATE_ROOT();
+    const stopPath = stopSignalPath(stateRoot);
+    const { fs, path } = await import('zx');
+    await fs.mkdir(path.dirname(stopPath), { recursive: true });
+    await fs.writeFile(stopPath, new Date().toISOString());
+    log.info(`Wrote stop sentinel: ${stopPath}`);
+    log.info('Any running `kova schedule start` will exit at the next tick boundary.');
   });
 
 program.parse();
