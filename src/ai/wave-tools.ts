@@ -14,6 +14,7 @@ import {
   createWriteTool,
 } from '@mariozechner/pi-coding-agent';
 import type { CustomTool, RepoConfig, WaveName } from '../types/index.js';
+import { createPipelineTool, type PipelineToolOptions } from './pipeline-tool.js';
 
 type ToolName = 'read' | 'bash' | 'edit' | 'write' | 'grep' | 'find' | 'ls';
 
@@ -103,10 +104,17 @@ export function createCustomTools(tools: readonly CustomTool[], cwd: string): An
   );
 }
 
+/** Waves where the execute_pipeline RPC tool may be appended (issue #300). */
+const PIPELINE_TOOL_WAVES: ReadonlySet<AIWaveName> = new Set(['impl', 'quality']);
+
 export interface WaveToolOptions {
   customTools?: readonly CustomTool[] | undefined;
   mcpTools?: AnyTool[] | undefined;
   playwright?: { enabled: boolean } | undefined;
+  /** Append the execute_pipeline RPC tool to impl/quality waves (issue #300).
+   *  Off by default. When enabled, the wave's existing wave tools (read/bash/etc.)
+   *  plus customTools and mcpTools are exposed inside the sandboxed script. */
+  pipelineTool?: ({ enabled: boolean } & PipelineToolOptions) | undefined;
 }
 
 export function getWaveTools(wave: AIWaveName, cwd: string, options?: WaveToolOptions): AnyTool[] {
@@ -125,6 +133,13 @@ export function getWaveTools(wave: AIWaveName, cwd: string, options?: WaveToolOp
 
   if (options?.mcpTools && options.mcpTools.length > 0) {
     tools.push(...options.mcpTools);
+  }
+
+  // Issue #300 — programmatic tool calling via execute_pipeline.
+  // Only impl + quality waves get this RPC tool, and only when explicitly enabled.
+  if (options?.pipelineTool?.enabled === true && PIPELINE_TOOL_WAVES.has(wave)) {
+    const { enabled: _enabled, ...limits } = options.pipelineTool;
+    tools.push(createPipelineTool(cwd, tools, limits));
   }
 
   return tools;
