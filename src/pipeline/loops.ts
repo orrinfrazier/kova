@@ -772,6 +772,11 @@ export async function runPieceTILoop(config: PieceTILoopConfig): Promise<PieceTI
         modelTier: repoConfig.model.impl,
         thinkingLevel: resolveThinkingLevel(repoConfig, 'impl'),
         customTools: repoConfig.tools,
+        // Issue #250: scope impl-wave Write/Edit calls to this piece's file list.
+        // Models occasionally edited unrelated files (e.g. gemma4 modifying
+        // surreal-bench while working on domain-networking); this guard rejects
+        // out-of-scope edits with a clear error message before they execute.
+        pieceFiles: piece.files,
       },
       sandbox,
     );
