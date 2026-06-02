@@ -249,3 +249,161 @@ describe('formatStatsTable', () => {
     expect(table).toContain('$1.50');
   });
 });
+
+describe('structured output metrics — issue #247', () => {
+  it('HistoryEntrySchema accepts structuredOutputMetrics field', () => {
+    const entry = makeEntry({
+      structuredOutputMetrics: {
+        assess: {
+          parse_method: 'json-tag',
+          attempts: 1,
+          success: true,
+          repair_attempts: 0,
+          model: 'claude-opus-4-6',
+        },
+        spec: {
+          parse_method: 'markdown-fence-repaired',
+          attempts: 1,
+          success: true,
+          repair_attempts: 0,
+          model: 'claude-sonnet-4-6',
+        },
+      },
+    });
+    const result = HistoryEntrySchema.safeParse(entry);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.structuredOutputMetrics?.assess?.parse_method).toBe('json-tag');
+    }
+  });
+
+  it('HistoryEntrySchema accepts structuredOutputMetrics with success=false', () => {
+    const entry = makeEntry({
+      structuredOutputMetrics: {
+        review: {
+          parse_method: null,
+          attempts: 1,
+          success: false,
+          repair_attempts: 2,
+          model: 'ollama:gemma3:27b',
+        },
+      },
+    });
+    const result = HistoryEntrySchema.safeParse(entry);
+    expect(result.success).toBe(true);
+  });
+
+  it('HistoryEntrySchema accepts entries WITHOUT structuredOutputMetrics (backward compat)', () => {
+    const entry = makeEntry();
+    const result = HistoryEntrySchema.safeParse(entry);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.structuredOutputMetrics).toBeUndefined();
+    }
+  });
+
+  it('computeStructuredOutputStats aggregates parse methods across runs', async () => {
+    const { computeStructuredOutputStats } = await import('./history.js');
+    const entries: HistoryEntry[] = [
+      makeEntry({
+        structuredOutputMetrics: {
+          assess: { parse_method: 'json-tag', attempts: 1, success: true, repair_attempts: 0 },
+          spec: { parse_method: 'markdown-fence', attempts: 1, success: true, repair_attempts: 0 },
+        },
+      }),
+      makeEntry({
+        structuredOutputMetrics: {
+          assess: { parse_method: 'json-tag', attempts: 1, success: true, repair_attempts: 0 },
+          spec: { parse_method: 'json-tag-repaired', attempts: 1, success: true, repair_attempts: 1 },
+          review: { parse_method: null, attempts: 1, success: false, repair_attempts: 2 },
+        },
+      }),
+    ];
+
+    const stats = computeStructuredOutputStats(entries);
+    expect(stats.totalAttempts).toBe(5);
+    expect(stats.successfulParses).toBe(4);
+    expect(stats.successRate).toBeCloseTo(80, 1);
+    expect(stats.byMethod['json-tag']).toBe(2);
+    expect(stats.byMethod['markdown-fence']).toBe(1);
+    expect(stats.byMethod['json-tag-repaired']).toBe(1);
+    expect(stats.totalRepairAttempts).toBe(3);
+  });
+
+  it('computeStructuredOutputStats handles empty input', async () => {
+    const { computeStructuredOutputStats } = await import('./history.js');
+    const stats = computeStructuredOutputStats([]);
+    expect(stats.totalAttempts).toBe(0);
+    expect(stats.successfulParses).toBe(0);
+    expect(stats.successRate).toBe(0);
+    expect(stats.byMethod).toEqual({});
+    expect(stats.totalRepairAttempts).toBe(0);
+  });
+
+  it('computeStructuredOutputStats skips entries without metrics', async () => {
+    const { computeStructuredOutputStats } = await import('./history.js');
+    const entries: HistoryEntry[] = [
+      makeEntry(), // no structuredOutputMetrics
+      makeEntry({
+        structuredOutputMetrics: {
+          assess: { parse_method: 'direct-parse', attempts: 1, success: true, repair_attempts: 0 },
+        },
+      }),
+    ];
+    const stats = computeStructuredOutputStats(entries);
+    expect(stats.totalAttempts).toBe(1);
+    expect(stats.successfulParses).toBe(1);
+    expect(stats.byMethod['direct-parse']).toBe(1);
+  });
+
+  it('computeStructuredOutputStats groups by model when present', async () => {
+    const { computeStructuredOutputStats } = await import('./history.js');
+    const entries: HistoryEntry[] = [
+      makeEntry({
+        structuredOutputMetrics: {
+          assess: {
+            parse_method: 'json-tag',
+            attempts: 1,
+            success: true,
+            repair_attempts: 0,
+            model: 'claude-opus-4-6',
+          },
+          spec: {
+            parse_method: 'json-tag-repaired',
+            attempts: 1,
+            success: true,
+            repair_attempts: 1,
+            model: 'ollama:gemma3:27b',
+          },
+        },
+      }),
+    ];
+    const stats = computeStructuredOutputStats(entries);
+    expect(stats.byModel).toBeDefined();
+    expect(stats.byModel?.['claude-opus-4-6']?.success).toBe(1);
+    expect(stats.byModel?.['ollama:gemma3:27b']?.success).toBe(1);
+  });
+
+  it('formatStatsTable includes structured output section when metrics present', async () => {
+    const { formatStatsTable, computeStats } = await import('./history.js');
+    const entries: HistoryEntry[] = [
+      makeEntry({
+        structuredOutputMetrics: {
+          assess: { parse_method: 'json-tag', attempts: 1, success: true, repair_attempts: 0 },
+        },
+      }),
+    ];
+    const stats = computeStats(entries);
+    const table = formatStatsTable(stats, entries);
+    expect(table).toContain('Structured Output');
+    expect(table).toContain('json-tag');
+  });
+
+  it('formatStatsTable works without entries arg (backward compat)', async () => {
+    const { formatStatsTable, computeStats } = await import('./history.js');
+    const stats = computeStats([makeEntry()]);
+    const table = formatStatsTable(stats);
+    expect(table).toContain('Total runs');
+    expect(table).not.toContain('Structured Output');
+  });
+});

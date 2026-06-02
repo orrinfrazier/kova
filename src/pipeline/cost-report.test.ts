@@ -338,3 +338,45 @@ describe('printRunSummary', () => {
     consoleSpy.mockRestore();
   });
 });
+
+describe('buildCostReport — structured output metrics (issue #247)', () => {
+  it('passes structured_output_metrics from WaveResult into report.waves[i]', () => {
+    const state = makeState({
+      waveResults: {
+        assess: makeWaveResult('assess', {
+          cost: 0.12,
+          structured_output_metrics: {
+            parse_method: 'json-tag',
+            attempts: 1,
+            success: true,
+            repair_attempts: 0,
+            zod_validation_failed: false,
+          },
+        }),
+        spec: makeWaveResult('spec', {
+          cost: 0.08,
+          structured_output_metrics: {
+            parse_method: 'markdown-fence-repaired',
+            attempts: 1,
+            success: true,
+            repair_attempts: 1,
+            zod_validation_failed: false,
+          },
+        }),
+      },
+    });
+    const report = buildCostReport(state);
+    const assessWave = report.waves.find((w) => w.wave === 'assess');
+    const specWave = report.waves.find((w) => w.wave === 'spec');
+    expect(assessWave?.structured_output_metrics?.parse_method).toBe('json-tag');
+    expect(specWave?.structured_output_metrics?.parse_method).toBe('markdown-fence-repaired');
+    expect(specWave?.structured_output_metrics?.repair_attempts).toBe(1);
+  });
+
+  it('omits structured_output_metrics when WaveResult does not include it', () => {
+    const report = buildCostReport(makeState());
+    for (const wave of report.waves) {
+      expect(wave.structured_output_metrics).toBeUndefined();
+    }
+  });
+});
