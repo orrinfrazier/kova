@@ -1,0 +1,12 @@
+{
+  "id": "03-fix-off-by-one",
+  "title": "fix off-by-one in lastN()",
+  "description": "src/array-utils.js exports `lastN(arr, n)` which is supposed to return the last n elements. The current implementation has an off-by-one and returns n-1 elements (or fails on edge cases). The fix is small but the test covers multiple edge cases (n === 0, n > arr.length, empty array).",
+  "issue": {
+    "title": "lastN() returns one fewer element than requested",
+    "body": "src/array-utils.js's `lastN(arr, n)` has an off-by-one bug. Cases to satisfy:\n\n- lastN([1,2,3,4,5], 3) → [3,4,5]\n- lastN([1,2,3], 0) → []\n- lastN([1,2,3], 10) → [1,2,3]\n- lastN([], 3) → []\n\nSee test.js for the exact acceptance criteria."
+  },
+  "acceptance": "node test.js",
+  "timeoutMs": 30000,
+  "expectedFiles": ["src/array-utils.js"]
+}

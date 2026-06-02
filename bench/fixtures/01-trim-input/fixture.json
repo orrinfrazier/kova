@@ -1,0 +1,12 @@
+{
+  "id": "01-trim-input",
+  "title": "trim whitespace from input handler",
+  "description": "src/handler.js exports a function `handle(input)` that should reject empty input and trim leading/trailing whitespace. Currently it does neither — the tests in test.js demonstrate both failures.",
+  "issue": {
+    "title": "handle() does not trim whitespace or reject empty input",
+    "body": "Two acceptance tests are failing in test.js:\n\n1. `handle('')` should throw an Error with message containing 'empty' — it currently returns ''.\n2. `handle('  hello  ')` should return 'hello' — it currently returns '  hello  '.\n\nUpdate src/handler.js to satisfy both."
+  },
+  "acceptance": "node test.js",
+  "timeoutMs": 30000,
+  "expectedFiles": ["src/handler.js"]
+}

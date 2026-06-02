@@ -1,0 +1,12 @@
+{
+  "id": "02-add-divide",
+  "title": "add a divide() function to the calculator",
+  "description": "src/calculator.js exports add/subtract/multiply but not divide. Add a divide(a, b) function that throws on b === 0. The acceptance test exercises both the happy path and the divide-by-zero case.",
+  "issue": {
+    "title": "calculator missing divide()",
+    "body": "src/calculator.js needs a `divide(a, b)` export. It must:\n\n- return a/b for non-zero b\n- throw an Error with message containing 'divide by zero' when b === 0\n\nSee test.js for the exact acceptance criteria."
+  },
+  "acceptance": "node test.js",
+  "timeoutMs": 30000,
+  "expectedFiles": ["src/calculator.js"]
+}
