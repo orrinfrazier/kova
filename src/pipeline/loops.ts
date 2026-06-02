@@ -12,6 +12,8 @@ import { type OutputFormat, resolveThinkingLevel } from '../ai/index.js';
 import { dispatchExecuteWave, type SandboxContext } from '../sandbox/dispatch.js';
 import { detectTooling } from '../services/language-detect.js';
 import type { ProjectContext } from '../services/project-context.js';
+import { compareBaselineFailures } from '../services/review-baseline.js';
+import { scanDiffForBlockingFindings } from '../services/review-prescan.js';
 import type {
   Issue,
   QualityRemediation,
@@ -85,6 +87,16 @@ export interface TILoopResult {
 
 export type FileWriter = (filePath: string, content: string) => Promise<void>;
 
+/**
+ * Pre-scan runner injectable for tests. Returns deterministic blocking
+ * findings (secrets, eval/injection) over diff-added lines.
+ */
+export type PrescanRunner = (workDir: string) => Promise<{
+  findings: Array<{ file: string; line: number | null; type: string; snippet: string }>;
+  blocking: boolean;
+  summary: string;
+}>;
+
 export interface ReviewLoopConfig {
   issue: Issue;
   workDir: string;
@@ -100,6 +112,22 @@ export interface ReviewLoopConfig {
   reviewFeedbackContext?: string;
   /** Route every wave through the docker sandbox container when set. */
   sandbox?: SandboxContext | undefined;
+  /**
+   * Optional pre-scan over diff-added lines. When provided and the result is
+   * `blocking`, the orchestrator forces verdict = needs_fixes regardless of
+   * the model's judgment. Hits are surfaced as critical findings.
+   */
+  prescanRunner?: PrescanRunner;
+  /**
+   * Baseline failing-test names recorded before WAVE I ran. Compared against
+   * `currentFailures` to detect newly-failing tests (regressions). Provide
+   * both, or neither — providing only one is a no-op.
+   */
+  baselineFailures?: string[];
+  /**
+   * Current failing-test names after WAVE I. See `baselineFailures`.
+   */
+  currentFailures?: string[];
 }
 
 export interface ReviewLoopResult {
@@ -1040,6 +1068,9 @@ export async function runReviewLoop(config: ReviewLoopConfig): Promise<ReviewLoo
     testRunner = defaultTestRunner,
     fileWriter = defaultFileWriter,
     sandbox,
+    prescanRunner,
+    baselineFailures,
+    currentFailures,
   } = config;
 
   if (maxIterations < 1) {
@@ -1057,18 +1088,83 @@ export async function runReviewLoop(config: ReviewLoopConfig): Promise<ReviewLoo
   // they surface in the final knownIssues — never silently dropped.
   const skippedSurfacedFindings = new Map<string, ReviewFinding>();
 
+  // Deterministic pre-scan + baseline gate — runs ONCE before the loop.
+  // Both are orchestrator-side fail-closed signals: any hit forces verdict
+  // to needs_fixes regardless of what the model returns.
+  const prescanFn: PrescanRunner = prescanRunner ?? scanDiffForBlockingFindings;
+  const prescan = await prescanFn(workDir);
+  if (prescan.blocking) {
+    log.warn(
+      `[review-loop] Static pre-scan found ${prescan.findings.length} blocking finding(s) — verdict will be overridden to needs_fixes`,
+    );
+  }
+
+  const haveBaselineSignal = baselineFailures != null && currentFailures != null;
+  const baseline = haveBaselineSignal
+    ? compareBaselineFailures(baselineFailures, currentFailures)
+    : { newRegressions: [], preexisting: [], blocking: false, summary: '' };
+  if (baseline.blocking) {
+    log.warn(
+      `[review-loop] Baseline gate detected ${baseline.newRegressions.length} new regression(s) — verdict will be overridden to needs_fixes`,
+    );
+  }
+
+  // Build the static "data" block passed to the reviewer once per iteration.
+  // The reviewer must treat these as confirmed findings, not re-derive them.
+  const buildPrescanContext = (): string | undefined => {
+    const lines: string[] = [];
+    if (prescan.findings.length > 0 || prescan.blocking) {
+      lines.push('## Deterministic Pre-Scan (orchestrator-confirmed)');
+      lines.push('');
+      lines.push(prescan.summary);
+    }
+    if (haveBaselineSignal) {
+      if (lines.length > 0) lines.push('');
+      lines.push('## Baseline Regression Gate (orchestrator-confirmed)');
+      lines.push('');
+      lines.push(baseline.summary);
+    }
+    return lines.length > 0 ? lines.join('\n') : undefined;
+  };
+
+  // Synthesize ReviewFindings from blocking signals so they surface in
+  // knownIssues even if the model returns pass.
+  const blockingFindings: ReviewFinding[] = [];
+  for (const f of prescan.findings) {
+    blockingFindings.push({
+      category: 'mechanical_fix',
+      file: f.file,
+      ...(f.line != null && { line: f.line }),
+      description: `[pre-scan] ${f.type} detected in added diff line: ${f.snippet}`,
+      severity: 'critical',
+    });
+  }
+  if (baseline.blocking) {
+    blockingFindings.push({
+      category: 'mechanical_fix',
+      file: 'TEST_SUITE',
+      description: `[baseline] regression: ${baseline.newRegressions.length} newly failing test(s): ${baseline.newRegressions.join(', ')}`,
+      severity: 'critical',
+    });
+  }
+  const forceFailFromOrchestrator = prescan.blocking || baseline.blocking;
+
   for (let iteration = 0; iteration < maxIterations; iteration++) {
     log.info(`[review-loop] Iteration ${iteration + 1}/${maxIterations}`);
 
-    // Step 1: Fresh review agent — no prior review bias
+    // Step 1: Fresh review agent — no prior review bias.
+    // Pre-scan + baseline are injected as DATA (not re-derived by the model).
     const reviewSystemPrompt = await loadPrompt('review', repoConfig.tools, projectContext, resolvedPromptsDir);
+    const prescanContext = buildPrescanContext();
+    const baseUserMessage = buildWaveContext('review', issue, waveResults, {
+      ...(reviewFeedbackContext != null && { reviewFeedbackContext }),
+    });
+    const reviewUserMessage = prescanContext != null ? `${prescanContext}\n\n${baseUserMessage}` : baseUserMessage;
     const reviewExecResult = await dispatchExecuteWave(
       {
         wave: 'review',
         systemPrompt: reviewSystemPrompt,
-        userMessage: buildWaveContext('review', issue, waveResults, {
-          ...(reviewFeedbackContext != null && { reviewFeedbackContext }),
-        }),
+        userMessage: reviewUserMessage,
         cwd: workDir,
         modelTier: repoConfig.model.review,
         outputFormat: reviewOutputFormat(),
@@ -1084,6 +1180,24 @@ export async function runReviewLoop(config: ReviewLoopConfig): Promise<ReviewLoo
     waveResults.review = reviewWaveResult;
 
     lastReview = reviewExecResult.structuredOutput as ReviewResult | undefined;
+
+    // Orchestrator-side override: if pre-scan or baseline-gate flagged
+    // anything, force verdict to needs_fixes and merge synthetic findings.
+    if (forceFailFromOrchestrator && lastReview) {
+      const merged: ReviewResult = {
+        verdict: 'needs_fixes',
+        findings: [...lastReview.findings, ...blockingFindings],
+        summary: `${lastReview.summary} | Orchestrator override: pre-scan/baseline blocking signals present.`,
+      };
+      lastReview = merged;
+    } else if (forceFailFromOrchestrator && !lastReview) {
+      // Model returned no structured output — still force a needs_fixes verdict.
+      lastReview = {
+        verdict: 'needs_fixes',
+        findings: blockingFindings,
+        summary: 'Orchestrator override: pre-scan/baseline blocking signals present.',
+      };
+    }
 
     // If review passes, we're done — but still surface any skipped findings
     // (missing test_code) collected across iterations. A `pass` verdict from
@@ -1108,9 +1222,22 @@ export async function runReviewLoop(config: ReviewLoopConfig): Promise<ReviewLoo
 
     log.info(`[review-loop] Review found ${lastReview.findings.length} finding(s) — applying fixes`);
 
-    // Step 2: Categorize findings
-    const needsNewTests = lastReview.findings.filter((f) => f.category === 'needs_new_tests');
-    const mechanicalFixes = lastReview.findings.filter((f) => f.category === 'mechanical_fix');
+    // Step 2: Categorize findings.
+    // Orchestrator-synthesized findings (pre-scan / baseline) are surfaced as
+    // critical knownIssues but NOT dispatched to impl — the agent cannot "fix"
+    // a hardcoded key by editing diff lines it wasn't asked about, and asking
+    // it to fix regressions implies a re-impl loop we explicitly want to defer
+    // to the next /fix run. Filter them out of the impl-dispatch buckets.
+    const orchestratorSynthesized = new Set(blockingFindings.map((f) => findingKey(f)));
+    const reviewerFindings = lastReview.findings.filter((f) => !orchestratorSynthesized.has(findingKey(f)));
+    const needsNewTests = reviewerFindings.filter((f) => f.category === 'needs_new_tests');
+    const mechanicalFixes = reviewerFindings.filter((f) => f.category === 'mechanical_fix');
+
+    // Synthesized findings still go into knownIssues — surface them once now
+    // so they survive even if a later iteration's review returns pass.
+    for (const f of blockingFindings) {
+      skippedSurfacedFindings.set(findingKey(f), f);
+    }
 
     // Track whether quality re-run is needed:
     // - NEEDS_NEW_TESTS present → always re-run (new code written)
