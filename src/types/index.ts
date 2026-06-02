@@ -1,5 +1,6 @@
 export type {
   ABTestConfig,
+  ABTestPolicyConfig,
   CiMergePolicy,
   CustomTool,
   EpisodicMemoryConfig,
@@ -34,6 +35,7 @@ export type {
 } from './config.js';
 export {
   ABTestConfigSchema,
+  ABTestPolicySchema,
   CiMergePolicySchema,
   CustomToolSchema,
   EpisodicMemoryConfigSchema,
