@@ -206,6 +206,92 @@ describe('writeRunReport', () => {
   });
 });
 
+describe('buildRunReport — milestone progress', () => {
+  it('attaches milestoneProgress when milestone context is provided', () => {
+    const report = buildRunReport(makeLoopResult(), {
+      milestone: 'v0.35',
+      openCount: 7,
+      closedCount: 12,
+    });
+    expect(report.milestoneProgress).toBeDefined();
+    expect(report.milestoneProgress).toEqual({
+      milestone: 'v0.35',
+      open: 7,
+      closed: 12,
+      attempted: 3,
+    });
+  });
+
+  it('attempted reflects loop.total when milestone context is provided', () => {
+    const report = buildRunReport(makeLoopResult({ total: 2 }), {
+      milestone: 'v0.35',
+      openCount: 5,
+      closedCount: 1,
+    });
+    expect(report.milestoneProgress?.attempted).toBe(2);
+  });
+
+  it('omits milestoneProgress when no milestone context provided', () => {
+    const report = buildRunReport(makeLoopResult());
+    expect(report.milestoneProgress).toBeUndefined();
+  });
+});
+
+describe('writeRunReport — milestone section', () => {
+  let workDir: string;
+  beforeEach(async () => {
+    workDir = await mkdtemp(join(tmpdir(), 'kova-run-report-milestone-'));
+  });
+  afterEach(async () => {
+    await rm(workDir, { recursive: true, force: true });
+  });
+
+  it('renders Milestone progress section in markdown when populated', async () => {
+    const report = buildRunReport(makeLoopResult(), {
+      milestone: 'v0.35',
+      openCount: 7,
+      closedCount: 12,
+    });
+    await writeRunReport(workDir, report);
+    const md = await readFile(join(workDir, '.kova', 'run-report.md'), 'utf-8');
+    expect(md).toContain('Milestone');
+    expect(md).toContain('v0.35');
+    expect(md).toContain('7'); // open
+    expect(md).toContain('12'); // closed
+  });
+
+  it('omits Milestone section when no milestoneProgress on report', async () => {
+    const report = buildRunReport(makeLoopResult());
+    await writeRunReport(workDir, report);
+    const md = await readFile(join(workDir, '.kova', 'run-report.md'), 'utf-8');
+    expect(md).not.toMatch(/##\s*Milestone/);
+  });
+});
+
+describe('printRunReport — milestone line', () => {
+  it('prints a milestone progress line when milestoneProgress is present', () => {
+    const consoleSpy = vi.spyOn(console, 'log');
+    const report = buildRunReport(makeLoopResult(), {
+      milestone: 'v0.35',
+      openCount: 7,
+      closedCount: 12,
+    });
+    printRunReport(report);
+    const output = consoleSpy.mock.calls.map((c) => c[0] as string).join('\n');
+    expect(output).toMatch(/[Mm]ilestone/);
+    expect(output).toContain('v0.35');
+    consoleSpy.mockRestore();
+  });
+
+  it('does not print milestone line when milestoneProgress missing', () => {
+    const consoleSpy = vi.spyOn(console, 'log');
+    printRunReport(buildRunReport(makeLoopResult()));
+    const output = consoleSpy.mock.calls.map((c) => c[0] as string).join('\n');
+    expect(output).not.toMatch(/Milestone progress/);
+    consoleSpy.mockRestore();
+  });
+});
+
 describe('printRunReport', () => {
   it('prints issues attempted, PRs created, and failures to stdout', () => {
     const consoleSpy = vi.spyOn(console, 'log');

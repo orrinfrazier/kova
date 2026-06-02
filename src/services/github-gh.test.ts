@@ -103,6 +103,7 @@ const ISSUE_FIXTURE = {
   body: 'The login form crashes on empty input',
   labels: [{ name: 'bug' }, { name: 'urgent' }],
   url: 'https://github.com/owner/repo/issues/42',
+  milestone: { title: 'v0.35 — Org-Scale Orchestration' },
 };
 
 const ISSUE_LIST_FIXTURE = [
@@ -113,6 +114,7 @@ const ISSUE_LIST_FIXTURE = [
     body: 'Support dark mode theme',
     labels: [{ name: 'feature' }],
     url: 'https://github.com/owner/repo/issues/99',
+    milestone: null,
   },
 ];
 
@@ -151,12 +153,14 @@ beforeEach(() => resetMock());
 /* ---------- fetchIssues ------------------------------------------ */
 
 describe('fetchIssues', () => {
-  it('constructs correct gh arguments without filter', async () => {
+  it('constructs correct gh arguments without filter (includes milestone field)', async () => {
     setResponse('gh issue list', { stdout: JSON.stringify(ISSUE_LIST_FIXTURE) });
     await fetchIssues('/repo');
 
     expect(calls).toHaveLength(1);
-    expect(calls[0]?.command).toBe('gh issue list --state open --json number,title,body,labels,url --limit 50');
+    expect(calls[0]?.command).toBe(
+      'gh issue list --state open --json number,title,body,labels,url,milestone --limit 50',
+    );
     expect(calls[0]?.cwd).toBe('/repo');
   });
 
@@ -167,7 +171,22 @@ describe('fetchIssues', () => {
     expect(calls[0]?.command).toContain('--label bug');
   });
 
-  it('maps raw labels to string array', async () => {
+  it('adds --milestone flag when milestone option is provided', async () => {
+    setResponse('gh issue list', { stdout: JSON.stringify(ISSUE_LIST_FIXTURE) });
+    await fetchIssues('/repo', undefined, { milestone: 'v0.35' });
+
+    expect(calls[0]?.command).toContain('--milestone v0.35');
+  });
+
+  it('composes --label and --milestone when both provided', async () => {
+    setResponse('gh issue list', { stdout: JSON.stringify(ISSUE_LIST_FIXTURE) });
+    await fetchIssues('/repo', 'bug', { milestone: 'v0.35' });
+
+    expect(calls[0]?.command).toContain('--label bug');
+    expect(calls[0]?.command).toContain('--milestone v0.35');
+  });
+
+  it('maps raw labels to string array and milestone title (or null)', async () => {
     setResponse('gh issue list', { stdout: JSON.stringify(ISSUE_LIST_FIXTURE) });
     const issues = await fetchIssues('/repo');
 
@@ -178,8 +197,10 @@ describe('fetchIssues', () => {
       body: 'The login form crashes on empty input',
       labels: ['bug', 'urgent'],
       url: 'https://github.com/owner/repo/issues/42',
+      milestone: 'v0.35 — Org-Scale Orchestration',
     });
     expect(issues[1]?.labels).toEqual(['feature']);
+    expect(issues[1]?.milestone).toBeNull();
   });
 
   it('returns empty array for empty list', async () => {
@@ -197,16 +218,16 @@ describe('fetchIssues', () => {
 /* ---------- fetchIssue ------------------------------------------- */
 
 describe('fetchIssue', () => {
-  it('constructs correct gh arguments with issue number', async () => {
+  it('constructs correct gh arguments with issue number (includes milestone field)', async () => {
     setResponse('gh issue view', { stdout: JSON.stringify(ISSUE_FIXTURE) });
     await fetchIssue('/repo', 42);
 
     expect(calls).toHaveLength(1);
-    expect(calls[0]?.command).toBe('gh issue view 42 --json number,title,body,labels,url');
+    expect(calls[0]?.command).toBe('gh issue view 42 --json number,title,body,labels,url,milestone');
     expect(calls[0]?.cwd).toBe('/repo');
   });
 
-  it('maps raw labels to string array', async () => {
+  it('maps raw labels to string array and milestone title', async () => {
     setResponse('gh issue view', { stdout: JSON.stringify(ISSUE_FIXTURE) });
     const issue = await fetchIssue('/repo', 42);
 
@@ -216,7 +237,17 @@ describe('fetchIssue', () => {
       body: 'The login form crashes on empty input',
       labels: ['bug', 'urgent'],
       url: 'https://github.com/owner/repo/issues/42',
+      milestone: 'v0.35 — Org-Scale Orchestration',
     });
+  });
+
+  it('returns milestone: null when issue has no milestone', async () => {
+    setResponse('gh issue view', {
+      stdout: JSON.stringify({ ...ISSUE_FIXTURE, milestone: null }),
+    });
+    const issue = await fetchIssue('/repo', 42);
+
+    expect(issue.milestone).toBeNull();
   });
 
   it('throws on malformed JSON', async () => {

@@ -414,6 +414,13 @@ export interface Issue {
   body: string;
   labels: string[];
   url: string;
+  /**
+   * Milestone title the issue is assigned to, or `null` when unset.
+   * `undefined` is reserved for "field not requested" (legacy code paths) — production
+   * fetchers always populate `string | null` so consumers can distinguish "no milestone"
+   * from "milestone not loaded".
+   */
+  milestone?: string | null;
 }
 
 export type WaveName = 'assess' | 'spec' | 'test' | 'impl' | 'quality' | 'review' | 'ship' | 'brainstorm';

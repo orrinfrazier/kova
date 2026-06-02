@@ -6,11 +6,29 @@ import { log } from '../utils/logger.js';
 
 $.verbose = false;
 
-export async function fetchIssues(repoPath: string, filter?: string): Promise<Issue[]> {
-  const args = ['issue', 'list', '--state', 'open', '--json', 'number,title,body,labels,url', '--limit', '50'];
+export interface FetchIssuesOptions {
+  /** Restrict the result set to issues assigned to the given milestone title. */
+  milestone?: string | undefined;
+}
+
+export async function fetchIssues(repoPath: string, filter?: string, options?: FetchIssuesOptions): Promise<Issue[]> {
+  const args = [
+    'issue',
+    'list',
+    '--state',
+    'open',
+    '--json',
+    'number,title,body,labels,url,milestone',
+    '--limit',
+    '50',
+  ];
 
   if (filter) {
     args.push('--label', filter);
+  }
+
+  if (options?.milestone) {
+    args.push('--milestone', options.milestone);
   }
 
   const result = await $({ cwd: repoPath })`gh ${args}`;
@@ -20,6 +38,7 @@ export async function fetchIssues(repoPath: string, filter?: string): Promise<Is
     body: string;
     labels: Array<{ name: string }>;
     url: string;
+    milestone?: { title?: string } | null;
   }>;
 
   return raw.map((issue) => ({
@@ -28,17 +47,21 @@ export async function fetchIssues(repoPath: string, filter?: string): Promise<Is
     body: issue.body,
     labels: issue.labels.map((l) => l.name),
     url: issue.url,
+    milestone: issue.milestone?.title ?? null,
   }));
 }
 
 export async function fetchIssue(repoPath: string, issueNumber: number): Promise<Issue> {
-  const result = await $({ cwd: repoPath })`gh issue view ${issueNumber} --json number,title,body,labels,url`;
+  const result = await $({
+    cwd: repoPath,
+  })`gh issue view ${issueNumber} --json number,title,body,labels,url,milestone`;
   const raw = JSON.parse(result.stdout) as {
     number: number;
     title: string;
     body: string;
     labels: Array<{ name: string }>;
     url: string;
+    milestone?: { title?: string } | null;
   };
 
   return {
@@ -47,6 +70,7 @@ export async function fetchIssue(repoPath: string, issueNumber: number): Promise
     body: raw.body,
     labels: raw.labels.map((l) => l.name),
     url: raw.url,
+    milestone: raw.milestone?.title ?? null,
   };
 }
 
@@ -108,6 +132,37 @@ export async function fetchOpenIssueCount(repoPath: string): Promise<number> {
   const result = await $({ cwd: repoPath })`gh issue list --state open --json number --limit 1000`;
   const raw = JSON.parse(result.stdout) as Array<{ number: number }>;
   return raw.length;
+}
+
+export interface MilestoneCounts {
+  open: number;
+  closed: number;
+}
+
+/**
+ * Count open and closed issues assigned to a milestone via `gh issue list`.
+ *
+ * Returns `{ open: 0, closed: 0 }` if either gh call fails — this is a reporting
+ * helper, never a fatal-path operation.
+ */
+export async function fetchMilestoneCounts(repoPath: string, milestone: string): Promise<MilestoneCounts> {
+  const countByState = async (state: 'open' | 'closed'): Promise<number> => {
+    try {
+      const result = await $({
+        cwd: repoPath,
+      })`gh issue list --state ${state} --milestone ${milestone} --json number --limit 1000`;
+      const raw = JSON.parse(result.stdout) as Array<{ number: number }>;
+      return raw.length;
+    } catch (err) {
+      log.warn(
+        `[github] failed to fetch ${state} issues for milestone "${milestone}": ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return 0;
+    }
+  };
+
+  const [open, closed] = await Promise.all([countByState('open'), countByState('closed')]);
+  return { open, closed };
 }
 
 export interface KovaPR {
