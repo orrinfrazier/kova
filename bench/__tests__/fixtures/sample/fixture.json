@@ -1,0 +1,11 @@
+{
+  "id": "sample",
+  "title": "Sample fixture for harness self-tests",
+  "description": "A repo whose acceptance test passes only if SOLVED.txt is created. fixApply writes the file; without it the acceptance fails.",
+  "issue": {
+    "title": "create SOLVED.txt",
+    "body": "The acceptance script checks for SOLVED.txt at the repo root. Create it so the test passes."
+  },
+  "acceptance": "sh acceptance.sh",
+  "timeoutMs": 30000
+}

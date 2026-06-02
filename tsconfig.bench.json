@@ -1,0 +1,20 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "outDir": "dist-bench",
+    "rootDir": ".",
+    "noEmitOnError": true,
+    "declaration": false,
+    "declarationMap": false
+  },
+  "include": [
+    "bench/types.ts",
+    "bench/loader.ts",
+    "bench/runner.ts",
+    "bench/scorer.ts",
+    "bench/index.ts",
+    "bench/fixApply.ts",
+    "src/**/*.ts"
+  ],
+  "exclude": ["node_modules", "dist", "dist-bench", "bench/__tests__/**", "**/*.test.ts"]
+}

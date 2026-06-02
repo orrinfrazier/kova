@@ -1,7 +1,9 @@
 node_modules/
 dist/
+dist-bench/
 .env
 .env.local
 *.log
 .DS_Store
 .kova/
+bench/results/

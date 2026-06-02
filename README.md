@@ -255,6 +255,24 @@ npm run test           # Run tests
 npm run dev            # Watch mode
 ```
 
+## Benchmarks
+
+`bench/` ships an opt-in fix-success eval harness (borrowed from aider's
+`benchmark/` pattern). It runs the real `fix()` against curated fixture
+issue+repo pairs in isolation and writes pass/fail + cost + per-wave timing
+to JSONL. Use it to evaluate whether a prompt or model change actually
+improves fix quality — `fix.e2e.test.ts` mocks the agent, this doesn't.
+
+```bash
+npm run bench          # Run all fixtures with real fix()
+npm run bench:dry      # No-op fixApply — exercises the harness only
+npm run bench -- --fixture 01-trim-input
+```
+
+See [`bench/README.md`](bench/README.md) for the JSONL schema, isolation
+contract, and how to add a fixture. The harness lives in parallel to `src/`,
+never touches the host repo, and is invoked only via `npm run bench`.
+
 ## License
 
 MIT
