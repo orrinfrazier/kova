@@ -159,13 +159,22 @@ function waveProvider(config: RepoConfig, wave: FixAIWaveName): string {
 /** Determine the fallback model string for a wave config, if applicable.
  *  Uses the configured fallback model when set, otherwise falls back to
  *  the tier-default API model for local-only models.
+ *
+ *  `configFallback === false` (issue #242) disables API fallback entirely —
+ *  intended for pure-local setups with no API key. In that mode we skip both
+ *  the configured-fallback path and the local-tier default.
+ *
  *  Consensus pools are not supported by this single-model fallback path —
- *  pool wave runners handle their own per-member fallback. */
-function waveFallbackModel(
+ *  pool wave runners handle their own per-member fallback.
+ *
+ *  Exported for unit testing — callers in this module use it directly. */
+export function waveFallbackModel(
   waveConfig: WaveModelConfig,
   modelString: string,
-  configFallback?: string,
+  configFallback?: string | false,
 ): string | undefined {
+  // Explicit opt-out: `false` disables ALL fallback paths (issue #242).
+  if (configFallback === false) return undefined;
   // Configured fallback takes priority — only use if different from primary
   if (configFallback && configFallback !== modelString) return configFallback;
   // Default behavior: local models fall back to API tier defaults

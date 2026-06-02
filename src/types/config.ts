@@ -288,7 +288,15 @@ export const RepoConfigSchema = z.object({
       quality: WaveModelConfigSchema.default('small'),
       review: WaveModelConfigSchema.default('large'),
       brainstorm: WaveModelConfigSchema.default('large'),
-      fallback: z.string().optional(),
+      // fallback model for local-only setups:
+      //  - string  → use as the fallback model name (e.g. "claude-sonnet-4-6")
+      //  - false   → disable API fallback entirely (pure local mode, issue #242)
+      //  - "none"  → string sentinel, normalized to false during parsing
+      //  - omitted → preserve historical default (API tier fallback for local models)
+      fallback: z
+        .union([z.literal(false), z.string()])
+        .transform((v) => (v === 'none' ? (false as const) : v))
+        .optional(),
       thinking: z
         .object({
           assess: ThinkingLevelSchema.optional(),
