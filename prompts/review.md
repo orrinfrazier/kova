@@ -83,12 +83,26 @@ Code quality issue where existing tests serve as the safety net. No new tests ne
 
 For each finding include: file, line (if applicable), description, severity (low/medium/high/critical), and category (needs_new_tests or mechanical_fix).
 
+### `test_code` is REQUIRED for every `needs_new_tests` finding
+
+When `category` is `needs_new_tests`, you MUST also include `test_code` — a runnable failing test written in the project's test framework that catches the behavioral gap. This is non-negotiable: the pipeline writes `test_code` to disk, runs the suite to confirm it fails (ratcheting eval), and only then dispatches an implementation agent. A `needs_new_tests` finding without `test_code` cannot be ratcheted; it becomes a tracked known-issue that the orchestrator surfaces instead of a silent fix.
+
+Requirements for `test_code`:
+
+- Use the project's test framework (Vitest for TS, cargo test for Rust, pytest for Python, go test for Go — match what existing test files in the repo use).
+- Include all necessary imports so the file compiles/runs standalone (the pipeline writes it as a sibling file: `src/foo.ts` → `src/foo.review.test.ts`).
+- The test MUST currently fail because of the gap you identified. If you can't write a test that fails, the finding probably isn't `needs_new_tests` — re-categorize as `mechanical_fix` or drop it.
+- Prefer one tight, focused test per finding. Don't combine multiple gaps into one finding.
+
+For `mechanical_fix` findings, `test_code` is not required — the existing test suite is the safety net.
+
 Output as structured JSON matching the provided schema.
 
 ## Rules
 
 - Read the actual code changes before forming opinions
 - Every finding must have a specific file reference and actionable fix
+- Every `needs_new_tests` finding MUST include `test_code` (runnable failing test)
 - Do not flag style preferences that don't affect correctness or security
 - Be concrete: "missing null check on line 42" not "could be more robust"
 
