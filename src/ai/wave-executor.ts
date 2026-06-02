@@ -17,6 +17,7 @@ import { log } from '../utils/logger.js';
 import { createTransformContext } from './context-transform.js';
 import { createDestructiveEditGuard, type DestructiveEditGuardOptions } from './destructive-edit-guard.js';
 import { classifyError, isSpendingCapBehavior, KovaError } from './errors.js';
+import { createImportPreservationGuard, type ImportPreservationGuardOptions } from './import-preservation-guard.js';
 import { getModelString, resolveModelFromString, resolveWaveModel } from './models.js';
 import { isOllamaProvider, resolveOllamaApiKey } from './ollama.js';
 import { isRouterProvider, resolveRouterApiKey } from './router.js';
@@ -151,6 +152,14 @@ export interface SpawnWaveAgentConfig {
    */
   destructiveEditGuard?: Omit<DestructiveEditGuardOptions, 'cwd'> | false;
   /**
+   * Import-preservation guard options. Set to configure, or `false` to disable.
+   * Default: enabled. Rejects Write/Edit tool calls that strip an import line whose
+   * names are still referenced in the file body. Supports Rust `use`, TS/JS `import`,
+   * Python `import`/`from`, and Go `import`. Shares the `allowDestructive: true`
+   * per-call opt-out with the destructive-edit guard.
+   */
+  importPreservationGuard?: Omit<ImportPreservationGuardOptions, 'cwd'> | false;
+  /**
    * Optional `EventBus` for structured observability events (kova#292). When
    * provided, the wave publishes `wave-enter`, `wave-output`, `steered`,
    * `aborted`, and `cost` events tagged with `eventContext`. When omitted, the
@@ -188,6 +197,7 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
     toolResultTruncation,
     runtimeFactory = defaultAgentRuntimeFactory,
     destructiveEditGuard,
+    importPreservationGuard,
     eventBus,
     eventContext,
   } = config;
@@ -216,12 +226,29 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
   const afterToolCallHook =
     toolResultTruncation === false ? undefined : createAfterToolCallHook(toolResultTruncation ?? undefined);
 
-  // Destructive-edit guard: rejects Write/Edit calls that would wipe out large
-  // portions of files. Only active on waves that have edit/write tools (test, impl).
-  // Disabled via `destructiveEditGuard: false`; otherwise uses defaults plus any
-  // caller-provided overrides.
-  const beforeToolCallHook =
+  // beforeToolCall guards: a composition of (1) the destructive-edit guard,
+  // which rejects Write/Edit calls that would wipe out large portions of files,
+  // and (2) the import-preservation guard, which rejects edits that strip an
+  // import line whose names are still referenced elsewhere in the file. Both
+  // are active by default; both honor `allowDestructive: true` for opt-out.
+  const destructiveGuard =
     destructiveEditGuard === false ? undefined : createDestructiveEditGuard({ cwd, ...(destructiveEditGuard ?? {}) });
+  const importGuard =
+    importPreservationGuard === false
+      ? undefined
+      : createImportPreservationGuard({ cwd, ...(importPreservationGuard ?? {}) });
+
+  const guards = [destructiveGuard, importGuard].filter((g): g is NonNullable<typeof g> => g !== undefined);
+  const beforeToolCallHook =
+    guards.length === 0
+      ? undefined
+      : async (context: Parameters<NonNullable<typeof destructiveGuard>>[0]) => {
+          for (const g of guards) {
+            const r = await g(context);
+            if (r?.block) return r;
+          }
+          return undefined;
+        };
 
   // Construct via the AgentRuntime factory (kova#309). The default factory
   // wraps pi-mono Agent; kova#310 will extract a full PiAgentRuntime adapter.
