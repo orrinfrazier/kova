@@ -1,5 +1,26 @@
 // Context transform hook for pi-agent-core Agent — trims old tool results
 // when context pressure builds, preventing context window exhaustion.
+//
+// SHAPE ASSUMPTION (pi-ai runtime):
+// This module is coded against pi-ai's denormalized `ToolResultMessage` shape,
+// where each tool result is a top-level message with `role: 'toolResult'` and
+// `toolName` carried directly on the message (see
+// `node_modules/@earendil-works/pi-ai/dist/types.d.ts` `ToolResultMessage`).
+// `isCompactable()` below reads `msg.toolName` straight off the message — that
+// works only because pi-ai denormalizes it.
+//
+// Under Anthropic's native Messages API shape, tool results are
+// `tool_result` content blocks inside a user message, and the tool *name*
+// lives only on the prior assistant's `tool_use` block (joined by
+// `tool_use_id`). Porting this file to the Anthropic-native shape therefore
+// requires walking the message list to resolve `tool_use_id` → tool name
+// before any compactability check; you cannot read `toolName` off the
+// tool-result block itself.
+//
+// The planned cleanup is to adopt pi-mono's `compact()` / `shouldCompact()`
+// (issue #296), which moves this logic upstream and deletes this file. Until
+// then, treat the pi-ai shape coupling as intentional and runtime-specific,
+// not accidental.
 
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { ToolResultMessage } from '@earendil-works/pi-ai';
