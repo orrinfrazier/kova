@@ -653,7 +653,9 @@ program
 
     if (opts.stats) {
       const stats = computeStats(entries);
-      console.log(formatStatsTable(stats));
+      // Pass entries so structured-output metrics (issue #247) can be aggregated
+      // and rendered alongside the standard stats.
+      console.log(formatStatsTable(stats, entries));
     } else {
       const recent = entries.slice(-limit);
       console.log(formatHistoryTable(recent));
