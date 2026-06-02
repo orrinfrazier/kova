@@ -135,6 +135,23 @@ export const VectorDBConfigSchema = z
 
 export type VectorDBConfig = z.infer<typeof VectorDBConfigSchema>;
 
+/**
+ * Optional FTS5 keyword-recall sidecar (#302). Local SQLite virtual table
+ * that complements the REST/vector episodic memory by surfacing exact-token
+ * matches (error strings, symbol names, file paths) — areas where embeddings
+ * are weak. Absence of the DB file degrades to vector-only with no error.
+ *   - `enabled`: opt-out switch. Default behavior when this whole block is
+ *     omitted is "on" (callers treat `fts === undefined` as default-enabled).
+ *   - `path`: optional explicit DB path. Callers resolve a default at
+ *     `{workDir}/.kova/episode-fts.db` when absent.
+ */
+export const EpisodesFTSConfigSchema = z.object({
+  enabled: z.boolean().default(true),
+  path: z.string().optional(),
+});
+
+export type EpisodesFTSConfig = z.infer<typeof EpisodesFTSConfigSchema>;
+
 export const EpisodicMemoryConfigSchema = z
   .object({
     enabled: z.boolean(),
@@ -143,6 +160,7 @@ export const EpisodicMemoryConfigSchema = z
     cross_repo: z.boolean().default(true),
     same_repo_weight: z.number().default(1.5),
     language_filter: z.boolean().default(true),
+    fts: EpisodesFTSConfigSchema.optional(),
   })
   .refine((cfg) => !cfg.enabled || cfg.endpoint != null, {
     message: 'endpoint is required when episodes is enabled',
