@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import type { BeforeToolCallContext } from '@mariozechner/pi-agent-core';
+import type { BeforeToolCallContext } from '@earendil-works/pi-agent-core';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { composeBeforeToolCallHooks, createPieceScopeGuard } from './piece-scope-guard.js';
 

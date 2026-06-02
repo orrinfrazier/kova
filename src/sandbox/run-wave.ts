@@ -5,7 +5,7 @@
 // All logging is redirected to stderr to keep stdout clean for the result.
 
 import { readFile } from 'node:fs/promises';
-import type { ThinkingLevel } from '@mariozechner/pi-agent-core';
+import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 import type { z } from 'zod';
 import type { SpawnWithFallbackConfig } from '../ai/wave-executor.js';
 import { spawnWaveAgentWithFallback } from '../ai/wave-executor.js';

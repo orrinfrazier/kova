@@ -6,8 +6,8 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { AgentTool, AgentToolResult } from '@mariozechner/pi-agent-core';
-import { Type } from '@sinclair/typebox';
+import type { AgentTool, AgentToolResult } from '@earendil-works/pi-agent-core';
+import { Type } from 'typebox';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createPipelineTool, PIPELINE_TOOL_DEFAULTS } from './pipeline-tool.js';
 
@@ -101,7 +101,7 @@ describe('createPipelineTool', () => {
     writeFileSync(filePath, 'hello-from-disk', 'utf-8');
 
     // Lazy-import the real read tool from pi-coding-agent
-    const { createReadTool } = await import('@mariozechner/pi-coding-agent');
+    const { createReadTool } = await import('@earendil-works/pi-coding-agent');
     const readTool = createReadTool(tmp);
     const pipe = createPipelineTool(tmp, [readTool]);
 

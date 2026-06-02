@@ -1,8 +1,8 @@
 // Context transform hook for pi-agent-core Agent — trims old tool results
 // when context pressure builds, preventing context window exhaustion.
 
-import type { AgentMessage } from '@mariozechner/pi-agent-core';
-import type { ToolResultMessage } from '@mariozechner/pi-ai';
+import type { AgentMessage } from '@earendil-works/pi-agent-core';
+import type { ToolResultMessage } from '@earendil-works/pi-ai';
 import { estimateTokens } from '../pipeline/context.js';
 
 /** Tool names whose results can be cleared under context pressure. */
