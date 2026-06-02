@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { BrainstormHistory, DiminishingReturnsReport } from '../services/brainstorm-history.js';
 import type { RepoConfig, WaveHandoff } from '../types/index.js';
 
@@ -22,9 +22,15 @@ vi.mock('./prompts.js', () => ({
 
 const mockFetchCrossRepoIssues = vi.fn();
 const mockFormatCrossRepoContext = vi.fn();
+const mockFetchSameRepoIssues = vi.fn();
+const mockFormatSameRepoContext = vi.fn();
+const mockClassifyProposalsAgainstOpenIssues = vi.fn();
 vi.mock('../services/cross-repo-issues.js', () => ({
   fetchCrossRepoIssues: (...args: unknown[]) => mockFetchCrossRepoIssues(...args),
   formatCrossRepoContext: (...args: unknown[]) => mockFormatCrossRepoContext(...args),
+  fetchSameRepoIssues: (...args: unknown[]) => mockFetchSameRepoIssues(...args),
+  formatSameRepoContext: (...args: unknown[]) => mockFormatSameRepoContext(...args),
+  classifyProposalsAgainstOpenIssues: (...args: unknown[]) => mockClassifyProposalsAgainstOpenIssues(...args),
 }));
 
 // --- Mock brainstorm history ---
@@ -114,6 +120,9 @@ describe('brainstorm', () => {
     mockDetectDiminishingReturns.mockReset();
     mockFetchCrossRepoIssues.mockReset();
     mockFormatCrossRepoContext.mockReset();
+    mockFetchSameRepoIssues.mockReset();
+    mockFormatSameRepoContext.mockReset();
+    mockClassifyProposalsAgainstOpenIssues.mockReset();
     // Default: empty history, no overlap
     mockLoadHistory.mockResolvedValue(EMPTY_HISTORY);
     mockAppendCycle.mockResolvedValue(undefined);
@@ -121,6 +130,13 @@ describe('brainstorm', () => {
     // Default: no cross-repo issues
     mockFetchCrossRepoIssues.mockResolvedValue([]);
     mockFormatCrossRepoContext.mockReturnValue('');
+    // Default: no same-repo issues; classifier passes everything through as kept
+    mockFetchSameRepoIssues.mockResolvedValue([]);
+    mockFormatSameRepoContext.mockReturnValue('');
+    mockClassifyProposalsAgainstOpenIssues.mockImplementation((proposals: unknown[]) => ({
+      kept: proposals,
+      skipped: [],
+    }));
   });
 
   it('spawns a single agent wave with opus (large) model', async () => {
@@ -424,7 +440,86 @@ describe('brainstorm', () => {
     });
   });
 
-  // --- Coverage manifest passthrough (issue #280) ---
+  // --- Same-repo issue awareness (#281) ---
+
+  describe('same-repo issue awareness', () => {
+    it('fetches same-repo open issues before invoking the agent', async () => {
+      mockSpawnWaveAgent.mockResolvedValueOnce(makeBrainstormHandoff(SAMPLE_ISSUES));
+
+      await brainstorm({ repoPath: '/tmp/repo', config: DEFAULT_CONFIG });
+
+      expect(mockFetchSameRepoIssues).toHaveBeenCalledWith('/tmp/repo');
+    });
+
+    it('injects same-repo context into the agent user message', async () => {
+      const sameRepoContext = '\n\nThese issues are already tracked here:\n- Existing open issue [bug]';
+      mockFetchSameRepoIssues.mockResolvedValue([{ title: 'Existing open issue', labels: ['bug'] }]);
+      mockFormatSameRepoContext.mockReturnValue(sameRepoContext);
+      mockSpawnWaveAgent.mockResolvedValueOnce(makeBrainstormHandoff(SAMPLE_ISSUES));
+
+      await brainstorm({ repoPath: '/tmp/repo', config: DEFAULT_CONFIG });
+
+      const callConfig = mockSpawnWaveAgent.mock.calls[0]?.[0] as Record<string, unknown>;
+      const userMessage = callConfig.userMessage as string;
+      expect(userMessage).toContain('already tracked here');
+      expect(userMessage).toContain('Existing open issue');
+    });
+
+    it('classifies proposals against same-repo open issues and filters OPEN', async () => {
+      mockFetchSameRepoIssues.mockResolvedValue([{ title: 'Add input validation to API endpoints', labels: ['bug'] }]);
+      mockClassifyProposalsAgainstOpenIssues.mockReturnValue({
+        kept: [SAMPLE_ISSUES[1]],
+        skipped: [{ proposal: SAMPLE_ISSUES[0], matchedTitle: 'Add input validation to API endpoints' }],
+      });
+      mockSpawnWaveAgent.mockResolvedValueOnce(makeBrainstormHandoff(SAMPLE_ISSUES));
+
+      const result = await brainstorm({ repoPath: '/tmp/repo', config: DEFAULT_CONFIG, threshold: 0 });
+
+      // The skipped proposal must not appear in issues
+      const issueTitles = result.issues.map((i) => i.title);
+      expect(issueTitles).not.toContain('Add input validation to API endpoints');
+      // The skipped section must be reported
+      expect(result.skipped).toBeDefined();
+      expect(result.skipped).toHaveLength(1);
+      expect(result.skipped?.[0]?.proposal.title).toBe('Add input validation to API endpoints');
+      expect(result.skipped?.[0]?.matchedTitle).toBe('Add input validation to API endpoints');
+    });
+
+    it('continues gracefully if same-repo fetch fails', async () => {
+      mockFetchSameRepoIssues.mockRejectedValue(new Error('gh failed'));
+      mockSpawnWaveAgent.mockResolvedValueOnce(makeBrainstormHandoff(SAMPLE_ISSUES));
+
+      const result = await brainstorm({ repoPath: '/tmp/repo', config: DEFAULT_CONFIG });
+
+      expect(result.success).toBe(true);
+      expect(result.issues.length).toBeGreaterThan(0);
+    });
+
+    it('returns empty skipped array when no proposals collide with existing issues', async () => {
+      mockFetchSameRepoIssues.mockResolvedValue([{ title: 'Unrelated existing issue', labels: [] }]);
+      mockSpawnWaveAgent.mockResolvedValueOnce(makeBrainstormHandoff(SAMPLE_ISSUES));
+
+      const result = await brainstorm({ repoPath: '/tmp/repo', config: DEFAULT_CONFIG, threshold: 0 });
+
+      expect(result.skipped).toEqual([]);
+      expect(result.issues).toHaveLength(2);
+    });
+
+    it('classifier is invoked with parsed agent proposals and fetched open issues', async () => {
+      const openIssues = [{ title: 'X', labels: [] }];
+      mockFetchSameRepoIssues.mockResolvedValue(openIssues);
+      mockSpawnWaveAgent.mockResolvedValueOnce(makeBrainstormHandoff(SAMPLE_ISSUES));
+
+      await brainstorm({ repoPath: '/tmp/repo', config: DEFAULT_CONFIG, threshold: 0 });
+
+      expect(mockClassifyProposalsAgainstOpenIssues).toHaveBeenCalledWith(
+        expect.arrayContaining([expect.objectContaining({ title: 'Add input validation to API endpoints' })]),
+        openIssues,
+      );
+    });
+  });
+
+  // --- Coverage manifest passthrough (#280) ---
 
   describe('coverage manifest', () => {
     it('passes coverage entries from the agent artifact through to the result', async () => {
@@ -461,6 +556,63 @@ describe('brainstorm', () => {
       expect(result.success).toBe(true);
       expect(result.coverage).toEqual([]);
     });
+  });
+});
+
+describe('printBrainstormPreview — skipped section', () => {
+  let logSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    logSpy.mockRestore();
+  });
+
+  it('prints a "Skipped as already-tracked" section when skipped is non-empty', async () => {
+    const { printBrainstormPreview } = await import('./brainstorm.js');
+
+    printBrainstormPreview({
+      success: true,
+      issues: [],
+      filtered: [],
+      skipped: [
+        {
+          proposal: {
+            title: 'Add caching layer',
+            body: 'b',
+            labels: [],
+            priority: 'medium' as const,
+            category: 'tech-debt' as const,
+            confidence: 0.9,
+          },
+          matchedTitle: 'Cache layer for API responses',
+        },
+      ],
+      cost: 0.01,
+      model: 'test-model',
+    });
+
+    const allOutput = logSpy.mock.calls.map((c) => c.join(' ')).join('\n');
+    expect(allOutput).toMatch(/skipped|already.?tracked/i);
+    expect(allOutput).toContain('Add caching layer');
+    expect(allOutput).toContain('Cache layer for API responses');
+  });
+
+  it('does not print a skipped section when skipped is empty or undefined', async () => {
+    const { printBrainstormPreview } = await import('./brainstorm.js');
+
+    printBrainstormPreview({
+      success: true,
+      issues: [],
+      filtered: [],
+      cost: 0.01,
+      model: 'test-model',
+    });
+
+    const allOutput = logSpy.mock.calls.map((c) => c.join(' ')).join('\n');
+    expect(allOutput).not.toMatch(/already.?tracked/i);
   });
 });
 
