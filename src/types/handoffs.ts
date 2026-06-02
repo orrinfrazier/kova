@@ -17,6 +17,18 @@ export const WaveHandoffSchema = z.object({
   confidence: z.enum(['high', 'medium', 'low']),
   artifact: z.unknown(),
   approach_notes: z.string(),
+  /**
+   * True when `artifact` is the typed structured-output result (`T`).
+   * False when `artifact` is the raw model string fallback (parse failure
+   * or no outputFormat requested). Callers should check `parsed` before
+   * treating `artifact` as `T` — replaces the legacy `typeof artifact === 'string'`
+   * runtime check that proved the declared type was a lie (issue #308).
+   *
+   * Optional in the schema for backward-compat with persisted handoffs
+   * written before this field existed. New emissions from `spawnWaveAgent`
+   * always include it.
+   */
+  parsed: z.boolean().optional(),
   fallback_used: z.boolean().optional(),
   local_attempt_cost: z.number().optional(),
   /** Number of structured-output repair turns used (0..2). Present when outputFormat+zodSchema was set. */

@@ -89,6 +89,7 @@ import {
   type AssessResult,
   AssessResultSchema,
   loadAllHandoffs,
+  loadHandoff,
   QualityRemediationSchema,
   SpecResultSchema,
   saveHandoff,
@@ -251,6 +252,9 @@ function handoffToResult(handoff: WaveHandoff, provider?: string, promptHash?: s
 
 /** Convert a WaveResult to WaveHandoff for persistence. */
 function waveResultToHandoff(result: WaveResult): WaveHandoff {
+  // Infer `parsed` from the artifact shape: structured artifacts are objects;
+  // raw model output that fell back to string fails the discriminator. See issue #308.
+  const parsed = typeof result.artifact !== 'string' && result.artifact != null;
   return {
     wave: result.wave,
     timestamp: new Date().toISOString(),
@@ -258,6 +262,7 @@ function waveResultToHandoff(result: WaveResult): WaveHandoff {
     cost: result.cost,
     turns: result.turns,
     confidence: 'medium',
+    parsed,
     artifact: result.artifact,
     approach_notes: '',
   };
@@ -699,15 +704,22 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       }
     }
 
-    // Gate: if spec produced no pieces (structured output parse failure), retry once
-    // before falling through to the TI loop (which would throw without pieces).
+    // Gate: if spec produced no pieces OR fell back to the raw-string path,
+    // retry once before falling through to the TI loop (which would throw without pieces).
     // See issue #243 — local models fail JSON parsing intermittently; a single retry
     // often succeeds since the failure is non-deterministic.
+    // The `parsed === false` check (issue #308) is the explicit type-level signal that
+    // structured output parsing failed; the pieces-length check is a defense-in-depth
+    // guard for the case where the artifact parsed to an unexpected shape.
     // Skip this gate only when the test/impl waves themselves are skipped (e.g. REVIEW_ONLY).
     if (!(shouldSkip('test') && shouldSkip('impl'))) {
+      const specHandoff = await loadHandoff<SpecResult>(workDir, 'spec');
       const specAfterValidation = state.waveResults.spec?.artifact as SpecResult | undefined;
-      if (!specAfterValidation?.pieces || specAfterValidation.pieces.length === 0) {
-        log.warn('[fix] Spec produced no pieces (likely structured output parse failure), retrying once');
+      const specParseFailed = specHandoff?.parsed === false;
+      if (specParseFailed || !specAfterValidation?.pieces || specAfterValidation.pieces.length === 0) {
+        log.warn(
+          `[fix] Spec produced no pieces (parsed=${specHandoff?.parsed ?? 'unknown'}, likely structured output parse failure), retrying once`,
+        );
 
         const emptyRetryContext = buildWaveContext('spec', issue, state.waveResults, {
           prContext,

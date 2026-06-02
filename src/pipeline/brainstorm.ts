@@ -97,7 +97,7 @@ export async function brainstorm(options: BrainstormOptions): Promise<Brainstorm
       outputFormat: toOutputFormat(BrainstormResultSchema),
     });
 
-    if (handoff.confidence === 'low' || typeof handoff.artifact === 'string') {
+    if (handoff.confidence === 'low' || handoff.parsed === false) {
       log.warn('[brainstorm] Agent returned low confidence or unparseable output');
       return {
         success: false,
