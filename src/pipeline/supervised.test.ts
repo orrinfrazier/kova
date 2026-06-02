@@ -17,8 +17,10 @@ import type { BrainstormIssue, RepoConfig } from '../types/index.js';
 /* ------------------------------------------------------------------ */
 
 const mockBrainstorm = vi.fn();
+const mockPrintCoverageMap = vi.fn();
 vi.mock('./brainstorm.js', () => ({
   brainstorm: (...args: unknown[]) => mockBrainstorm(...args),
+  printCoverageMap: (...args: unknown[]) => mockPrintCoverageMap(...args),
 }));
 
 /* ------------------------------------------------------------------ */
@@ -198,6 +200,7 @@ function setupWriteSuccess() {
 
 beforeEach(() => {
   mockBrainstorm.mockReset();
+  mockPrintCoverageMap.mockReset();
   mockApproveIssues.mockReset();
   mockCreateIssue.mockReset();
   mockFetchIssues.mockReset();
@@ -622,6 +625,242 @@ describe('runSupervised', () => {
       const unlinkPath = mockFsUnlink.mock.calls[0]?.[0] as string;
       expect(unlinkPath).toContain('supervised-session.json');
     });
+  });
+});
+
+describe('runSupervised — brainstorm dependency resolution (issue #279)', () => {
+  it('creates blocker A before dependent B and appends "Blocked by #<A>" to B body', async () => {
+    setupNoSession();
+    setupWriteSuccess();
+
+    // Two-issue batch: B depends on A by title.
+    const issueA: BrainstormIssue = {
+      title: 'Add input validation',
+      body: 'Validate user input.',
+      labels: ['security'],
+      priority: 'high',
+      category: 'security',
+      confidence: 0.9,
+    };
+    const issueB: BrainstormIssue = {
+      title: 'Refactor auth flow',
+      body: 'Refactor after validation lands.',
+      labels: ['tech-debt'],
+      priority: 'medium',
+      category: 'tech-debt',
+      confidence: 0.8,
+      dependencies: ['Add input validation'],
+    };
+
+    mockBrainstorm.mockResolvedValue(makeBrainstormReturn({ issues: [issueB, issueA] }));
+    mockApproveIssues.mockResolvedValue(makeApprovalResult({ approved: [issueB, issueA] }));
+    mockCreateIssue
+      .mockResolvedValueOnce({ number: 501, url: 'https://github.com/test/issues/501' })
+      .mockResolvedValueOnce({ number: 502, url: 'https://github.com/test/issues/502' });
+    mockConfirm.mockResolvedValue(true);
+    mockFixByNumbers.mockResolvedValue(makeLoopResult());
+
+    await runSupervised({ repoPath: '/tmp/repo', repoName: 'test-repo', config: DEFAULT_CONFIG });
+
+    // First createIssue call must be the blocker A.
+    const firstCall = mockCreateIssue.mock.calls[0] as [string, string, string, string[]];
+    expect(firstCall[1]).toBe('Add input validation');
+
+    // Second createIssue call must be B with "Blocked by #501" appended.
+    const secondCall = mockCreateIssue.mock.calls[1] as [string, string, string, string[]];
+    expect(secondCall[1]).toBe('Refactor auth flow');
+    expect(secondCall[2]).toContain('Blocked by #501');
+  });
+
+  it('orders a 3-issue chain A→B→C and threads Blocked-by numbers correctly', async () => {
+    setupNoSession();
+    setupWriteSuccess();
+
+    const issueA: BrainstormIssue = {
+      title: 'A — foundational migration',
+      body: 'Lay the rails.',
+      labels: [],
+      priority: 'high',
+      category: 'tech-debt',
+      confidence: 0.9,
+    };
+    const issueB: BrainstormIssue = {
+      title: 'B — middle layer',
+      body: 'Use the rails.',
+      labels: [],
+      priority: 'medium',
+      category: 'tech-debt',
+      confidence: 0.85,
+      dependencies: ['A — foundational migration'],
+    };
+    const issueC: BrainstormIssue = {
+      title: 'C — top of stack',
+      body: 'Sit on top.',
+      labels: [],
+      priority: 'low',
+      category: 'tech-debt',
+      confidence: 0.8,
+      dependencies: ['B — middle layer'],
+    };
+
+    // Input deliberately out of order — pipeline must sort.
+    mockBrainstorm.mockResolvedValue(makeBrainstormReturn({ issues: [issueC, issueB, issueA] }));
+    mockApproveIssues.mockResolvedValue(makeApprovalResult({ approved: [issueC, issueB, issueA] }));
+    mockCreateIssue
+      .mockResolvedValueOnce({ number: 701, url: 'https://github.com/test/issues/701' })
+      .mockResolvedValueOnce({ number: 702, url: 'https://github.com/test/issues/702' })
+      .mockResolvedValueOnce({ number: 703, url: 'https://github.com/test/issues/703' });
+    mockConfirm.mockResolvedValue(true);
+    mockFixByNumbers.mockResolvedValue(makeLoopResult());
+
+    await runSupervised({ repoPath: '/tmp/repo', repoName: 'test-repo', config: DEFAULT_CONFIG });
+
+    expect(mockCreateIssue.mock.calls).toHaveLength(3);
+    // Order: A then B then C.
+    expect(mockCreateIssue.mock.calls[0]?.[1]).toBe('A — foundational migration');
+    expect(mockCreateIssue.mock.calls[1]?.[1]).toBe('B — middle layer');
+    expect(mockCreateIssue.mock.calls[2]?.[1]).toBe('C — top of stack');
+
+    // B's body references A's number (701). C's body references B's number (702).
+    const bBody = mockCreateIssue.mock.calls[1]?.[2] as string;
+    expect(bBody).toContain('Blocked by #701');
+
+    const cBody = mockCreateIssue.mock.calls[2]?.[2] as string;
+    expect(cBody).toContain('Blocked by #702');
+  });
+
+  it('surfaces unresolvable dep titles via note() rather than silently dropping them', async () => {
+    setupNoSession();
+    setupWriteSuccess();
+
+    const issueB: BrainstormIssue = {
+      title: 'B',
+      body: 'B body',
+      labels: [],
+      priority: 'medium',
+      category: 'tech-debt',
+      confidence: 0.9,
+      dependencies: ['Some Phantom That Does Not Exist'],
+    };
+
+    mockBrainstorm.mockResolvedValue(makeBrainstormReturn({ issues: [issueB] }));
+    mockApproveIssues.mockResolvedValue(makeApprovalResult({ approved: [issueB] }));
+    mockCreateIssue.mockResolvedValue({ number: 901, url: 'https://github.com/test/issues/901' });
+    mockConfirm.mockResolvedValue(true);
+    mockFixByNumbers.mockResolvedValue(makeLoopResult());
+
+    await runSupervised({ repoPath: '/tmp/repo', repoName: 'test-repo', config: DEFAULT_CONFIG });
+
+    // At least one note call must mention the unresolvable title.
+    const noteCalls = mockNote.mock.calls.map((c) => String(c[0]));
+    const mentioned = noteCalls.some((s) => s.includes('Some Phantom That Does Not Exist'));
+    expect(mentioned).toBe(true);
+
+    // The issue is still created (without phantom deps).
+    expect(mockCreateIssue).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not append "Blocked by" lines when an issue has no dependencies', async () => {
+    setupNoSession();
+    setupWriteSuccess();
+
+    const issueA: BrainstormIssue = {
+      title: 'A — solo',
+      body: 'No deps here.',
+      labels: [],
+      priority: 'medium',
+      category: 'tech-debt',
+      confidence: 0.9,
+    };
+
+    mockBrainstorm.mockResolvedValue(makeBrainstormReturn({ issues: [issueA] }));
+    mockApproveIssues.mockResolvedValue(makeApprovalResult({ approved: [issueA] }));
+    mockCreateIssue.mockResolvedValue({ number: 1101, url: 'https://github.com/test/issues/1101' });
+    mockConfirm.mockResolvedValue(true);
+    mockFixByNumbers.mockResolvedValue(makeLoopResult());
+
+    await runSupervised({ repoPath: '/tmp/repo', repoName: 'test-repo', config: DEFAULT_CONFIG });
+
+    const body = mockCreateIssue.mock.calls[0]?.[2] as string;
+    expect(body).not.toContain('Blocked by #');
+  });
+});
+
+describe('runSupervised — coverage checkpoint (issue #280)', () => {
+  it('asks the user to confirm coverage is complete before approving issues', async () => {
+    setupNoSession();
+    setupWriteSuccess();
+    mockBrainstorm.mockResolvedValue(makeBrainstormReturn());
+    mockApproveIssues.mockResolvedValue(makeApprovalResult());
+    mockCreateIssue.mockResolvedValue({ number: 1, url: 'https://github.com/test/issues/1' });
+    mockConfirm.mockResolvedValue(true);
+    mockFixByNumbers.mockResolvedValue(makeLoopResult());
+
+    await runSupervised({ repoPath: '/tmp/repo', repoName: 'test-repo', config: DEFAULT_CONFIG });
+
+    // confirm should now be called at LEAST twice: once for coverage, once for fix phase.
+    expect(mockConfirm.mock.calls.length).toBeGreaterThanOrEqual(2);
+    // The first confirm call is the coverage checkpoint.
+    const firstCall = mockConfirm.mock.calls[0]?.[0] as { message?: string };
+    expect(firstCall?.message).toMatch(/scope|coverage/i);
+  });
+
+  it('stops cleanly when the user declines the coverage checkpoint', async () => {
+    setupNoSession();
+    setupWriteSuccess();
+    mockBrainstorm.mockResolvedValue(makeBrainstormReturn());
+    // First confirm = scope/coverage = declined
+    mockConfirm.mockResolvedValueOnce(false);
+
+    const result = await runSupervised({ repoPath: '/tmp/repo', repoName: 'test-repo', config: DEFAULT_CONFIG });
+
+    expect(result.success).toBe(false);
+    // Nothing was approved, created, or fixed.
+    expect(mockApproveIssues).not.toHaveBeenCalled();
+    expect(mockCreateIssue).not.toHaveBeenCalled();
+    expect(mockFixByNumbers).not.toHaveBeenCalled();
+  });
+
+  it('stops cleanly when the user cancels (Ctrl-C) the coverage checkpoint', async () => {
+    const cancelSymbol = Symbol('cancel');
+    setupNoSession();
+    setupWriteSuccess();
+    mockBrainstorm.mockResolvedValue(makeBrainstormReturn());
+    mockConfirm.mockResolvedValueOnce(cancelSymbol);
+    mockIsCancel.mockImplementation((v) => v === cancelSymbol);
+
+    const result = await runSupervised({ repoPath: '/tmp/repo', repoName: 'test-repo', config: DEFAULT_CONFIG });
+
+    expect(result.success).toBe(false);
+    expect(mockApproveIssues).not.toHaveBeenCalled();
+    expect(mockCreateIssue).not.toHaveBeenCalled();
+    expect(mockFixByNumbers).not.toHaveBeenCalled();
+  });
+
+  it('skips the coverage checkpoint when yes=true (auto-approve)', async () => {
+    setupNoSession();
+    setupWriteSuccess();
+    mockBrainstorm.mockResolvedValue(makeBrainstormReturn());
+    mockApproveIssues.mockResolvedValue(makeApprovalResult());
+    mockCreateIssue.mockResolvedValue({ number: 1, url: 'https://github.com/test/issues/1' });
+    // Only the fix-phase confirm should fire
+    mockConfirm.mockResolvedValue(true);
+    mockFixByNumbers.mockResolvedValue(makeLoopResult());
+
+    await runSupervised({ repoPath: '/tmp/repo', repoName: 'test-repo', config: DEFAULT_CONFIG, yes: true });
+
+    // With yes=true, neither the coverage checkpoint nor the fix-phase confirm should ask the user.
+    // Existing semantics: --yes auto-approves both prompts.
+    // Verify nothing asks about scope.
+    const scopeAsks = mockConfirm.mock.calls.filter((c) => {
+      const arg = c[0] as { message?: string } | undefined;
+      return typeof arg?.message === 'string' && /scope|coverage/i.test(arg.message);
+    });
+    expect(scopeAsks).toHaveLength(0);
+
+    // And the flow still proceeds to create + fix
+    expect(mockCreateIssue).toHaveBeenCalled();
+    expect(mockFixByNumbers).toHaveBeenCalled();
   });
 });
 

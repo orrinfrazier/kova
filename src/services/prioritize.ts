@@ -68,19 +68,97 @@ function priorityKey(label: string): string | null {
   return null;
 }
 
+/**
+ * A cross-repo dependency edge: the issue depends on `<repo>#<number>`, where
+ * `repo` is an `owner/name` slug whenever possible (issue #287).
+ *
+ * - `owner/repo#N` → `{ repo: 'owner/repo', number: N }`
+ * - `repo#N` with `defaultRepo='owner/me'` → `{ repo: 'owner/repo', number: N }`
+ *   (the owner is inherited from defaultRepo; falls back to bare `repo` if
+ *   defaultRepo has no owner)
+ * - bare `#N` with `defaultRepo='owner/me'` → `{ repo: 'owner/me', number: N }`
+ * - bare `#N` with no defaultRepo → omitted (cannot attribute)
+ */
+export interface CrossRepoDependency {
+  repo: string;
+  number: number;
+}
+
+/**
+ * Single regex covering all three dependency forms (issue #287):
+ *   - bare `#N`
+ *   - `repo#N` (slug, no owner)
+ *   - `owner/repo#N` (full slug)
+ *
+ * Capture groups:
+ *   1 — owner (optional, may be undefined)
+ *   2 — repo  (optional)
+ *   3 — issue number
+ *
+ * Slug names must look like a repo (`[A-Za-z0-9._-]+`). The "bare #N" form
+ * is the case where both groups 1 and 2 are undefined.
+ */
+const DEPENDENCY_PATTERN = /(?:blocked\s+by|depends\s+on)\s+(?:([A-Za-z0-9._-]+)\/)?([A-Za-z0-9._-]+)?#(\d+)/gi;
+
 /** Extract issue numbers this issue depends on from body text. */
 export function parseDependencies(body: string): number[] {
-  const pattern = /(?:blocked\s+by|depends\s+on)\s+#(\d+)/gi;
   const seen = new Set<number>();
-  let match = pattern.exec(body);
+  // Reset lastIndex so consecutive calls on the same RegExp object work.
+  DEPENDENCY_PATTERN.lastIndex = 0;
+  let match = DEPENDENCY_PATTERN.exec(body);
   while (match !== null) {
-    const captured = match[1];
+    const captured = match[3];
     if (captured !== undefined) {
       seen.add(Number.parseInt(captured, 10));
     }
-    match = pattern.exec(body);
+    match = DEPENDENCY_PATTERN.exec(body);
   }
   return [...seen];
+}
+
+/**
+ * Extract cross-repo dependency edges from body text (issue #287).
+ *
+ * Pass `defaultRepo` to attribute bare `#N` (and owner-less `repo#N`) forms to
+ * the issue's own repo context. Without it, bare `#N` is dropped from the
+ * cross-repo edge set because we can't attribute it.
+ */
+export function parseCrossRepoDependencies(body: string, defaultRepo?: string): CrossRepoDependency[] {
+  const seen = new Map<string, CrossRepoDependency>();
+  const defaultOwner = defaultRepo?.includes('/') ? defaultRepo.split('/')[0] : undefined;
+
+  DEPENDENCY_PATTERN.lastIndex = 0;
+  let match = DEPENDENCY_PATTERN.exec(body);
+  while (match !== null) {
+    const owner = match[1];
+    const repo = match[2];
+    const numStr = match[3];
+    if (numStr === undefined) {
+      match = DEPENDENCY_PATTERN.exec(body);
+      continue;
+    }
+    const num = Number.parseInt(numStr, 10);
+
+    let resolvedRepo: string | undefined;
+    if (owner !== undefined && repo !== undefined) {
+      resolvedRepo = `${owner}/${repo}`;
+    } else if (repo !== undefined) {
+      // `repo#N` — owner missing. Inherit defaultRepo's owner when available.
+      resolvedRepo = defaultOwner !== undefined ? `${defaultOwner}/${repo}` : repo;
+    } else {
+      // bare `#N`. Only attributable when defaultRepo is set.
+      resolvedRepo = defaultRepo;
+    }
+
+    if (resolvedRepo !== undefined) {
+      const key = `${resolvedRepo}#${num}`;
+      if (!seen.has(key)) {
+        seen.set(key, { repo: resolvedRepo, number: num });
+      }
+    }
+    match = DEPENDENCY_PATTERN.exec(body);
+  }
+  return [...seen.values()];
 }
 
 function basePriority(issue: Issue): number {

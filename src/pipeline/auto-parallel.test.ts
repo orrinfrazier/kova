@@ -1,18 +1,20 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { KovaConfig, RepoConfig } from '../types/index.js';
+import type { Issue, KovaConfig, RepoConfig } from '../types/index.js';
 
 const mockFixLoop = vi.fn();
+const mockFetchIssues = vi.fn();
 const mockCollectChangedFilesFromPRs = vi.fn();
 const mockReindexFiles = vi.fn();
 
 beforeEach(() => {
   mockFixLoop.mockReset();
+  mockFetchIssues.mockReset();
   mockCollectChangedFilesFromPRs.mockReset();
   mockReindexFiles.mockReset();
 });
 
 vi.mock('../services/github.js', () => ({
-  fetchIssues: vi.fn(),
+  fetchIssues: (...args: unknown[]) => mockFetchIssues(...args),
 }));
 
 vi.mock('./loop.js', () => ({
@@ -241,5 +243,94 @@ describe('runAutoMultiRepoParallel', () => {
     // repo-b should succeed
     const repoB = result.repoResults.find((r) => r.repoName === 'repo-b');
     expect(repoB?.loopResult.succeeded).toBe(2);
+  });
+});
+
+// Issue #287 — cross-repo dependency awareness.
+//
+// When repos have a slug (`owner/name`) and a configured repo references
+// another configured repo via "blocked by owner/name#N", the dependent repo's
+// runAuto MUST be deferred until the blocker repo's runAuto completes.
+
+function makeIssueFixture(overrides: Partial<Issue> & { number: number }): Issue {
+  return {
+    title: `Issue #${overrides.number}`,
+    body: '',
+    labels: [],
+    url: `https://github.com/test/repo/issues/${overrides.number}`,
+    ...overrides,
+  };
+}
+
+describe('runAutoMultiRepoParallel — cross-repo dep gating', () => {
+  function makeKovaConfig(
+    repos: Record<string, Partial<Omit<RepoConfig, 'auto'>> & { auto?: Partial<RepoConfig['auto']>; slug?: string }>,
+  ): KovaConfig {
+    const result: KovaConfig = { repos: {} };
+    for (const [name, overrides] of Object.entries(repos)) {
+      const { slug, ...rest } = overrides;
+      result.repos[name] = {
+        ...makeRepoConfig({ path: `/tmp/${name}`, ...rest }),
+        ...(slug !== undefined ? { slug } : {}),
+      } as RepoConfig;
+    }
+    return result;
+  }
+
+  it('defers dependent-repo runAuto until blocker-repo runAuto completes', async () => {
+    // repo-a has issue #1 (blocker). repo-b has issue #2 (blocked by owner/repo-a#1).
+    // Expectation: repo-a's fixLoop starts AND finishes before repo-b's fixLoop starts.
+    mockFetchIssues.mockImplementation(async (repoPath: string) => {
+      if (repoPath === '/tmp/repo-a') return [makeIssueFixture({ number: 1 })];
+      if (repoPath === '/tmp/repo-b') {
+        return [makeIssueFixture({ number: 2, body: 'blocked by owner/repo-a#1' })];
+      }
+      return [];
+    });
+
+    const order: string[] = [];
+    mockFixLoop.mockImplementation(async (opts: { repoName: string }) => {
+      order.push(`start:${opts.repoName}`);
+      await new Promise((r) => setTimeout(r, 15));
+      order.push(`end:${opts.repoName}`);
+      return makeLoopResult();
+    });
+
+    const config = makeKovaConfig({
+      'repo-a': { path: '/tmp/repo-a', slug: 'owner/repo-a' },
+      'repo-b': { path: '/tmp/repo-b', slug: 'owner/repo-b' },
+    });
+
+    await runAutoMultiRepoParallel({ config });
+
+    // repo-a must fully complete before repo-b starts
+    const endA = order.indexOf('end:repo-a');
+    const startB = order.indexOf('start:repo-b');
+    expect(endA).toBeGreaterThanOrEqual(0);
+    expect(startB).toBeGreaterThanOrEqual(0);
+    expect(endA).toBeLessThan(startB);
+  });
+
+  it('keeps no-cross-repo-dep mode fully parallel (regression guard)', async () => {
+    // Two repos with NO cross-repo deps — must still run concurrently.
+    mockFetchIssues.mockResolvedValue([]);
+
+    const order: string[] = [];
+    mockFixLoop.mockImplementation(async (opts: { repoName: string }) => {
+      order.push(`start:${opts.repoName}`);
+      await new Promise((r) => setTimeout(r, 15));
+      order.push(`end:${opts.repoName}`);
+      return makeLoopResult();
+    });
+
+    const config = makeKovaConfig({
+      'repo-a': { path: '/tmp/repo-a', slug: 'owner/repo-a' },
+      'repo-b': { path: '/tmp/repo-b', slug: 'owner/repo-b' },
+    });
+
+    await runAutoMultiRepoParallel({ config });
+
+    // All starts come before all ends — concurrent.
+    expect(order.slice(0, 2).every((e) => e.startsWith('start:'))).toBe(true);
   });
 });

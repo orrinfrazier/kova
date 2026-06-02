@@ -12,6 +12,7 @@ import {
 } from './sandbox.js';
 
 const fullConfig = {
+  backend: 'docker',
   image: 'node:20-bookworm',
   extra_packages: [] as string[],
   restrict_network: false,
