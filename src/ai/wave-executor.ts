@@ -20,6 +20,7 @@ import { classifyError, isSpendingCapBehavior, KovaError } from './errors.js';
 import { createImportPreservationGuard, type ImportPreservationGuardOptions } from './import-preservation-guard.js';
 import { getModelString, resolveModelFromString, resolveWaveModel } from './models.js';
 import { isOllamaProvider, resolveOllamaApiKey } from './ollama.js';
+import { composeBeforeToolCallHooks, createPieceScopeGuard } from './piece-scope-guard.js';
 import { isRouterProvider, resolveRouterApiKey } from './router.js';
 import {
   type AgentMessage,
@@ -32,7 +33,7 @@ import {
   type ThinkingLevel,
 } from './runtime/index.js';
 import { createAfterToolCallHook, type ToolHookOptions } from './tool-hooks.js';
-import { type AIWaveName, DEFAULT_THINKING_LEVELS, getWaveTools } from './wave-tools.js';
+import { type AIWaveName, DEFAULT_THINKING_LEVELS, getWaveTools, PIECE_SCOPE_WAVES } from './wave-tools.js';
 
 export interface OutputFormat {
   type: 'json_schema';
@@ -160,6 +161,16 @@ export interface SpawnWaveAgentConfig {
    */
   importPreservationGuard?: Omit<ImportPreservationGuardOptions, 'cwd'> | false;
   /**
+   * Files this spec piece is allowed to modify (issue #250). Enforced only on the
+   * `impl` wave — `test` and `quality` waves ignore it (test needs to create new
+   * test files; quality needs to fix lint/type errors anywhere).
+   *
+   * Empty/undefined → no restriction (backward compat). When the impl wave runs
+   * with a non-empty list, Write/Edit calls to files outside the list are blocked
+   * with a clear "Cannot modify X — this piece only covers: [...]" message.
+   */
+  pieceFiles?: readonly string[] | undefined;
+  /**
    * Optional `EventBus` for structured observability events (kova#292). When
    * provided, the wave publishes `wave-enter`, `wave-output`, `steered`,
    * `aborted`, and `cost` events tagged with `eventContext`. When omitted, the
@@ -198,6 +209,7 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
     runtimeFactory = defaultAgentRuntimeFactory,
     destructiveEditGuard,
     importPreservationGuard,
+    pieceFiles,
     eventBus,
     eventContext,
   } = config;
@@ -226,29 +238,29 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
   const afterToolCallHook =
     toolResultTruncation === false ? undefined : createAfterToolCallHook(toolResultTruncation ?? undefined);
 
-  // beforeToolCall guards: a composition of (1) the destructive-edit guard,
-  // which rejects Write/Edit calls that would wipe out large portions of files,
-  // and (2) the import-preservation guard, which rejects edits that strip an
-  // import line whose names are still referenced elsewhere in the file. Both
-  // are active by default; both honor `allowDestructive: true` for opt-out.
-  const destructiveGuard =
+  // beforeToolCall guards: a composition of three hooks, all running in order with
+  // short-circuit on first block:
+  //   (1) Piece-scope guard (issue #250) — impl wave only. Rejects Write/Edit calls
+  //       to files outside the current spec piece's `files[]` list. Runs first so
+  //       out-of-scope edits get the piece-specific error message, not a generic one.
+  //   (2) Destructive-edit guard — rejects Write/Edit calls that would wipe out
+  //       large portions of files (size shrink, trivial-replacement deletes).
+  //   (3) Import-preservation guard — rejects edits that strip an import line whose
+  //       names are still referenced elsewhere in the file. Supports Rust `use`,
+  //       TS/JS `import`, Python `import`/`from`, and Go `import`.
+  // Guards (2) and (3) honor `allowDestructive: true` for per-call opt-out.
+  const scopeHook =
+    pieceFiles && pieceFiles.length > 0 && PIECE_SCOPE_WAVES.has(wave as AIWaveName)
+      ? createPieceScopeGuard({ cwd, pieceFiles })
+      : undefined;
+  const destructiveHook =
     destructiveEditGuard === false ? undefined : createDestructiveEditGuard({ cwd, ...(destructiveEditGuard ?? {}) });
-  const importGuard =
+  const importHook =
     importPreservationGuard === false
       ? undefined
       : createImportPreservationGuard({ cwd, ...(importPreservationGuard ?? {}) });
 
-  const guards = [destructiveGuard, importGuard].filter((g): g is NonNullable<typeof g> => g !== undefined);
-  const beforeToolCallHook =
-    guards.length === 0
-      ? undefined
-      : async (context: Parameters<NonNullable<typeof destructiveGuard>>[0]) => {
-          for (const g of guards) {
-            const r = await g(context);
-            if (r?.block) return r;
-          }
-          return undefined;
-        };
+  const beforeToolCallHook = composeBeforeToolCallHooks([scopeHook, destructiveHook, importHook]);
 
   // Construct via the AgentRuntime factory (kova#309). The default factory
   // wraps pi-mono Agent; kova#310 will extract a full PiAgentRuntime adapter.
@@ -707,6 +719,12 @@ export interface WaveOptions {
   thinkingLevel?: ThinkingLevel;
   customTools?: readonly import('../types/index.js').CustomTool[] | undefined;
   playwright?: { enabled: boolean } | undefined;
+  /**
+   * Files this spec piece is allowed to modify (issue #250). Forwarded to
+   * `spawnWaveAgent.pieceFiles`. Only enforced on the `impl` wave; ignored elsewhere.
+   * Empty/undefined → no restriction (backward compat).
+   */
+  pieceFiles?: readonly string[] | undefined;
 }
 
 export interface WaveExecutionResult {
@@ -732,6 +750,7 @@ export async function executeWave(options: WaveOptions): Promise<WaveExecutionRe
     thinkingLevel,
     customTools,
     playwright,
+    pieceFiles,
   } = options;
 
   const model = resolveWaveModel(modelTier);
@@ -751,6 +770,7 @@ export async function executeWave(options: WaveOptions): Promise<WaveExecutionRe
       ...(outputFormat && { outputFormat }),
       ...(maxTurns != null && { maxTurns }),
       ...(thinkingLevel != null && { thinkingLevel }),
+      ...(pieceFiles != null && { pieceFiles }),
     });
 
     const duration = Date.now() - startTime;

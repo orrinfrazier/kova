@@ -682,6 +682,199 @@ describe('spawnWaveAgent', () => {
   });
 });
 
+describe('spawnWaveAgent pieceFiles (issue #250 — impl-wave scope guard)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env.ANTHROPIC_API_KEY = 'test-key';
+    mockPrompt.mockResolvedValue(undefined);
+    mockSubscribe.mockImplementation(() => vi.fn());
+    setAgentResponse('done');
+  });
+
+  afterEach(() => {
+    delete process.env.ANTHROPIC_API_KEY;
+  });
+
+  it('installs a beforeToolCall hook on impl wave when pieceFiles is provided', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+
+    await spawnWaveAgent({
+      wave: 'impl',
+      model: 'claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Implement.',
+      cwd: '/tmp/test',
+      pieceFiles: ['src/foo.ts', 'src/bar.ts'],
+    });
+
+    const agentConfig = vi.mocked(Agent).mock.calls[0]?.[0] as {
+      beforeToolCall?: unknown;
+    };
+    expect(agentConfig.beforeToolCall).toBeDefined();
+    expect(typeof agentConfig.beforeToolCall).toBe('function');
+  });
+
+  it('impl-wave hook blocks out-of-scope edits and allows in-scope edits', async () => {
+    // End-to-end acceptance criteria from issue #250:
+    //   - impl edits in-scope file → allowed
+    //   - impl edits out-of-scope file → rejected with message
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+
+    await spawnWaveAgent({
+      wave: 'impl',
+      model: 'claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Implement.',
+      cwd: '/tmp/test',
+      pieceFiles: ['src/foo.ts'],
+    });
+
+    const agentConfig = vi.mocked(Agent).mock.calls[0]?.[0] as {
+      beforeToolCall: (ctx: unknown) => Promise<{ block: boolean; reason?: string } | undefined>;
+    };
+    const hook = agentConfig.beforeToolCall;
+
+    // In-scope edit allowed
+    const allowed = await hook({
+      toolCall: { name: 'write' },
+      args: { path: 'src/foo.ts', content: 'x' },
+    });
+    expect(allowed?.block).not.toBe(true);
+
+    // Out-of-scope edit blocked with descriptive message
+    const blocked = await hook({
+      toolCall: { name: 'write' },
+      args: { path: 'src/unrelated.ts', content: 'x' },
+    });
+    expect(blocked?.block).toBe(true);
+    expect(blocked?.reason).toContain('Cannot modify');
+    expect(blocked?.reason).toContain('src/unrelated.ts');
+  });
+
+  it('test wave does NOT enforce pieceFiles even when provided (must create new test files)', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+
+    await spawnWaveAgent({
+      wave: 'test',
+      model: 'claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Write tests.',
+      cwd: '/tmp/test',
+      pieceFiles: ['src/foo.ts'],
+      destructiveEditGuard: false,
+      importPreservationGuard: false,
+    });
+
+    const agentConfig = vi.mocked(Agent).mock.calls[0]?.[0] as {
+      beforeToolCall?: unknown;
+    };
+    // No scope hook on test wave; destructive guard is disabled → no hook at all
+    expect(agentConfig.beforeToolCall).toBeUndefined();
+  });
+
+  it('quality wave does NOT enforce pieceFiles (must fix lint/type errors anywhere)', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+
+    await spawnWaveAgent({
+      wave: 'quality',
+      model: 'claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Run quality.',
+      cwd: '/tmp/test',
+      pieceFiles: ['src/foo.ts'],
+      destructiveEditGuard: false,
+      importPreservationGuard: false,
+    });
+
+    const agentConfig = vi.mocked(Agent).mock.calls[0]?.[0] as {
+      beforeToolCall?: unknown;
+    };
+    expect(agentConfig.beforeToolCall).toBeUndefined();
+  });
+
+  it('empty pieceFiles ⇒ no scope hook installed (backward compat)', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+
+    await spawnWaveAgent({
+      wave: 'impl',
+      model: 'claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Implement.',
+      cwd: '/tmp/test',
+      pieceFiles: [],
+      destructiveEditGuard: false,
+      importPreservationGuard: false,
+    });
+
+    const agentConfig = vi.mocked(Agent).mock.calls[0]?.[0] as {
+      beforeToolCall?: unknown;
+    };
+    // With destructive guard disabled AND empty pieceFiles, no hook should be installed.
+    expect(agentConfig.beforeToolCall).toBeUndefined();
+  });
+
+  it('undefined pieceFiles ⇒ no scope hook (backward compat)', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+
+    await spawnWaveAgent({
+      wave: 'impl',
+      model: 'claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Implement.',
+      cwd: '/tmp/test',
+      destructiveEditGuard: false,
+      importPreservationGuard: false,
+    });
+
+    const agentConfig = vi.mocked(Agent).mock.calls[0]?.[0] as {
+      beforeToolCall?: unknown;
+    };
+    expect(agentConfig.beforeToolCall).toBeUndefined();
+  });
+
+  it('composes scope guard with destructive-edit guard on impl wave', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+
+    await spawnWaveAgent({
+      wave: 'impl',
+      model: 'claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Implement.',
+      cwd: '/tmp/test',
+      pieceFiles: ['src/foo.ts'],
+      // destructive guard not disabled → both hooks composed
+    });
+
+    const agentConfig = vi.mocked(Agent).mock.calls[0]?.[0] as {
+      beforeToolCall: (ctx: unknown) => Promise<{ block: boolean; reason?: string } | undefined>;
+    };
+    const hook = agentConfig.beforeToolCall;
+    expect(hook).toBeDefined();
+
+    // Out-of-scope edit: blocked by scope guard (runs first)
+    const blocked = await hook({
+      toolCall: { name: 'write' },
+      args: { path: 'src/unrelated.ts', content: 'x' },
+    });
+    expect(blocked?.block).toBe(true);
+    expect(blocked?.reason).toContain('Cannot modify');
+  });
+});
+
 describe('per-wave cost cap (maxCostUsd)', () => {
   let subscribeCb: ((event: unknown) => void) | undefined;
 
