@@ -137,6 +137,30 @@ describe('runAuto', () => {
     expect(mockFixLoop).toHaveBeenCalledWith(expect.objectContaining({ filter: 'bug' }));
   });
 
+  it('forwards milestone option to fixLoop', async () => {
+    mockFixLoop.mockResolvedValue(makeLoopResult());
+    const config = makeRepoConfig();
+
+    await runAuto({
+      repoPath: '/tmp/test',
+      repoName: 'test-repo',
+      config,
+      milestone: 'v0.35',
+    });
+
+    expect(mockFixLoop).toHaveBeenCalledWith(expect.objectContaining({ milestone: 'v0.35' }));
+  });
+
+  it('omits milestone when not provided', async () => {
+    mockFixLoop.mockResolvedValue(makeLoopResult());
+    const config = makeRepoConfig();
+
+    await runAuto({ repoPath: '/tmp/test', repoName: 'test-repo', config });
+
+    const call = mockFixLoop.mock.calls[0]?.[0] as { milestone?: string };
+    expect(call.milestone).toBeUndefined();
+  });
+
   it('CLI --max overrides config auto.max_per_run', async () => {
     mockFixLoop.mockResolvedValue(makeLoopResult());
     const config = makeRepoConfig({ auto: { max_per_run: 20 } });
@@ -325,6 +349,19 @@ describe('runAutoMultiRepo', () => {
 
     expect(mockFixLoop).toHaveBeenNthCalledWith(1, expect.objectContaining({ filter: 'override-filter' }));
     expect(mockFixLoop).toHaveBeenNthCalledWith(2, expect.objectContaining({ filter: 'override-filter' }));
+  });
+
+  it('CLI --milestone propagates to every repo', async () => {
+    mockFixLoop.mockResolvedValue(makeLoopResult());
+    const config = makeKovaConfig({
+      'repo-a': { path: '/tmp/repo-a' },
+      'repo-b': { path: '/tmp/repo-b' },
+    });
+
+    await runAutoMultiRepo({ config, milestone: 'v0.35' });
+
+    expect(mockFixLoop).toHaveBeenNthCalledWith(1, expect.objectContaining({ milestone: 'v0.35' }));
+    expect(mockFixLoop).toHaveBeenNthCalledWith(2, expect.objectContaining({ milestone: 'v0.35' }));
   });
 
   it('aggregates results across repos', async () => {

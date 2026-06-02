@@ -7,11 +7,16 @@ vi.mock('./run-report.js', () => ({
   writeRunReport: vi.fn().mockResolvedValue(undefined),
 }));
 
+const mockFetchIssues = vi.fn().mockResolvedValue([
+  { number: 1, title: 'Issue 1', body: 'body 1', labels: [], url: 'https://example.com/1' },
+  { number: 2, title: 'Issue 2', body: 'body 2', labels: [], url: 'https://example.com/2' },
+]);
+const mockFetchMilestoneCounts = vi.fn().mockResolvedValue({ open: 0, closed: 0 });
+
 vi.mock('../services/github.js', () => ({
-  fetchIssues: vi.fn().mockResolvedValue([
-    { number: 1, title: 'Issue 1', body: 'body 1', labels: [], url: 'https://example.com/1' },
-    { number: 2, title: 'Issue 2', body: 'body 2', labels: [], url: 'https://example.com/2' },
-  ]),
+  fetchIssues: (...args: unknown[]) => mockFetchIssues(...args),
+  fetchIssue: vi.fn(),
+  fetchMilestoneCounts: (...args: unknown[]) => mockFetchMilestoneCounts(...args),
   listOpenPRs: vi.fn().mockResolvedValue([]),
   createPR: vi.fn().mockResolvedValue('https://github.com/test/repo/pull/1'),
 }));
@@ -164,6 +169,58 @@ describe('fixLoop — budget cap', () => {
     });
     const output = consoleSpy.mock.calls.map((c) => c[0] as string).join('\n');
     expect(output).toMatch(/budget/i);
+    consoleSpy.mockRestore();
+  });
+});
+
+describe('fixLoop — milestone filter', () => {
+  it('passes milestone option through to fetchIssues', async () => {
+    mockFetchIssues.mockClear();
+    await fixLoop({
+      repoPath: '/tmp/test',
+      repoName: 'test-repo',
+      config: makeConfig(),
+      milestone: 'v0.35',
+    });
+    expect(mockFetchIssues).toHaveBeenCalledWith('/tmp/test', undefined, { milestone: 'v0.35' });
+  });
+
+  it('composes milestone with label filter', async () => {
+    mockFetchIssues.mockClear();
+    await fixLoop({
+      repoPath: '/tmp/test',
+      repoName: 'test-repo',
+      config: makeConfig(),
+      filter: 'bug',
+      milestone: 'v0.35',
+    });
+    expect(mockFetchIssues).toHaveBeenCalledWith('/tmp/test', 'bug', { milestone: 'v0.35' });
+  });
+
+  it('omits milestone option when not provided', async () => {
+    mockFetchIssues.mockClear();
+    await fixLoop({
+      repoPath: '/tmp/test',
+      repoName: 'test-repo',
+      config: makeConfig(),
+    });
+    // Either undefined options arg or { milestone: undefined } is acceptable —
+    // the test just guards against accidentally passing a milestone the user did
+    // not request.
+    const [, , opts] = mockFetchIssues.mock.calls[0] ?? [];
+    expect(opts?.milestone).toBeUndefined();
+  });
+
+  it('logs milestone filter info line when set', async () => {
+    const consoleSpy = vi.spyOn(console, 'log');
+    await fixLoop({
+      repoPath: '/tmp/test',
+      repoName: 'test-repo',
+      config: makeConfig(),
+      milestone: 'v0.35',
+    });
+    const output = consoleSpy.mock.calls.map((c) => c[0] as string).join('\n');
+    expect(output).toMatch(/[Mm]ilestone.*v0\.35/);
     consoleSpy.mockRestore();
   });
 });

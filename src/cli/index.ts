@@ -106,6 +106,7 @@ program
   .argument('[issue]', 'Issue number to fix')
   .option('--all', 'Fix all open issues in sequence')
   .option('--filter <label>', 'Filter issues by label')
+  .option('--milestone <title>', 'Scope the issue set to a milestone (loop mode)')
   .option('--max <n>', 'Maximum issues to fix', '10')
   .option('--repo <name-or-path>', 'Repository name (from config) or path', '.')
   .option('--fresh', 'Force restart — delete checkpoint and worktree')
@@ -118,6 +119,7 @@ program
       opts: {
         all?: boolean;
         filter?: string;
+        milestone?: string;
         max?: string;
         budget?: string;
         repo?: string;
@@ -140,6 +142,7 @@ program
           repoName,
           config,
           filter: opts.filter,
+          ...(opts.milestone !== undefined ? { milestone: opts.milestone } : {}),
           maxIssues: Number.parseInt(opts.max ?? '10', 10),
           budgetUsd: opts.budget ? Number.parseFloat(opts.budget) : undefined,
           force: opts.force,
@@ -203,6 +206,7 @@ program
   .command('auto')
   .description('Autonomous mode — iterates all repos in config, or single repo')
   .option('--filter <label>', 'Filter issues by label (overrides config)')
+  .option('--milestone <title>', 'Scope the issue set to a milestone (forwarded to every repo)')
   .option('--max <n>', 'Maximum issues to fix per repo (overrides config)')
   .option('--force', 'Override skip — re-fix issues with existing branches/PRs')
   .option('--repo <name-or-path>', 'Single repository name or path (skip multi-repo)')
@@ -211,6 +215,7 @@ program
   .action(
     async (opts: {
       filter?: string;
+      milestone?: string;
       max?: string;
       force?: boolean;
       repo?: string;
@@ -231,6 +236,7 @@ program
           repoName,
           config,
           filter: opts.filter,
+          ...(opts.milestone !== undefined ? { milestone: opts.milestone } : {}),
           max: opts.max ? Number.parseInt(opts.max, 10) : undefined,
           force: opts.force,
         });
@@ -258,6 +264,7 @@ program
         const result = await runAutoMultiRepoParallel({
           config: kovaConfig,
           filter: opts.filter,
+          ...(opts.milestone !== undefined ? { milestone: opts.milestone } : {}),
           max: opts.max ? Number.parseInt(opts.max, 10) : undefined,
           force: opts.force,
           budgetUsd: opts.budget ? Number.parseFloat(opts.budget) : undefined,
@@ -275,6 +282,7 @@ program
       const result = await runAutoMultiRepo({
         config: kovaConfig,
         filter: opts.filter,
+        ...(opts.milestone !== undefined ? { milestone: opts.milestone } : {}),
         max: opts.max ? Number.parseInt(opts.max, 10) : undefined,
         force: opts.force,
       });
