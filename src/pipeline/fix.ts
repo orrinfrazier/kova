@@ -2,6 +2,7 @@
 // Uses spawnWaveAgent() for standalone waves, runTILoop() for test+impl,
 // and runReviewLoop() for review. Handoffs persist after every wave.
 
+import { join as joinPath } from 'node:path';
 import { z } from 'zod';
 import { $ } from 'zx';
 import {
@@ -26,6 +27,7 @@ import { selectVariants, type VariantSelection } from '../services/ab-test.js';
 import { clearCheckpoint, loadCheckpoint, saveCheckpoint } from '../services/checkpoint.js';
 import { checkForConflicts } from '../services/conflict-check.js';
 import { resolveConflicts } from '../services/conflict-resolver.js';
+import { type EpisodeFTSRecord, EpisodeFTSStore } from '../services/episode-fts.js';
 import { collectPRFeedback } from '../services/feedback-collector.js';
 import { commentOnIssue, createPR, listOpenPRs } from '../services/github.js';
 import { appendHistoryEntry, readHistory } from '../services/history.js';
@@ -57,6 +59,7 @@ import {
 } from '../services/sandbox.js';
 import { scanForSecrets } from '../services/secrets-scan.js';
 import { shutdownRequested } from '../services/shutdown.js';
+import type { EpisodeContext, EpisodeRecord } from '../services/vectordb.js';
 import {
   buildEpisodeRecord,
   formatCodeChunks,
@@ -80,6 +83,7 @@ import {
   removeWorktree,
   worktreeExists,
 } from '../services/worktree.js';
+import type { EpisodicMemoryConfig } from '../types/config.js';
 import type {
   FailedPiece,
   FixState,
@@ -581,13 +585,37 @@ export async function fix(options: FixOptions): Promise<FixResult> {
     let failedEpisodicContext: string | undefined;
     if (config.episodes?.enabled) {
       const query = `${issue.title}\n\n${issue.body}`;
-      const episodes = await queryEpisodeContext(config.episodes, query, {
+      const vectorEpisodes = await queryEpisodeContext(config.episodes, query, {
         repo: repoName,
         language: tooling.language !== 'unknown' ? tooling.language : undefined,
       });
-      if (episodes.length > 0) {
-        episodicContext = formatEpisodes(episodes, repoName);
-        failedEpisodicContext = formatFailedEpisodes(episodes, repoName) || undefined;
+
+      // FTS5 keyword recall (#302): complements vector neighbors with exact
+      // matches on error strings, symbols, paths. Local + optional — absent
+      // DB returns []; disabled in config skips the path entirely.
+      const ftsEpisodes = queryFTSEpisodes(workDir, config.episodes, query);
+      const ftsAsContext = ftsEpisodes.map(ftsRecordToContext);
+
+      // Merge: FTS hits first (exact tokens are higher-signal for recall),
+      // then non-duplicate vector neighbors. Dedup key = `${repo}:${issue_number}`.
+      const seenKeys = new Set<string>();
+      const merged: typeof vectorEpisodes = [];
+      for (const ep of ftsAsContext) {
+        const key = `${ep.repo ?? ''}:${ep.issue_number}`;
+        if (seenKeys.has(key)) continue;
+        seenKeys.add(key);
+        merged.push(ep);
+      }
+      for (const ep of vectorEpisodes) {
+        const key = `${ep.repo ?? ''}:${ep.issue_number}`;
+        if (seenKeys.has(key)) continue;
+        seenKeys.add(key);
+        merged.push(ep);
+      }
+
+      if (merged.length > 0) {
+        episodicContext = formatEpisodes(merged, repoName);
+        failedEpisodicContext = formatFailedEpisodes(merged, repoName) || undefined;
       }
     }
 
@@ -1524,6 +1552,11 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       await recordEpisode(config.episodes, episode).catch((err) => {
         flog.warn(`Failed to record episode: ${err instanceof Error ? err.message : String(err)}`);
       });
+
+      // Mirror the episode to the local FTS5 index (#302). Optional, local,
+      // best-effort — any failure is logged-and-swallowed so it never breaks
+      // the existing REST recordEpisode path.
+      upsertEpisodeFTS(workDir, config.episodes, episode, flog);
     }
 
     // PR feedback collection: collect review comments after ship
@@ -1606,4 +1639,119 @@ function formatSkipComment(assess: AssessResult, _issue: Issue): string {
     '### Recommendation',
     recommendation,
   ].join('\n');
+}
+
+/* ================================================================== */
+/*  Local FTS5 episode recall (#302) — helpers                         */
+/* ================================================================== */
+
+/**
+ * Resolve the on-disk path for the local FTS5 episode index. Honors an
+ * explicit override on `config.episodes.fts.path` if present; otherwise
+ * defaults to `{workDir}/.kova/episode-fts.db`.
+ */
+function resolveFTSPath(workDir: string, config: EpisodicMemoryConfig): string {
+  return config.fts?.path ?? joinPath(workDir, '.kova', 'episode-fts.db');
+}
+
+/**
+ * Whether the FTS5 sidecar is enabled. Default is on (treat `fts === undefined`
+ * as enabled) — explicit opt-out via `fts: { enabled: false }`.
+ */
+function ftsEnabled(config: EpisodicMemoryConfig): boolean {
+  if (config.fts === undefined) return true;
+  return config.fts.enabled !== false;
+}
+
+/**
+ * Open the local FTS5 store, run `searchEpisodesFTS(query)`, return the rows.
+ * Best-effort: any open/query failure returns []. Absent DB is the normal
+ * first-run state and produces a silent empty result (no warning log).
+ */
+function queryFTSEpisodes(workDir: string, config: EpisodicMemoryConfig, query: string): EpisodeFTSRecord[] {
+  if (!ftsEnabled(config)) return [];
+  const dbPath = resolveFTSPath(workDir, config);
+  let store: EpisodeFTSStore | null = null;
+  try {
+    store = new EpisodeFTSStore(dbPath);
+    return store.searchEpisodesFTS(query, config.max_episodes);
+  } catch {
+    return [];
+  } finally {
+    store?.close();
+  }
+}
+
+/**
+ * Adapt an `EpisodeFTSRecord` into the `EpisodeContext` shape expected by
+ * `formatEpisodes` / `formatFailedEpisodes`. Maps `outcome` to the EpisodeContext
+ * union (`success` | `partial` | `failure`) using the same convention as
+ * `buildEpisodeRecord`. Score is a synthetic constant so all FTS hits sort
+ * after each other purely by insertion order (which is BM25 order from the
+ * store).
+ */
+function ftsRecordToContext(r: EpisodeFTSRecord): EpisodeContext {
+  let outcome: EpisodeContext['outcome'];
+  switch (r.outcome) {
+    case 'pr_created':
+      outcome = 'success';
+      break;
+    case 'failed':
+      outcome = 'failure';
+      break;
+    case 'skipped':
+      outcome = 'partial';
+      break;
+    case 'success':
+    case 'partial':
+    case 'failure':
+      outcome = r.outcome;
+      break;
+    default:
+      outcome = 'partial';
+  }
+  return {
+    issue_number: r.issue_number,
+    issue_title: r.issue_title,
+    approach: r.approach,
+    outcome,
+    learnings: r.learnings ?? '',
+    score: 1,
+    repo: r.repo,
+  };
+}
+
+/**
+ * Mirror an `EpisodeRecord` into the FTS5 index. Best-effort: open/write
+ * failures are logged and swallowed so they never break the existing
+ * REST-based recordEpisode path.
+ */
+function upsertEpisodeFTS(
+  workDir: string,
+  config: EpisodicMemoryConfig,
+  episode: EpisodeRecord,
+  logger: { warn: (msg: string) => void },
+): void {
+  if (!ftsEnabled(config)) return;
+  const dbPath = resolveFTSPath(workDir, config);
+  let store: EpisodeFTSStore | null = null;
+  try {
+    store = new EpisodeFTSStore(dbPath);
+    store.upsertEpisode({
+      issue_number: episode.issue_number,
+      repo: episode.repo,
+      issue_title: episode.issue_title,
+      approach: episode.approach,
+      files_changed: episode.files_changed,
+      outcome: episode.outcome,
+      timestamp: episode.timestamp,
+      ...(episode.learnings != null && { learnings: episode.learnings }),
+      ...(episode.error_message != null && { error_message: episode.error_message }),
+    });
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    logger.warn(`[episode-fts] Failed to upsert episode: ${msg}`);
+  } finally {
+    store?.close();
+  }
 }
