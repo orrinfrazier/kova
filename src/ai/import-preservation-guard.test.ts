@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { BeforeToolCallContext } from '@mariozechner/pi-agent-core';
+import type { BeforeToolCallContext } from '@earendil-works/pi-agent-core';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createImportPreservationGuard } from './import-preservation-guard.js';
 

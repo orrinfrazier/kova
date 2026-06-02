@@ -15,7 +15,7 @@
 
 import { statSync } from 'node:fs';
 import { isAbsolute, resolve } from 'node:path';
-import type { BeforeToolCallContext, BeforeToolCallResult } from '@mariozechner/pi-agent-core';
+import type { BeforeToolCallContext, BeforeToolCallResult } from '@earendil-works/pi-agent-core';
 
 /** Default minimum ratio for Write tool: new content must be >= this fraction of original size. */
 export const DEFAULT_MIN_WRITE_RATIO = 0.6;

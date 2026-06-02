@@ -1,4 +1,4 @@
-import { getModel, getProviders, type Model, registerBuiltInApiProviders } from '@mariozechner/pi-ai';
+import { getModel, getProviders, type Model, registerBuiltInApiProviders } from '@earendil-works/pi-ai';
 import type {
   ModelTier,
   OllamaProvider,

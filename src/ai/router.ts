@@ -2,7 +2,7 @@
 // The router accepts Anthropic API format and routes to any backend provider.
 // Controlled by ANTHROPIC_BASE_URL (proxy endpoint) and ROUTER_DEFAULT (model selection).
 
-import type { Model } from '@mariozechner/pi-ai';
+import type { Model } from '@earendil-works/pi-ai';
 
 /** Check whether router mode is active (ANTHROPIC_BASE_URL is set). */
 export function isRouterEnabled(): boolean {

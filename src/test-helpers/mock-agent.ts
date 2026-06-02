@@ -4,7 +4,7 @@
  * Usage in tests:
  *   import { createMockAgent, setupResponseSequence, CANNED } from '../test-helpers/mock-agent.js';
  *   const mockConstructor = vi.fn();
- *   vi.mock('@mariozechner/pi-agent-core', () => ({ Agent: mockConstructor }));
+ *   vi.mock('@earendil-works/pi-agent-core', () => ({ Agent: mockConstructor }));
  *   setupResponseSequence(mockConstructor, [{ structuredOutput: CANNED.ASSESS_PASS }]);
  */
 

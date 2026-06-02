@@ -1,6 +1,6 @@
 // Verifies wave-executor publishes lifecycle events to the EventBus when one is provided,
 // without changing the outcome behavior.
-import type { AgentTool } from '@mariozechner/pi-agent-core';
+import type { AgentTool } from '@earendil-works/pi-agent-core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EventBus } from './bus.js';
 import type { KovaEvent } from './schema.js';
@@ -22,7 +22,7 @@ let mockAgentState = {
   errorMessage: undefined as string | undefined,
 };
 
-vi.mock('@mariozechner/pi-agent-core', () => {
+vi.mock('@earendil-works/pi-agent-core', () => {
   const MockAgent = vi.fn();
   MockAgent.mockImplementation(function (this: Record<string, unknown>) {
     Object.assign(this, {
@@ -39,7 +39,7 @@ vi.mock('@mariozechner/pi-agent-core', () => {
   return { Agent: MockAgent };
 });
 
-vi.mock('@mariozechner/pi-ai', () => ({
+vi.mock('@earendil-works/pi-ai', () => ({
   streamSimple: vi.fn(),
   getModel: vi.fn().mockReturnValue({
     id: 'claude-sonnet-4-6',
@@ -51,7 +51,7 @@ vi.mock('@mariozechner/pi-ai', () => ({
   registerBuiltInApiProviders: vi.fn(),
 }));
 
-vi.mock('@mariozechner/pi-coding-agent', () => ({
+vi.mock('@earendil-works/pi-coding-agent', () => ({
   convertToLlm: vi.fn(),
   createReadTool: vi.fn().mockReturnValue({ name: 'read' }),
   createBashTool: vi.fn().mockReturnValue({ name: 'bash' }),

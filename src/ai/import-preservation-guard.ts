@@ -23,7 +23,7 @@
 
 import { readFileSync, statSync } from 'node:fs';
 import { extname, isAbsolute, resolve } from 'node:path';
-import type { BeforeToolCallContext, BeforeToolCallResult } from '@mariozechner/pi-agent-core';
+import type { BeforeToolCallContext, BeforeToolCallResult } from '@earendil-works/pi-agent-core';
 
 export interface ImportPreservationGuardOptions {
   /** Working directory for resolving relative paths in tool args. */
