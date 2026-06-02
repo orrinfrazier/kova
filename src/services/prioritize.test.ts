@@ -182,6 +182,77 @@ describe('scoreIssue — quick win bonus (+5)', () => {
   });
 });
 
+describe('scoreIssue — freshness bonus (+10 when 30+ days stale)', () => {
+  // Fixed "now" reference so tests are deterministic.
+  const NOW = new Date('2026-06-01T12:00:00.000Z').getTime();
+
+  function daysAgo(days: number): string {
+    return new Date(NOW - days * 24 * 60 * 60 * 1000).toISOString();
+  }
+
+  it('adds +10 when updatedAt is 30 days old (boundary)', () => {
+    const issue = makeIssue({ number: 1, labels: ['medium'], updatedAt: daysAgo(30) });
+    expect(scoreIssue(issue, [], NOW)).toBe(40); // 30 + 10
+  });
+
+  it('adds +10 when updatedAt is 60 days old (well past threshold)', () => {
+    const issue = makeIssue({ number: 1, labels: ['medium'], updatedAt: daysAgo(60) });
+    expect(scoreIssue(issue, [], NOW)).toBe(40);
+  });
+
+  it('does not add +10 when updatedAt is 29 days old (under threshold)', () => {
+    const issue = makeIssue({ number: 1, labels: ['medium'], updatedAt: daysAgo(29) });
+    expect(scoreIssue(issue, [], NOW)).toBe(30);
+  });
+
+  it('does not add +10 when updatedAt is very recent', () => {
+    const issue = makeIssue({ number: 1, labels: ['medium'], updatedAt: daysAgo(1) });
+    expect(scoreIssue(issue, [], NOW)).toBe(30);
+  });
+
+  it('falls back to createdAt when updatedAt is missing', () => {
+    const issue = makeIssue({ number: 1, labels: ['medium'], createdAt: daysAgo(45) });
+    expect(scoreIssue(issue, [], NOW)).toBe(40); // stale by createdAt
+  });
+
+  it('returns 0 when both createdAt and updatedAt are missing', () => {
+    const issue = makeIssue({ number: 1, labels: ['medium'] });
+    expect(scoreIssue(issue, [], NOW)).toBe(30);
+  });
+
+  it('prefers updatedAt over createdAt when both present (fresh updatedAt → no bonus)', () => {
+    const issue = makeIssue({
+      number: 1,
+      labels: ['medium'],
+      createdAt: daysAgo(365),
+      updatedAt: daysAgo(2),
+    });
+    expect(scoreIssue(issue, [], NOW)).toBe(30); // recent updatedAt wins
+  });
+
+  it('prefers updatedAt over createdAt when both present (stale updatedAt → bonus)', () => {
+    const issue = makeIssue({
+      number: 1,
+      labels: ['medium'],
+      createdAt: daysAgo(2),
+      updatedAt: daysAgo(45),
+    });
+    expect(scoreIssue(issue, [], NOW)).toBe(40);
+  });
+
+  it('handles malformed ISO strings gracefully (no bonus, no throw)', () => {
+    const issue = makeIssue({ number: 1, labels: ['medium'], updatedAt: 'not-a-date' });
+    expect(() => scoreIssue(issue, [], NOW)).not.toThrow();
+    expect(scoreIssue(issue, [], NOW)).toBe(30);
+  });
+
+  it('uses Date.now() when no explicit now is passed (smoke test)', () => {
+    const longAgo = new Date(Date.now() - 100 * 24 * 60 * 60 * 1000).toISOString();
+    const issue = makeIssue({ number: 1, labels: ['medium'], updatedAt: longAgo });
+    expect(scoreIssue(issue, [])).toBe(40);
+  });
+});
+
 describe('scoreIssue — rescope bonus (+20)', () => {
   it('adds +20 for rescoped label', () => {
     const issue = makeIssue({ number: 1, labels: ['medium', 'rescoped'] });
@@ -229,6 +300,7 @@ describe('prioritizeIssues — breakdown surfaced', () => {
     expect(result[0]?.breakdown.base_priority).toBe(80);
     expect(result[0]?.breakdown.dependency_bonus).toBe(0);
     expect(result[0]?.breakdown.blocked_penalty).toBe(0);
+    expect(result[0]?.breakdown.freshness_bonus).toBe(0);
     expect(result[0]?.breakdown.quick_win_bonus).toBe(0);
     expect(result[0]?.breakdown.rescope_bonus).toBe(0);
   });
@@ -244,9 +316,19 @@ describe('prioritizeIssues — breakdown surfaced', () => {
       first.breakdown.base_priority +
       first.breakdown.dependency_bonus +
       first.breakdown.blocked_penalty +
+      first.breakdown.freshness_bonus +
       first.breakdown.quick_win_bonus +
       first.breakdown.rescope_bonus;
     expect(sum).toBe(first.score);
+  });
+
+  it('surfaces freshness_bonus in breakdown for stale issues', () => {
+    const NOW = new Date('2026-06-01T12:00:00.000Z').getTime();
+    const longAgo = new Date(NOW - 90 * 24 * 60 * 60 * 1000).toISOString();
+    const issues = [makeIssue({ number: 1, labels: ['priority:medium'], updatedAt: longAgo })];
+    const result = prioritizeIssues(issues, NOW);
+    expect(result[0]?.breakdown.freshness_bonus).toBe(10);
+    expect(result[0]?.score).toBe(40); // 30 + 10
   });
 
   it('breakdown reflects dependency bonus per dependent', () => {

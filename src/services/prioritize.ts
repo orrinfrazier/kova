@@ -11,6 +11,12 @@ export interface ScoreBreakdown {
   base_priority: number;
   dependency_bonus: number;
   blocked_penalty: number;
+  /**
+   * Freshness factor (issue #286): +10 when an open issue has gone
+   * `FRESHNESS_STALE_DAYS` (30) days without activity. Bumps stale issues so
+   * they don't get stranded behind a wall of fresher work.
+   */
+  freshness_bonus: number;
   quick_win_bonus: number;
   rescope_bonus: number;
 }
@@ -38,6 +44,9 @@ const DEFAULT_PRIORITY = 30;
 const DEPENDENCY_BONUS_PER_DEPENDENT = 5;
 const DEPENDENCY_BONUS_CAP_DEPENDENTS = 5; // +25 max
 const BLOCKED_PENALTY = -10;
+const FRESHNESS_BONUS = 10;
+const FRESHNESS_STALE_DAYS = 30;
+const FRESHNESS_STALE_MS = FRESHNESS_STALE_DAYS * 24 * 60 * 60 * 1000;
 const QUICK_WIN_BONUS = 5;
 const RESCOPE_BONUS = 20;
 
@@ -122,25 +131,51 @@ function rescopeBonus(issue: Issue): number {
   return hit ? RESCOPE_BONUS : 0;
 }
 
-/** Compute the per-factor breakdown for an issue. */
-export function scoreBreakdown(issue: Issue, allIssues: Issue[]): ScoreBreakdown {
+/**
+ * Award `freshness_bonus` (+10) when an issue has gone ≥30 days without
+ * activity. Prefers `updatedAt`; falls back to `createdAt` when `updatedAt`
+ * is missing (e.g. legacy fixtures). Returns 0 if neither timestamp is set
+ * or if either fails to parse — the formula degrades silently for
+ * unrequested fields rather than throwing.
+ *
+ * Canonical formula: see `~/.claude/skills/issue-score/SKILL.md §Formula`.
+ */
+function freshnessBonus(issue: Issue, now: number): number {
+  const ts = issue.updatedAt ?? issue.createdAt;
+  if (ts === undefined) return 0;
+  const parsed = Date.parse(ts);
+  if (Number.isNaN(parsed)) return 0;
+  const ageMs = now - parsed;
+  return ageMs >= FRESHNESS_STALE_MS ? FRESHNESS_BONUS : 0;
+}
+
+/**
+ * Compute the per-factor breakdown for an issue.
+ *
+ * `now` is injectable for testability — production callers should leave it
+ * unset so `Date.now()` is used at call time.
+ */
+export function scoreBreakdown(issue: Issue, allIssues: Issue[], now: number = Date.now()): ScoreBreakdown {
   return {
     base_priority: basePriority(issue),
     dependency_bonus: dependencyBonus(issue, allIssues),
     blocked_penalty: blockedPenalty(issue, allIssues),
+    freshness_bonus: freshnessBonus(issue, now),
     quick_win_bonus: quickWinBonus(issue),
     rescope_bonus: rescopeBonus(issue),
   };
 }
 
 /** Compute priority score for a single issue (sum of breakdown factors). */
-export function scoreIssue(issue: Issue, allIssues: Issue[]): number {
-  const b = scoreBreakdown(issue, allIssues);
-  return b.base_priority + b.dependency_bonus + b.blocked_penalty + b.quick_win_bonus + b.rescope_bonus;
+export function scoreIssue(issue: Issue, allIssues: Issue[], now: number = Date.now()): number {
+  const b = scoreBreakdown(issue, allIssues, now);
+  return (
+    b.base_priority + b.dependency_bonus + b.blocked_penalty + b.freshness_bonus + b.quick_win_bonus + b.rescope_bonus
+  );
 }
 
 /** Prioritize issues: topological sort by dependencies, then by score descending. */
-export function prioritizeIssues(issues: Issue[]): PrioritizedIssue[] {
+export function prioritizeIssues(issues: Issue[], now: number = Date.now()): PrioritizedIssue[] {
   if (issues.length === 0) return [];
 
   const issueMap = new Map<number, Issue>();
@@ -171,13 +206,14 @@ export function prioritizeIssues(issues: Issue[]): PrioritizedIssue[] {
   const breakdowns = new Map<number, ScoreBreakdown>();
   const scores = new Map<number, number>();
   for (const issue of issues) {
-    const breakdown = scoreBreakdown(issue, issues);
+    const breakdown = scoreBreakdown(issue, issues, now);
     breakdowns.set(issue.number, breakdown);
     scores.set(
       issue.number,
       breakdown.base_priority +
         breakdown.dependency_bonus +
         breakdown.blocked_penalty +
+        breakdown.freshness_bonus +
         breakdown.quick_win_bonus +
         breakdown.rescope_bonus,
     );
@@ -221,7 +257,7 @@ export function prioritizeIssues(issues: Issue[]): PrioritizedIssue[] {
   return sorted.flatMap((num) => {
     const issue = issueMap.get(num);
     if (!issue) return [];
-    const breakdown = breakdowns.get(num) ?? scoreBreakdown(issue, issues);
+    const breakdown = breakdowns.get(num) ?? scoreBreakdown(issue, issues, now);
     return [
       {
         issue,
