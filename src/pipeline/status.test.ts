@@ -24,7 +24,14 @@ const SAMPLE_CONFIG: KovaConfig = {
   repos: {
     'my-app': {
       path: '/home/user/dev/my-app',
-      rules: { coverage: 80, auto_merge: false, max_issues_per_run: 10, ci_merge: 'require' as const, concurrency: 1 },
+      rules: {
+        coverage: 80,
+        auto_merge: false,
+        max_issues_per_run: 10,
+        ci_merge: 'require' as const,
+        review_merge: 'require' as const,
+        concurrency: 1,
+      },
       model: {
         assess: 'large',
         spec: 'large',
@@ -38,7 +45,14 @@ const SAMPLE_CONFIG: KovaConfig = {
     },
     'my-lib': {
       path: '/home/user/dev/my-lib',
-      rules: { coverage: 80, auto_merge: false, max_issues_per_run: 10, ci_merge: 'require' as const, concurrency: 1 },
+      rules: {
+        coverage: 80,
+        auto_merge: false,
+        max_issues_per_run: 10,
+        ci_merge: 'require' as const,
+        review_merge: 'require' as const,
+        concurrency: 1,
+      },
       model: {
         assess: 'large',
         spec: 'large',
