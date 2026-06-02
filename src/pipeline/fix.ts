@@ -107,6 +107,7 @@ import {
   type TestRunner,
 } from './loops.js';
 import { loadPrompt, resolvePromptsDir } from './prompts.js';
+import { loadWaveSkills } from './skills-loader.js';
 import {
   formatOverlapFeedback,
   formatPendingPRConflictFeedback,
@@ -202,6 +203,14 @@ export function waveFallbackModel(
  * host filesystem. Without `sandbox`, the wave runs in-process on the host (the
  * worktree/none isolation modes).
  */
+/** Cached per-run skills + the configured enabledWaves list. Loaded once at the
+ *  top of `fix()` and threaded through `spawnWave` so each wave's loadPrompt
+ *  call gets the same skill set without re-scanning the filesystem (issue #298). */
+interface FixRunSkills {
+  skills: readonly import('@earendil-works/pi-coding-agent').Skill[];
+  enabledWaves: readonly import('../types/index.js').SkillWaveName[];
+}
+
 async function spawnWave<T>(
   wave: FixAIWaveName,
   workDir: string,
@@ -215,6 +224,7 @@ async function spawnWave<T>(
   projectContext?: ProjectContext,
   abTestVariant?: string,
   sandbox?: SandboxContext | undefined,
+  runSkills?: FixRunSkills | undefined,
 ): Promise<{ handoff: WaveHandoff<T>; promptHash: string }> {
   const model = resolveWaveModel(config.model[wave]);
   const mcpTools =
@@ -224,6 +234,9 @@ async function spawnWave<T>(
   const tools = getWaveTools(wave, workDir, { customTools: config.tools, mcpTools, playwright });
   const systemPrompt = await loadPrompt(wave, config.tools, projectContext, promptsDir, {
     abTestVariant,
+    ...(runSkills != null && {
+      skills: { skills: runSkills.skills, enabledWaves: runSkills.enabledWaves },
+    }),
   });
   const promptHash = hashPrompt(systemPrompt);
 
@@ -337,6 +350,21 @@ export async function fix(options: FixOptions): Promise<FixResult> {
   const worktree = config.isolation === 'worktree' ? await createWorktree(repoPath, issue.number) : undefined;
   const workDir = worktree?.path ?? repoPath;
   const resolvedPromptsDir = resolvePromptsDir(repoPath, config.prompts_dir);
+
+  // Issue #298: load SKILL.md skills once per run. Resolved against `repoPath`
+  // (not the worktree) so `.kova/skills` is found in the user's repo root, and
+  // `~/.claude/skills` is expanded for user-global skills. When `config.skills`
+  // is undefined, skip entirely — backward-compat with repos that don't opt in.
+  const runSkills: FixRunSkills | undefined = await (async () => {
+    if (!config.skills) return undefined;
+    const skills = await loadWaveSkills({
+      dirs: config.skills.dirs,
+      cwd: repoPath,
+    });
+    if (skills.length === 0) return undefined;
+    flog.info(`Loaded ${skills.length} skill(s) from ${config.skills.dirs.length} dir(s)`);
+    return { skills, enabledWaves: config.skills.enabled_waves };
+  })();
 
   // Docker sandbox: start container with resource limits
   let sandboxContainerId: string | undefined;
@@ -540,6 +568,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         projectContext,
         abTestVariants?.assess,
         sandboxContext,
+        runSkills,
       );
       await saveHandoff(workDir, handoff);
       promptHashes.assess = promptHash;
@@ -607,6 +636,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         projectContext,
         abTestVariants?.spec,
         sandboxContext,
+        runSkills,
       );
       await saveHandoff(workDir, handoff);
       promptHashes.spec = promptHash;
@@ -695,6 +725,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           projectContext,
           abTestVariants?.spec,
           sandboxContext,
+          runSkills,
         );
 
         await saveHandoff(workDir, retryHandoff);
@@ -794,6 +825,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           projectContext,
           abTestVariants?.spec,
           sandboxContext,
+          runSkills,
         );
 
         await saveHandoff(workDir, emptyRetryHandoff);
@@ -883,6 +915,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           projectContext,
           abTestVariants?.spec,
           sandboxContext,
+          runSkills,
         );
         await saveHandoff(workDir, specHandoff);
         promptHashes.spec = specPromptHash;
@@ -942,6 +975,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         projectContext,
         abTestVariants?.quality,
         sandboxContext,
+        runSkills,
       );
       await saveHandoff(workDir, handoff);
       promptHashes.quality = promptHash;

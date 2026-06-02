@@ -22,6 +22,7 @@ import type { BrainstormIssue, BrainstormResult, RepoConfig } from '../types/ind
 import { BrainstormResultSchema } from '../types/index.js';
 import { log } from '../utils/logger.js';
 import { loadPrompt, resolvePromptsDir } from './prompts.js';
+import { loadWaveSkills } from './skills-loader.js';
 
 function toOutputFormat(schema: z.ZodType): OutputFormat {
   return {
@@ -59,7 +60,17 @@ export async function brainstorm(options: BrainstormOptions): Promise<Brainstorm
   const tools = getWaveTools('brainstorm', repoPath);
   const projectContext = await loadProjectContext(repoPath);
   const resolvedPromptsDir = resolvePromptsDir(repoPath, config.prompts_dir);
-  const systemPrompt = await loadPrompt('brainstorm', undefined, projectContext, resolvedPromptsDir);
+
+  // Issue #298: surface SKILL.md skills to the brainstorm system prompt when
+  // configured. Mirrors the loading pattern in `fix()` — undefined config or an
+  // empty skill set leaves the prompt unchanged (backward compat).
+  const skills = config.skills ? await loadWaveSkills({ dirs: config.skills.dirs, cwd: repoPath }) : [];
+  const systemPrompt = await loadPrompt('brainstorm', undefined, projectContext, resolvedPromptsDir, {
+    ...(skills.length > 0 &&
+      config.skills && {
+        skills: { skills, enabledWaves: config.skills.enabled_waves },
+      }),
+  });
   const thinkingLevel = resolveThinkingLevel(config, 'brainstorm');
 
   const focusAreas = focus ?? config.rules.focus;
