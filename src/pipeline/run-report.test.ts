@@ -72,6 +72,8 @@ function makeLoopResult(overrides?: Partial<LoopResult>): LoopResult {
       { issue: issue2, result: makeSuccessResult(issue2) },
       { issue: issue3, result: makeFailureResult(issue3, 'Quality gates failed after 3 retries') },
     ],
+    outcomes: [],
+    skippedByReason: {},
     ...overrides,
   };
 }

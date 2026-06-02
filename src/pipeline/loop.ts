@@ -26,10 +26,35 @@ export interface LoopOptions {
    */
   milestone?: string | undefined;
   maxIssues?: number | undefined;
+  /**
+   * Override for `gh issue list --limit`. Issue #288 — decoupled from the
+   * processing cap (`maxIssues` / `max_issues_per_run`) so the loop can fetch
+   * a wider window and record every fetched issue in the coverage ledger.
+   * Falls back to `config.rules.gh_fetch_limit`, then to the github.ts default.
+   */
+  fetchLimit?: number | undefined;
   budgetUsd?: number | undefined;
   force?: boolean | undefined;
   budgetTracker?: SharedBudgetTracker | undefined;
 }
+
+/**
+ * Per-issue outcome record — the "coverage ledger" entry (issue #288).
+ * Every issue returned from `fetchIssues` produces one of these so nothing
+ * can be silently dropped between fetch and run-report.
+ */
+export type IssueOutcomeStatus = 'succeeded' | 'failed' | 'skipped:over-limit' | 'skipped:budget' | 'skipped:shutdown';
+
+export interface IssueOutcome {
+  issueNumber: number;
+  title?: string;
+  status: IssueOutcomeStatus;
+  /** Optional human-readable note (e.g. failure error message). */
+  reason?: string;
+}
+
+/** Skip-reason key for the run report breakdown. */
+export type SkipReasonKey = 'over-limit' | 'budget' | 'shutdown';
 
 export interface LoopResult {
   total: number;
@@ -42,6 +67,18 @@ export interface LoopResult {
   budgetExceeded: boolean;
   startedAt: string;
   results: Array<{ issue: Issue; result: FixResult }>;
+  /**
+   * Coverage ledger (issue #288): one entry per FETCHED issue, regardless of
+   * whether it was processed, skipped over-limit, skipped on budget, or skipped
+   * on shutdown. `results` only carries the processed subset; `outcomes` is the
+   * full accounting that proves no targeted issue was silently dropped.
+   */
+  outcomes: IssueOutcome[];
+  /**
+   * Per-reason counts derived from `outcomes`. `skipped` equals the sum of
+   * these values.
+   */
+  skippedByReason: Partial<Record<SkipReasonKey, number>>;
 }
 
 function aggregateWaveCosts(waveResults: Partial<Record<string, WaveResult>>): {
@@ -74,13 +111,28 @@ function emptyResult(startedAt: string): LoopResult {
     budgetExceeded: false,
     startedAt,
     results: [],
+    outcomes: [],
+    skippedByReason: {},
   };
 }
 
+/**
+ * Map a scheduler "skipped: …" error to the canonical ledger status. Returns
+ * undefined if the error is not a recognized skip reason (i.e. it's a real fix
+ * failure). Issue #288.
+ */
+function classifyScheduledSkip(error: string | undefined): IssueOutcomeStatus | undefined {
+  if (!error) return undefined;
+  if (error.includes('budget exceeded')) return 'skipped:budget';
+  if (error.includes('shutdown requested')) return 'skipped:shutdown';
+  return undefined;
+}
+
 export async function fixLoop(options: LoopOptions): Promise<LoopResult> {
-  const { repoPath, repoName, config, filter, milestone, maxIssues, budgetUsd, budgetTracker } = options;
+  const { repoPath, repoName, config, filter, milestone, maxIssues, fetchLimit, budgetUsd, budgetTracker } = options;
   const startedAt = new Date().toISOString();
   const limit = maxIssues ?? config.auto?.max_per_run ?? config.rules.max_issues_per_run;
+  const effectiveFetchLimit = fetchLimit ?? config.rules.gh_fetch_limit;
   const budget = budgetTracker ? undefined : (budgetUsd ?? config.rules.budget_usd);
   const concurrency = config.rules.concurrency ?? 1;
   log.info(`Fetching open issues for ${repoName}...`);
@@ -92,7 +144,10 @@ export async function fixLoop(options: LoopOptions): Promise<LoopResult> {
   } else if (budget !== undefined) {
     log.info(`Budget cap: $${budget.toFixed(2)}`);
   }
-  const issues = await fetchIssues(repoPath, filter, { milestone });
+  const issues = await fetchIssues(repoPath, filter, {
+    ...(milestone !== undefined ? { milestone } : {}),
+    ...(effectiveFetchLimit !== undefined ? { fetchLimit: effectiveFetchLimit } : {}),
+  });
   if (issues.length === 0) {
     log.info('No open issues found.');
     return emptyResult(startedAt);
@@ -100,6 +155,10 @@ export async function fixLoop(options: LoopOptions): Promise<LoopResult> {
   log.info(`Found ${issues.length} issues, prioritizing...`);
   const prioritized = prioritizeIssues(issues);
   const toFix = prioritized.slice(0, limit).map((p) => p.issue);
+  const overLimit = prioritized.slice(limit).map((p) => p.issue);
+  if (overLimit.length > 0) {
+    log.info(`Over-limit: ${overLimit.length} fetched issues will not be attempted (max_issues_per_run=${limit})`);
+  }
   log.info(`Processing ${toFix.length} issues (prioritized by score + dependencies)`);
 
   const pendingPRs: OpenPR[] = await fetchOpenPRsDetailed(repoPath).catch((err) => {
@@ -174,7 +233,7 @@ export async function fixLoop(options: LoopOptions): Promise<LoopResult> {
     footprints.set(issue.number, extractFootprint(issue));
   }
 
-  await runFixesWithConcurrency(toFix, tiers, executor, {
+  const schedulerResults = await runFixesWithConcurrency(toFix, tiers, executor, {
     concurrency,
     ...(budget !== undefined ? { budget } : {}),
     costAccumulator: accumulator,
@@ -199,6 +258,51 @@ export async function fixLoop(options: LoopOptions): Promise<LoopResult> {
     }
   }
 
+  // Coverage ledger (issue #288): one IssueOutcome per FETCHED issue so no
+  // targeted issue is silently dropped. Processed → succeeded/failed; not
+  // processed → skipped:over-limit / skipped:budget / skipped:shutdown.
+  const outcomes: IssueOutcome[] = [];
+  const skippedByReason: Partial<Record<SkipReasonKey, number>> = {};
+  const bumpReason = (key: SkipReasonKey): void => {
+    skippedByReason[key] = (skippedByReason[key] ?? 0) + 1;
+  };
+
+  const schedulerByIssue = new Map(schedulerResults.map((r) => [r.issueNumber, r]));
+  for (const issue of toFix) {
+    const fr = fixResultsMap.get(issue.number);
+    if (fr) {
+      outcomes.push({
+        issueNumber: issue.number,
+        title: issue.title,
+        status: fr.result.success ? 'succeeded' : 'failed',
+        ...(fr.result.error !== undefined ? { reason: fr.result.error } : {}),
+      });
+      continue;
+    }
+    // Not in fixResultsMap → scheduler skipped it (budget or shutdown).
+    const sched = schedulerByIssue.get(issue.number);
+    const skipStatus = classifyScheduledSkip(sched?.error) ?? 'skipped:budget';
+    outcomes.push({
+      issueNumber: issue.number,
+      title: issue.title,
+      status: skipStatus,
+      ...(sched?.error ? { reason: sched.error } : {}),
+    });
+    if (skipStatus === 'skipped:budget') bumpReason('budget');
+    else if (skipStatus === 'skipped:shutdown') bumpReason('shutdown');
+  }
+  for (const issue of overLimit) {
+    outcomes.push({
+      issueNumber: issue.number,
+      title: issue.title,
+      status: 'skipped:over-limit',
+      reason: `processing cap (max_issues_per_run=${limit})`,
+    });
+    bumpReason('over-limit');
+  }
+
+  const skippedTotal = outcomes.filter((o) => o.status.startsWith('skipped:')).length;
+
   const budgetExceeded = budgetTracker
     ? budgetTracker.isExceeded()
     : budget !== undefined && accumulator.exceedsBudget(budget);
@@ -222,7 +326,8 @@ export async function fixLoop(options: LoopOptions): Promise<LoopResult> {
       ' succeeded, ' +
       failed +
       ' failed, ' +
-      '0 skipped (' +
+      skippedTotal +
+      ' skipped (' +
       results.length +
       '/' +
       issues.length +
@@ -241,13 +346,15 @@ export async function fixLoop(options: LoopOptions): Promise<LoopResult> {
     total: results.length,
     succeeded,
     failed,
-    skipped: 0,
+    skipped: skippedTotal,
     totalCost: accumulator.get(),
     totalTurns: accumulator.getTurns(),
     totalDuration: accumulator.getDuration(),
     budgetExceeded,
     startedAt,
     results,
+    outcomes,
+    skippedByReason,
   };
 
   let milestoneInput: { milestone: string; openCount: number; closedCount: number } | undefined;
@@ -435,6 +542,14 @@ export async function fixByNumbers(options: FixByNumbersOptions): Promise<LoopRe
         's',
     );
 
+    // Coverage ledger for fixByNumbers — each requested number gets an outcome.
+    const outcomes: IssueOutcome[] = results.map(({ issue, result }) => ({
+      issueNumber: issue.number,
+      title: issue.title,
+      status: result.success ? ('succeeded' as const) : ('failed' as const),
+      ...(result.error !== undefined ? { reason: result.error } : {}),
+    }));
+
     const loopResult: LoopResult = {
       total: results.length,
       succeeded,
@@ -446,6 +561,8 @@ export async function fixByNumbers(options: FixByNumbersOptions): Promise<LoopRe
       budgetExceeded,
       startedAt,
       results,
+      outcomes,
+      skippedByReason: {},
     };
 
     const runReport = buildRunReport(loopResult);
@@ -470,6 +587,13 @@ export async function fixByNumbers(options: FixByNumbersOptions): Promise<LoopRe
   );
   log.info('Cumulative cost: $0.00 | 0 turns | 0s');
 
+  const fallbackOutcomes: IssueOutcome[] = results.map(({ issue, result }) => ({
+    issueNumber: issue.number,
+    title: issue.title,
+    status: result.success ? ('succeeded' as const) : ('failed' as const),
+    ...(result.error !== undefined ? { reason: result.error } : {}),
+  }));
+
   const loopResult: LoopResult = {
     total: results.length,
     succeeded: 0,
@@ -481,6 +605,8 @@ export async function fixByNumbers(options: FixByNumbersOptions): Promise<LoopRe
     budgetExceeded: false,
     startedAt,
     results,
+    outcomes: fallbackOutcomes,
+    skippedByReason: {},
   };
 
   const runReport = buildRunReport(loopResult);
