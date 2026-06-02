@@ -3,6 +3,8 @@
 
 import http from 'node:http';
 import { log } from '../utils/logger.js';
+import type { EventBus } from './event-bus/bus.js';
+import { handleSseRequest } from './event-bus/sse.js';
 import * as metrics from './metrics.js';
 import { handleWebhookEvent } from './webhook-handler.js';
 import { verifyWebhookSignature } from './webhook-verify.js';
@@ -13,6 +15,13 @@ export interface WebhookServerOptions {
   enqueue: (issueNumber: number) => boolean;
   queue?: { size(): number; isRunning(): boolean };
   metricsEnabled?: boolean;
+  /**
+   * Optional event bus for the live-run observability SSE stream (kova#292).
+   * When provided, the server exposes `GET /events` (and `GET /events?fixId=...`)
+   * which replays the per-fix ring buffer (when filtered) then streams live
+   * events. Omitted by default for backward compatibility.
+   */
+  eventBus?: EventBus;
 }
 
 export interface WebhookServer {
@@ -59,13 +68,23 @@ function readBody(req: http.IncomingMessage): Promise<{ ok: true; body: string }
 }
 
 export function createWebhookServer(options: WebhookServerOptions): WebhookServer {
-  const { secret, enqueue, queue, metricsEnabled } = options;
+  const { secret, enqueue, queue, metricsEnabled, eventBus } = options;
   let assignedPort = options.port;
   let httpServer: http.Server | undefined;
 
   async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const url = req.url ?? '/';
     const method = req.method ?? 'GET';
+
+    // GET /events — SSE stream of structured KovaEvents (kova#292)
+    if (url.startsWith('/events') && method === 'GET') {
+      if (!eventBus) {
+        jsonResponse(res, 404, { error: 'Event bus not enabled' });
+        return;
+      }
+      handleSseRequest(req, res, eventBus);
+      return;
+    }
 
     // GET /health
     if (url === '/health' && method === 'GET') {
