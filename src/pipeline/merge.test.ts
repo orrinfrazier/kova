@@ -7,6 +7,7 @@ vi.mock('../services/github.js', () => ({
   mergePR: vi.fn(),
   rebasePROnDefault: vi.fn(),
   fetchPRDependencies: vi.fn(),
+  fetchPRReviewState: vi.fn(),
 }));
 
 // Mock conflict resolver
@@ -25,8 +26,9 @@ const githubModule = (await import('../services/github.js')) as unknown as {
   mergePR: ReturnType<typeof vi.fn>;
   rebasePROnDefault: ReturnType<typeof vi.fn>;
   fetchPRDependencies: ReturnType<typeof vi.fn>;
+  fetchPRReviewState: ReturnType<typeof vi.fn>;
 };
-const { fetchKovaPRsWithStatus, mergePR, rebasePROnDefault, fetchPRDependencies } = githubModule;
+const { fetchKovaPRsWithStatus, mergePR, rebasePROnDefault, fetchPRDependencies, fetchPRReviewState } = githubModule;
 
 const conflictModule = (await import('../services/conflict-resolver.js')) as unknown as {
   resolveNonOverlappingConflicts: ReturnType<typeof vi.fn>;
@@ -41,7 +43,14 @@ const { runMerge } = await import('./merge.js');
 
 const baseConfig = {
   path: '/repo',
-  rules: { coverage: 80, auto_merge: false, max_issues_per_run: 10, ci_merge: 'require' as const, concurrency: 1 },
+  rules: {
+    coverage: 80,
+    auto_merge: false,
+    max_issues_per_run: 10,
+    ci_merge: 'require' as const,
+    review_merge: 'require' as const,
+    concurrency: 1,
+  },
   model: {
     assess: 'large' as const,
     spec: 'large' as const,
@@ -74,6 +83,7 @@ beforeEach(() => {
   mergePR.mockResolvedValue(undefined);
   rebasePROnDefault.mockResolvedValue(undefined);
   fetchPRDependencies.mockResolvedValue([]);
+  fetchPRReviewState.mockResolvedValue({ decision: 'APPROVED', blockingThreads: [] });
   resolveNonOverlappingConflicts.mockResolvedValue({ resolved: true, autoResolvedFiles: [] });
 });
 
@@ -331,5 +341,176 @@ describe('runMerge', () => {
     });
 
     expect(resolveNonOverlappingConflicts).not.toHaveBeenCalled();
+  });
+
+  /* ---------------------------------------------------------------- */
+  /*  review_merge policy (issue #256)                                  */
+  /* ---------------------------------------------------------------- */
+
+  it('review_merge require blocks a PR with CHANGES_REQUESTED decision (no resolver)', async () => {
+    fetchKovaPRsWithStatus.mockResolvedValue([makePR(42)]);
+    fetchPRReviewState.mockResolvedValue({
+      decision: 'CHANGES_REQUESTED',
+      blockingThreads: [
+        {
+          threadId: 'T_1',
+          rootCommentId: 100,
+          path: 'src/foo.ts',
+          line: 10,
+          body: 'please rename',
+          author: 'reviewer',
+        },
+      ],
+    });
+
+    const result = await runMerge({
+      repoPath: '/repo',
+      repoName: 'my-repo',
+      config: baseConfig,
+    });
+
+    expect(mergePR).not.toHaveBeenCalled();
+    expect(result.merged).toEqual([]);
+    expect(result.failed).toHaveLength(1);
+    expect(result.failed[0]?.number).toBe(42);
+    expect(result.failed[0]?.reason).toMatch(/review|CHANGES_REQUESTED|thread/i);
+  });
+
+  it('review_merge require runs the resolver and merges after re-check passes', async () => {
+    fetchKovaPRsWithStatus.mockResolvedValue([makePR(43)]);
+    // First call: blocking. Second call (post-resolver): clean.
+    fetchPRReviewState
+      .mockResolvedValueOnce({
+        decision: 'CHANGES_REQUESTED',
+        blockingThreads: [
+          {
+            threadId: 'T_2',
+            rootCommentId: 200,
+            path: 'src/bar.ts',
+            line: 5,
+            body: 'tighten error',
+            author: 'reviewer',
+          },
+        ],
+      })
+      .mockResolvedValueOnce({ decision: 'APPROVED', blockingThreads: [] });
+
+    const resolveReviews = vi.fn().mockResolvedValue(true);
+
+    const result = await runMerge({
+      repoPath: '/repo',
+      repoName: 'my-repo',
+      config: baseConfig,
+      resolveReviews,
+    });
+
+    expect(resolveReviews).toHaveBeenCalledTimes(1);
+    expect(fetchPRReviewState).toHaveBeenCalledTimes(2);
+    expect(mergePR).toHaveBeenCalledWith('/repo', 43);
+    expect(result.merged).toContain(43);
+    expect(result.failed).toHaveLength(0);
+  });
+
+  it('review_merge require fails when the resolver returns false', async () => {
+    fetchKovaPRsWithStatus.mockResolvedValue([makePR(44)]);
+    fetchPRReviewState.mockResolvedValue({
+      decision: 'CHANGES_REQUESTED',
+      blockingThreads: [
+        {
+          threadId: 'T_3',
+          rootCommentId: 300,
+          path: 'src/baz.ts',
+          line: 1,
+          body: 'rework',
+          author: 'reviewer',
+        },
+      ],
+    });
+
+    const resolveReviews = vi.fn().mockResolvedValue(false);
+
+    const result = await runMerge({
+      repoPath: '/repo',
+      repoName: 'my-repo',
+      config: baseConfig,
+      resolveReviews,
+    });
+
+    expect(resolveReviews).toHaveBeenCalledTimes(1);
+    expect(mergePR).not.toHaveBeenCalled();
+    expect(result.failed[0]?.number).toBe(44);
+  });
+
+  it('review_merge warn logs and proceeds to merge despite CHANGES_REQUESTED', async () => {
+    fetchKovaPRsWithStatus.mockResolvedValue([makePR(45)]);
+    fetchPRReviewState.mockResolvedValue({
+      decision: 'CHANGES_REQUESTED',
+      blockingThreads: [
+        {
+          threadId: 'T_4',
+          rootCommentId: 400,
+          path: 'src/qux.ts',
+          line: 99,
+          body: 'consider X',
+          author: 'reviewer',
+        },
+      ],
+    });
+
+    const warnConfig = {
+      ...baseConfig,
+      rules: { ...baseConfig.rules, review_merge: 'warn' as const },
+    };
+
+    const result = await runMerge({
+      repoPath: '/repo',
+      repoName: 'my-repo',
+      config: warnConfig,
+    });
+
+    expect(mergePR).toHaveBeenCalledWith('/repo', 45);
+    expect(result.merged).toContain(45);
+  });
+
+  it('review_merge require allows merge when only outdated/resolved threads exist (no blocking)', async () => {
+    fetchKovaPRsWithStatus.mockResolvedValue([makePR(46)]);
+    fetchPRReviewState.mockResolvedValue({ decision: 'APPROVED', blockingThreads: [] });
+
+    const result = await runMerge({
+      repoPath: '/repo',
+      repoName: 'my-repo',
+      config: baseConfig,
+    });
+
+    expect(mergePR).toHaveBeenCalledWith('/repo', 46);
+    expect(result.merged).toContain(46);
+  });
+
+  it('reviewOverride option supersedes config.rules.review_merge', async () => {
+    fetchKovaPRsWithStatus.mockResolvedValue([makePR(47)]);
+    fetchPRReviewState.mockResolvedValue({
+      decision: 'CHANGES_REQUESTED',
+      blockingThreads: [
+        {
+          threadId: 'T_5',
+          rootCommentId: 500,
+          path: 'src/zz.ts',
+          line: 2,
+          body: 'fix',
+          author: 'reviewer',
+        },
+      ],
+    });
+
+    // Config says require, override says warn — warn should win and PR merges.
+    const result = await runMerge({
+      repoPath: '/repo',
+      repoName: 'my-repo',
+      config: baseConfig, // require
+      reviewOverride: 'warn',
+    });
+
+    expect(mergePR).toHaveBeenCalledWith('/repo', 47);
+    expect(result.merged).toContain(47);
   });
 });
