@@ -407,3 +407,126 @@ describe('structured output metrics — issue #247', () => {
     expect(table).not.toContain('Structured Output');
   });
 });
+
+describe('per-run telemetry — issue #266', () => {
+  it('HistoryEntrySchema accepts all new optional telemetry fields', () => {
+    const entry = makeEntry({
+      grade: 'B',
+      diagnosis: 'APPROACH_WRONG',
+      thrashingSignal: 'SAME_FILES',
+      gatesFailed: ['lint', 'tests'],
+      firstPassQuality: false,
+      retryAttempts: 2,
+    });
+    const result = HistoryEntrySchema.safeParse(entry);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.grade).toBe('B');
+      expect(result.data.diagnosis).toBe('APPROACH_WRONG');
+      expect(result.data.thrashingSignal).toBe('SAME_FILES');
+      expect(result.data.gatesFailed).toEqual(['lint', 'tests']);
+      expect(result.data.firstPassQuality).toBe(false);
+      expect(result.data.retryAttempts).toBe(2);
+    }
+  });
+
+  it('HistoryEntrySchema accepts entries WITHOUT new fields (backward compat)', () => {
+    const entry = makeEntry();
+    const result = HistoryEntrySchema.safeParse(entry);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.grade).toBeUndefined();
+      expect(result.data.diagnosis).toBeUndefined();
+      expect(result.data.thrashingSignal).toBeUndefined();
+      expect(result.data.gatesFailed).toBeUndefined();
+      expect(result.data.firstPassQuality).toBeUndefined();
+      expect(result.data.retryAttempts).toBeUndefined();
+    }
+  });
+
+  it('HistoryEntrySchema rejects invalid grade value', () => {
+    const entry = makeEntry({ grade: 'Z' as unknown as 'A' });
+    const result = HistoryEntrySchema.safeParse(entry);
+    expect(result.success).toBe(false);
+  });
+
+  it('HistoryEntrySchema rejects invalid diagnosis value', () => {
+    const entry = makeEntry({ diagnosis: 'NOT_A_THING' as unknown as 'STUCK' });
+    const result = HistoryEntrySchema.safeParse(entry);
+    expect(result.success).toBe(false);
+  });
+
+  it('readHistory parses legacy entries (no new fields) and round-trips new entries', async () => {
+    const legacyEntry = makeEntry({ cost: 0.25 });
+    const enrichedEntry = makeEntry({
+      cost: 0.75,
+      grade: 'A',
+      diagnosis: 'STUCK',
+      thrashingSignal: 'NORMAL',
+      gatesFailed: ['typecheck'],
+      firstPassQuality: true,
+      retryAttempts: 0,
+    });
+
+    const { appendFile, mkdir } = await import('node:fs/promises');
+    const workDir = await mkdtemp(join(tmpdir(), 'kova-history-'));
+    try {
+      await mkdir(join(workDir, '.kova'), { recursive: true });
+      const filePath = join(workDir, '.kova', 'history.jsonl');
+      await appendFile(filePath, `${JSON.stringify(legacyEntry)}\n`);
+      await appendFile(filePath, `${JSON.stringify(enrichedEntry)}\n`);
+
+      const entries = await readHistory(workDir);
+      expect(entries).toHaveLength(2);
+      expect(entries[0]?.grade).toBeUndefined();
+      expect(entries[1]?.grade).toBe('A');
+      expect(entries[1]?.diagnosis).toBe('STUCK');
+      expect(entries[1]?.gatesFailed).toEqual(['typecheck']);
+      expect(entries[1]?.firstPassQuality).toBe(true);
+      expect(entries[1]?.retryAttempts).toBe(0);
+    } finally {
+      await rm(workDir, { recursive: true, force: true });
+    }
+  });
+
+  it('computeStats breaks down success by grade', () => {
+    const entries: HistoryEntry[] = [
+      makeEntry({ grade: 'A', outcome: 'success' }),
+      makeEntry({ grade: 'A', outcome: 'success' }),
+      makeEntry({ grade: 'A', outcome: 'failure' }),
+      makeEntry({ grade: 'B', outcome: 'success' }),
+      makeEntry({ grade: 'B', outcome: 'partial' }),
+      makeEntry({ outcome: 'success' }), // no grade — should not appear in byGrade
+    ];
+
+    const stats = computeStats(entries);
+    expect(stats.byGrade).toBeDefined();
+    expect(stats.byGrade?.A?.total).toBe(3);
+    expect(stats.byGrade?.A?.success).toBe(2);
+    expect(stats.byGrade?.B?.total).toBe(2);
+    expect(stats.byGrade?.B?.success).toBe(1); // 'partial' is NOT success
+    expect(stats.byGrade?.C).toBeUndefined();
+  });
+
+  it('computeStats counts diagnoses across failed runs', () => {
+    const entries: HistoryEntry[] = [
+      makeEntry({ outcome: 'failure', diagnosis: 'APPROACH_WRONG' }),
+      makeEntry({ outcome: 'failure', diagnosis: 'APPROACH_WRONG' }),
+      makeEntry({ outcome: 'failure', diagnosis: 'STUCK' }),
+      makeEntry({ outcome: 'success' }), // no diagnosis — fine
+    ];
+
+    const stats = computeStats(entries);
+    expect(stats.byDiagnosis).toBeDefined();
+    expect(stats.byDiagnosis?.APPROACH_WRONG).toBe(2);
+    expect(stats.byDiagnosis?.STUCK).toBe(1);
+    expect(stats.byDiagnosis?.SPEC_WRONG).toBeUndefined();
+  });
+
+  it('computeStats omits byGrade/byDiagnosis when no entries carry those fields', () => {
+    const entries: HistoryEntry[] = [makeEntry(), makeEntry({ cost: 1.0 })];
+    const stats = computeStats(entries);
+    expect(stats.byGrade).toBeUndefined();
+    expect(stats.byDiagnosis).toBeUndefined();
+  });
+});
