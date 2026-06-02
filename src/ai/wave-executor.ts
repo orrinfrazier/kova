@@ -1,11 +1,14 @@
-// Per-wave agent spawner — creates a fresh pi-mono Agent for each pipeline wave.
+// Per-wave agent spawner — creates a fresh agent runtime for each pipeline wave.
 // spawnWaveAgent() is the primary interface: takes resolved model string, pre-built tools,
 // and explicit handoff context. Returns WaveHandoff<T>.
 // executeWave() is a backward-compat wrapper that resolves model/tools internally.
+//
+// Agent construction goes through the kova-owned `AgentRuntimeFactory` (kova#309)
+// rather than instantiating pi-mono `Agent` directly. The default factory wraps
+// pi-mono today; kova#310 will extract a full `PiAgentRuntime` with event/message
+// translation, and kova#NEW-13 will add a ClaudeCliRuntime alternative.
 
-import { Agent, type AgentMessage, type AgentTool, type ThinkingLevel } from '@mariozechner/pi-agent-core';
-import { type AssistantMessage, streamSimple } from '@mariozechner/pi-ai';
-import { convertToLlm } from '@mariozechner/pi-coding-agent';
+import type { AgentTool } from '@mariozechner/pi-agent-core';
 import type { z } from 'zod';
 import type { WaveHandoff, WaveModelConfig, WaveName } from '../types/index.js';
 import { log } from '../utils/logger.js';
@@ -14,6 +17,15 @@ import { classifyError, isSpendingCapBehavior, KovaError } from './errors.js';
 import { getModelString, resolveModelFromString, resolveWaveModel } from './models.js';
 import { isOllamaProvider, resolveOllamaApiKey } from './ollama.js';
 import { isRouterProvider, resolveRouterApiKey } from './router.js';
+import {
+  type AgentMessage,
+  type AgentRuntimeFactory,
+  type AssistantTurn,
+  defaultAgentRuntimeFactory,
+  type RuntimeAfterToolCallHook,
+  type RuntimeTransformContext,
+  type ThinkingLevel,
+} from './runtime/index.js';
 import { createAfterToolCallHook, type ToolHookOptions } from './tool-hooks.js';
 import { type AIWaveName, DEFAULT_THINKING_LEVELS, getWaveTools } from './wave-tools.js';
 
@@ -26,8 +38,20 @@ export interface OutputFormat {
 // biome-ignore lint/suspicious/noExplicitAny: pi-mono AgentTool uses any for tool parameter schemas
 type AnyTool = AgentTool<any>;
 
-/** Runtime type guard for pi-mono AssistantMessage — validates shape instead of unsafe `as` casts. */
-export function isAssistantMessage(msg: unknown): msg is AssistantMessage {
+/**
+ * Runtime type guard for the kova-owned `AssistantTurn` shape (kova#309).
+ *
+ * Validates the structural surface wave-executor actually reads — `role`,
+ * `content` array, `usage` object. The narrower `usage.input` / `usage.cost.total`
+ * fields are accessed defensively at the call sites that need them so adapters
+ * that supply only one of the two (e.g. local models with no cost data) still
+ * progress.
+ *
+ * The shape is intentionally structural so pi-mono `AssistantMessage` objects
+ * (today's runtime backing) and future runtime-translated `AssistantTurn`
+ * objects (post-kova#310) both pass.
+ */
+export function isAssistantMessage(msg: unknown): msg is AssistantTurn {
   return (
     typeof msg === 'object' &&
     msg !== null &&
@@ -76,6 +100,13 @@ export interface SpawnWaveAgentConfig {
   contextThreshold?: number;
   /** Tool result truncation options. Set to configure or `false` to disable. Default: enabled with 8k token budget. */
   toolResultTruncation?: ToolHookOptions | false;
+  /**
+   * Optional `AgentRuntimeFactory` override (kova#309). Defaults to
+   * `defaultAgentRuntimeFactory`, which wraps pi-mono `Agent`. Tests may
+   * inject a mock factory; future runtimes (claude CLI, OpenAI Assistants)
+   * are wired the same way.
+   */
+  runtimeFactory?: AgentRuntimeFactory;
 }
 
 export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig): Promise<WaveHandoff<T>> {
@@ -94,6 +125,7 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
     thinkingLevel: explicitThinking,
     contextThreshold: rawThreshold = 0.9,
     toolResultTruncation,
+    runtimeFactory = defaultAgentRuntimeFactory,
   } = config;
 
   const timeoutMs = explicitTimeout ?? DEFAULT_WAVE_TIMEOUTS[wave];
@@ -113,18 +145,24 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
   const afterToolCallHook =
     toolResultTruncation === false ? undefined : createAfterToolCallHook(toolResultTruncation ?? undefined);
 
-  const agent = new Agent({
-    initialState: {
-      systemPrompt: effectiveSystemPrompt,
-      model,
-      thinkingLevel,
-      tools,
-    },
-    streamFn: streamSimple,
-    convertToLlm,
+  // Construct via the AgentRuntime factory (kova#309). The default factory
+  // wraps pi-mono Agent; kova#310 will extract a full PiAgentRuntime adapter.
+  //
+  // `createTransformContext` and `createAfterToolCallHook` return pi-mono-typed
+  // functions today. They are structurally compatible with the kova hooks,
+  // but cross the package boundary, so we widen at the call site (the adapter
+  // narrows back to pi-mono types). Cleaned up in kova#310 when the adapter
+  // owns the translation in one place.
+  const agent = runtimeFactory.create({
+    systemPrompt: effectiveSystemPrompt,
+    model,
+    thinkingLevel,
+    tools,
     getApiKey: resolveApiKey,
-    transformContext: createTransformContext(model.contextWindow),
-    ...(afterToolCallHook && { afterToolCall: afterToolCallHook }),
+    transformContext: createTransformContext(model.contextWindow) as unknown as RuntimeTransformContext,
+    ...(afterToolCallHook && {
+      afterToolCall: afterToolCallHook as unknown as RuntimeAfterToolCallHook,
+    }),
   });
 
   let turnCount = 0;
@@ -161,9 +199,11 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
           agent.abort();
         }
       } else {
-        log.debug(
-          `[${wave}] Skipping non-assistant turn_end message (role=${String((msg as { role?: unknown }).role ?? 'unknown')})`,
-        );
+        const role =
+          typeof msg === 'object' && msg !== null && 'role' in msg
+            ? String((msg as { role: unknown }).role)
+            : 'unknown';
+        log.debug(`[${wave}] Skipping non-assistant turn_end message (role=${role})`);
       }
 
       // Context window monitoring: 3-tier graceful degradation
@@ -182,16 +222,21 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
           );
           agent.abort();
         } else if (usageRatio >= TRIM_THRESHOLD && !contextTrimmed) {
-          // Tier 2: aggressive trimming via transformContext
+          // Tier 2: aggressive trimming via transformContext.
+          // Runtimes that do not support transformContext reassignment will
+          // collapse to Tier-3 abort at contextThreshold (no-op safe).
           contextTrimmed = true;
           log.warn(
             `[${wave}] Context usage ${(usageRatio * 100).toFixed(0)}% hit trim threshold (${inputTokens}/${model.contextWindow} tokens), enabling aggressive context compaction`,
           );
-          agent.transformContext = aggressiveTrimContext;
+          // Optional chaining is insufficient for assignment — guard explicitly.
+          if ('transformContext' in agent) {
+            (agent as { transformContext: typeof aggressiveTrimContext }).transformContext = aggressiveTrimContext;
+          }
           // Also steer if not already done
           if (!contextSteered) {
             contextSteered = true;
-            agent.steer({
+            agent.steer?.({
               role: 'user',
               content:
                 'Focus on completing the current task. Avoid reading additional files unless absolutely necessary.',
@@ -199,12 +244,13 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
             });
           }
         } else if (usageRatio >= STEER_THRESHOLD && !contextSteered) {
-          // Tier 1: steer with warning
+          // Tier 1: steer with warning. Runtimes without steer() will collapse
+          // to Tier-2 trim or Tier-3 abort (no-op safe).
           contextSteered = true;
           log.info(
             `[${wave}] Context usage ${(usageRatio * 100).toFixed(0)}% hit steer threshold (${inputTokens}/${model.contextWindow} tokens), steering agent to focus`,
           );
-          agent.steer({
+          agent.steer?.({
             role: 'user',
             content:
               'Focus on completing the current task. Avoid reading additional files unless absolutely necessary.',
@@ -256,7 +302,7 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
           collected += msg.usage.cost.total;
         }
       }
-      const last = [...stateMessages].reverse().find((m): m is AssistantMessage => isAssistantMessage(m));
+      const last = [...stateMessages].reverse().find((m): m is AssistantTurn => isAssistantMessage(m));
       const text = last
         ? last.content
             .filter((c) => c.type === 'text' && 'text' in c)
