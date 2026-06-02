@@ -314,6 +314,7 @@ function handoffToResult(handoff: WaveHandoff, provider?: string, promptHash?: s
     local_attempt_cost: handoff.local_attempt_cost,
     promptHash,
     structured_output_metrics: handoff.structured_output_metrics,
+    toolCallCounts: handoff.toolCallCounts,
   };
 }
 
@@ -1458,6 +1459,30 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       structuredOutputMetrics[waveName] = entry;
     }
 
+    // Issue #278: aggregate per-wave tool-call counts into a single run-level
+    // total. The retrieval-quality eval harness reads this from history.jsonl
+    // to compute the context-on vs context-off delta (tool-call/Read reduction).
+    let aggregatedToolCallCounts: { total: number; reads: number; byTool: Record<string, number> } | undefined;
+    {
+      let total = 0;
+      let reads = 0;
+      const byTool: Record<string, number> = {};
+      let observedAny = false;
+      for (const waveResult of Object.values(state.waveResults)) {
+        const counts = waveResult?.toolCallCounts;
+        if (!counts) continue;
+        observedAny = true;
+        total += counts.total;
+        reads += counts.reads;
+        for (const [name, n] of Object.entries(counts.byTool)) {
+          byTool[name] = (byTool[name] ?? 0) + n;
+        }
+      }
+      if (observedAny) {
+        aggregatedToolCallCounts = { total, reads, byTool };
+      }
+    }
+
     // Per-run causal telemetry (issue #266): hoist assess.grade, FixState
     // diagnosis/thrashing/retryAttempts, and quality.* gate failures into the
     // flat history.jsonl so `kova history --stats` and `/reflect` can break
@@ -1510,6 +1535,9 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       ...(gatesFailed.length > 0 && { gatesFailed }),
       ...(firstPassQuality != null && { firstPassQuality }),
       ...(state.retryAttempts != null && { retryAttempts: state.retryAttempts }),
+      // Issue #278: per-run tool-call totals + contextArm from repo config.
+      ...(aggregatedToolCallCounts != null && { toolCallCounts: aggregatedToolCallCounts }),
+      ...(config.eval?.context_arm != null && { contextArm: config.eval.context_arm }),
     }).catch((err) => {
       log.warn(`Failed to record history: ${err instanceof Error ? err.message : String(err)}`);
     });

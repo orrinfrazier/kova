@@ -53,6 +53,22 @@ export type HistoryDiagnosis = z.infer<typeof HistoryDiagnosisSchema>;
 export const HistoryThrashingSchema = z.enum(['SAME_FILES', 'DIFFERENT_FILES', 'NORMAL', 'INSUFFICIENT_DATA']);
 export type HistoryThrashing = z.infer<typeof HistoryThrashingSchema>;
 
+/**
+ * Per-run tool-call telemetry (issue #278). Captures how many tool calls the
+ * agent ran for THIS history entry. The retrieval-quality eval harness reads
+ * this to compute the on-vs-off delta — does injected codebase context reduce
+ * the agent's own tool calls?
+ *
+ * `reads` mirrors `byTool.Read` (file reads dominate retrieval cost, so it's
+ * surfaced as a first-class metric).
+ */
+export const HistoryToolCallCountsSchema = z.object({
+  total: z.number().int().min(0),
+  reads: z.number().int().min(0),
+  byTool: z.record(z.string(), z.number().int().min(0)),
+});
+export type HistoryToolCallCounts = z.infer<typeof HistoryToolCallCountsSchema>;
+
 export const HistoryEntrySchema = z.object({
   timestamp: z.string(),
   repo: z.string(),
@@ -63,6 +79,17 @@ export const HistoryEntrySchema = z.object({
   outcome: z.enum(['success', 'partial', 'failure']),
   promptHashes: z.record(z.string(), z.string()).optional(),
   abTestVariants: z.record(z.string(), z.string()).optional(),
+  /**
+   * Which arm of the retrieval-quality eval this run is part of (issue #278).
+   * `on` = codebaseContext injected; `off` = control. Omitted when the run
+   * is not an eval run (legacy + production runs).
+   */
+  contextArm: z.enum(['on', 'off']).optional(),
+  /**
+   * Per-run aggregated tool-call counts (issue #278). Populated by
+   * `spawnWaveAgent` when the wave instruments a `ToolCallCounter`.
+   */
+  toolCallCounts: HistoryToolCallCountsSchema.optional(),
   /**
    * Per-wave structured-output extraction telemetry (issue #247). Keyed by
    * wave name (e.g. `assess`, `spec`, `review`). Backward-compatible: legacy
