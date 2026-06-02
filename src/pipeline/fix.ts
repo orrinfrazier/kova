@@ -1303,6 +1303,28 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       structuredOutputMetrics[waveName] = entry;
     }
 
+    // Per-run causal telemetry (issue #266): hoist assess.grade, FixState
+    // diagnosis/thrashing/retryAttempts, and quality.* gate failures into the
+    // flat history.jsonl so `kova history --stats` and `/reflect` can break
+    // success down by why-it-failed, not just cost/outcome.
+    const assessArtifactForHistory = state.waveResults.assess?.artifact as
+      | { grade?: 'A' | 'B' | 'C' | 'D' | 'F' }
+      | undefined;
+    const qualityArtifactForHistory = state.waveResults.quality?.artifact as
+      | { lint?: string; typecheck?: string; tests?: string; audit?: string; all_passing?: boolean }
+      | undefined;
+    const GATE_KEYS = ['lint', 'typecheck', 'tests', 'audit'] as const;
+    const gatesFailed: string[] = qualityArtifactForHistory
+      ? GATE_KEYS.filter((k) => qualityArtifactForHistory[k] === 'fail')
+      : [];
+    // firstPassQuality is only meaningful when we observed quality at all.
+    // Definition: zero impl retries AND all quality gates passed → green on
+    // first try. If quality didn't run, leave the field undefined.
+    const firstPassQuality =
+      qualityArtifactForHistory?.all_passing != null
+        ? qualityArtifactForHistory.all_passing && (state.retryAttempts ?? 0) === 0
+        : undefined;
+
     await appendHistoryEntry(repoPath, {
       timestamp: state.startedAt,
       repo: repoName,
@@ -1327,6 +1349,12 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       ...(Object.keys(promptHashes).length > 0 && { promptHashes }),
       ...(abTestVariants != null && Object.keys(abTestVariants).length > 0 && { abTestVariants }),
       ...(Object.keys(structuredOutputMetrics).length > 0 && { structuredOutputMetrics }),
+      ...(assessArtifactForHistory?.grade != null && { grade: assessArtifactForHistory.grade }),
+      ...(state.diagnosis != null && { diagnosis: state.diagnosis }),
+      ...(state.thrashingSignal != null && { thrashingSignal: state.thrashingSignal }),
+      ...(gatesFailed.length > 0 && { gatesFailed }),
+      ...(firstPassQuality != null && { firstPassQuality }),
+      ...(state.retryAttempts != null && { retryAttempts: state.retryAttempts }),
     }).catch((err) => {
       log.warn(`Failed to record history: ${err instanceof Error ? err.message : String(err)}`);
     });

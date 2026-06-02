@@ -35,6 +35,24 @@ const HistoryStructuredOutputMetricsSchema = z.object({
   model: z.string().optional(),
 });
 
+/**
+ * Per-run causal telemetry fields (issue #266). Mirrors what the episodic
+ * vectordb already captures (diagnosis/thrashing/quality_gates/failed_at_wave)
+ * so cross-run analytics over `history.jsonl` can break success rates down by
+ * grade, diagnosis, and which gates failed — not just by cost/outcome.
+ *
+ * All fields are OPTIONAL so legacy history.jsonl lines (pre-#266) still
+ * parse via `readHistory`.
+ */
+export const HistoryGradeSchema = z.enum(['A', 'B', 'C', 'D', 'F']);
+export type HistoryGrade = z.infer<typeof HistoryGradeSchema>;
+
+export const HistoryDiagnosisSchema = z.enum(['SPEC_WRONG', 'APPROACH_WRONG', 'MISSING_CONTEXT', 'STUCK']);
+export type HistoryDiagnosis = z.infer<typeof HistoryDiagnosisSchema>;
+
+export const HistoryThrashingSchema = z.enum(['SAME_FILES', 'DIFFERENT_FILES', 'NORMAL', 'INSUFFICIENT_DATA']);
+export type HistoryThrashing = z.infer<typeof HistoryThrashingSchema>;
+
 export const HistoryEntrySchema = z.object({
   timestamp: z.string(),
   repo: z.string(),
@@ -51,6 +69,18 @@ export const HistoryEntrySchema = z.object({
    * history entries without this field still validate.
    */
   structuredOutputMetrics: z.record(z.string(), HistoryStructuredOutputMetricsSchema).optional(),
+  /** Assessment grade for this run (issue #266). Optional for back-compat. */
+  grade: HistoryGradeSchema.optional(),
+  /** Final TI-loop diagnosis when the run failed or escalated (issue #266). */
+  diagnosis: HistoryDiagnosisSchema.optional(),
+  /** Thrashing signal from impl loop (issue #266). */
+  thrashingSignal: HistoryThrashingSchema.optional(),
+  /** Names of quality gates that failed (e.g. ['lint', 'tests']) (issue #266). */
+  gatesFailed: z.array(z.string()).optional(),
+  /** True iff the run shipped on the first impl attempt with all gates green (issue #266). */
+  firstPassQuality: z.boolean().optional(),
+  /** Number of impl retries the orchestrator ran before success/failure (issue #266). */
+  retryAttempts: z.number().int().min(0).optional(),
 });
 
 export type HistoryEntry = z.infer<typeof HistoryEntrySchema>;
@@ -63,6 +93,17 @@ export interface HistoryStats {
   avgDuration: number;
   totalIssuesAttempted: number;
   totalPrsCreated: number;
+  /**
+   * Success-by-grade breakdown (issue #266). Only present when at least one
+   * entry carries a `grade`. `success` counts entries with `outcome==='success'`
+   * (partial/failure both count toward `total` but not `success`).
+   */
+  byGrade?: Partial<Record<HistoryGrade, { total: number; success: number }>>;
+  /**
+   * Diagnosis frequency across runs (issue #266). Only present when at least
+   * one entry carries a `diagnosis`.
+   */
+  byDiagnosis?: Partial<Record<HistoryDiagnosis, number>>;
 }
 
 function historyPath(repoPath: string): string {
@@ -127,7 +168,39 @@ export function computeStats(entries: HistoryEntry[]): HistoryStats {
   const totalIssuesAttempted = entries.reduce((sum, e) => sum + e.issues.length, 0);
   const totalPrsCreated = entries.reduce((sum, e) => sum + e.prsCreated, 0);
 
-  return { totalRuns, totalCost, successRate, avgDuration, totalIssuesAttempted, totalPrsCreated };
+  // Optional breakdowns (issue #266). Only emit when at least one entry carries
+  // the relevant field — otherwise callers reading legacy data see a clean
+  // zero-state and don't get spurious empty objects.
+  const byGrade: Partial<Record<HistoryGrade, { total: number; success: number }>> = {};
+  const byDiagnosis: Partial<Record<HistoryDiagnosis, number>> = {};
+  let sawGrade = false;
+  let sawDiagnosis = false;
+
+  for (const e of entries) {
+    if (e.grade != null) {
+      sawGrade = true;
+      const bucket = byGrade[e.grade] ?? { total: 0, success: 0 };
+      bucket.total += 1;
+      if (e.outcome === 'success') bucket.success += 1;
+      byGrade[e.grade] = bucket;
+    }
+    if (e.diagnosis != null) {
+      sawDiagnosis = true;
+      byDiagnosis[e.diagnosis] = (byDiagnosis[e.diagnosis] ?? 0) + 1;
+    }
+  }
+
+  const stats: HistoryStats = {
+    totalRuns,
+    totalCost,
+    successRate,
+    avgDuration,
+    totalIssuesAttempted,
+    totalPrsCreated,
+  };
+  if (sawGrade) stats.byGrade = byGrade;
+  if (sawDiagnosis) stats.byDiagnosis = byDiagnosis;
+  return stats;
 }
 
 function formatDuration(ms: number): string {
