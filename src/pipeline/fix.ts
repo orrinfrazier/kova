@@ -388,7 +388,13 @@ export async function fix(options: FixOptions): Promise<FixResult> {
     }
   }
 
-  const worktree = config.isolation === 'worktree' ? await createWorktree(repoPath, issue.number) : undefined;
+  const worktree =
+    config.isolation === 'worktree'
+      ? await createWorktree(repoPath, issue.number, {
+          template: config.branch_name_template,
+          issue: { number: issue.number, title: issue.title, labels: issue.labels },
+        })
+      : undefined;
   const workDir = worktree?.path ?? repoPath;
   const resolvedPromptsDir = resolvePromptsDir(repoPath, config.prompts_dir);
   // Issue #297: cache-affinity context. Stable across all waves of this fix

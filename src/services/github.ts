@@ -224,6 +224,94 @@ export async function editIssueComment(ownerRepo: string, commentId: number, bod
   log.info(`Updated progress comment (id: ${commentId})`);
 }
 
+/**
+ * Hidden HTML marker used by `upsertTrackingComment` to identify the rolling
+ * status comment kova owns on an issue. Borrowed from claude-code-action's
+ * `use_sticky_comment` pattern — a hidden marker in the body lets a fresh
+ * checkout (no stored comment ID) find the comment by listing and matching.
+ */
+export const DEFAULT_TRACKING_MARKER = '<!-- kova-tracking -->';
+
+interface IssueCommentApiShape {
+  id: number;
+  body?: string | null;
+  user?: { login?: string | null } | null;
+}
+
+async function getAuthenticatedLogin(): Promise<string | undefined> {
+  try {
+    const result = await $`gh api user`;
+    const parsed = JSON.parse(result.stdout) as { login?: string | null };
+    return parsed.login ?? undefined;
+  } catch (err) {
+    log.warn(`[github] failed to resolve gh user: ${err instanceof Error ? err.message : String(err)}`);
+    return undefined;
+  }
+}
+
+async function findTrackingComment(
+  ownerRepo: string,
+  issueNumber: number,
+  marker: string,
+  authorLogin: string | undefined,
+): Promise<number | undefined> {
+  try {
+    const result = await $`gh api repos/${ownerRepo}/issues/${issueNumber}/comments`;
+    const raw = JSON.parse(result.stdout) as IssueCommentApiShape[];
+    for (const c of raw) {
+      const body = c.body ?? '';
+      if (!body.includes(marker)) continue;
+      const login = c.user?.login ?? '';
+      // When we know our login, require it to match — never overwrite someone
+      // else's comment even if it carries the marker. When the login lookup
+      // failed, fall back to "first marker match wins" (still better than
+      // posting duplicates on every run).
+      if (authorLogin == null || login === authorLogin) {
+        return c.id;
+      }
+    }
+    return undefined;
+  } catch (err) {
+    log.warn(
+      `[github] failed to list comments for #${issueNumber} during upsert: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return undefined;
+  }
+}
+
+/**
+ * Find-or-create the kova tracking comment on an issue.
+ *
+ * Locates the comment by:
+ *   - the hidden HTML marker (`<!-- kova-tracking -->` by default)
+ *   - AND authored by the current `gh` user (so we never edit a stranger's
+ *     comment that happens to contain the marker)
+ *
+ * On match: PATCHes the existing comment. On no-match: POSTs a new one. The
+ * marker is auto-appended to the body if not already present so future runs
+ * can still find it.
+ *
+ * Returns the comment ID. The caller may persist this for fast-path edits on
+ * the same run, but does not need to — the next run will rediscover by marker.
+ */
+export async function upsertTrackingComment(
+  ownerRepo: string,
+  issueNumber: number,
+  body: string,
+  marker: string = DEFAULT_TRACKING_MARKER,
+): Promise<number> {
+  const bodyWithMarker = body.includes(marker) ? body : `${body}\n\n${marker}`;
+  const authorLogin = await getAuthenticatedLogin();
+  const existingId = await findTrackingComment(ownerRepo, issueNumber, marker, authorLogin);
+
+  if (existingId != null) {
+    await editIssueComment(ownerRepo, existingId, bodyWithMarker);
+    return existingId;
+  }
+
+  return createIssueComment(ownerRepo, issueNumber, bodyWithMarker);
+}
+
 export interface KovaPRWithStatus extends KovaPR {
   ciStatus: 'success' | 'failure' | 'pending' | 'unknown';
 }

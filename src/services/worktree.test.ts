@@ -151,6 +151,28 @@ describe('createWorktree', () => {
     const currentBranch = (await $`git -C ${worktree.path} rev-parse --abbrev-ref HEAD`).stdout.trim();
     expect(currentBranch).toBe('kova/fix-42');
   });
+
+  it('honors branch_name_template when supplied (issue #320, pattern 2)', async () => {
+    const worktree = await createWorktree(repoPath, 42, {
+      template: '{{prefix}}{{entityType}}-{{entityNumber}}-{{description}}',
+      issue: { number: 42, title: 'Add dark mode toggle to header' },
+    });
+    worktreePaths.push(worktree.path);
+
+    expect(worktree.branch).toBe('kova/fix-42-add-dark-mode-toggle-to');
+    const currentBranch = (await $`git -C ${worktree.path} rev-parse --abbrev-ref HEAD`).stdout.trim();
+    expect(currentBranch).toBe('kova/fix-42-add-dark-mode-toggle-to');
+  });
+
+  it('falls back to the legacy branch when no template is supplied', async () => {
+    const worktree = await createWorktree(repoPath, 43, {
+      issue: { number: 43, title: 'whatever' },
+      // template omitted
+    });
+    worktreePaths.push(worktree.path);
+
+    expect(worktree.branch).toBe('kova/fix-43');
+  });
 });
 
 describe('subWorktreePath', () => {
