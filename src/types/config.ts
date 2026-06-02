@@ -513,6 +513,18 @@ export interface SandboxResourceUsage {
   limitsApplied: { cpus: number; memory: string; timeout: string };
 }
 
+/**
+ * Pipeline scope, persisted on `FixState` by the orchestrator after the
+ * scope-detection probe (issue #283). The orchestrator gates each wave on
+ * `pipelineScope` so test-only / refactor / review-only issues don't waste
+ * waves on irrelevant phases.
+ *
+ * Mirrored as a string-union here to keep `config.ts` free of cross-module
+ * value imports; the canonical type + value exports live in
+ * `services/pipeline-scope.ts` and are re-exported from `types/index.ts`.
+ */
+export type PipelineScope = 'FULL' | 'TEST_ONLY' | 'IMPL_ONLY' | 'REFACTOR' | 'REVIEW_ONLY';
+
 export interface FixState {
   issue: Issue;
   repo: string;
@@ -530,4 +542,12 @@ export interface FixState {
   thrashingSignal?: 'SAME_FILES' | 'DIFFERENT_FILES' | 'NORMAL' | 'INSUFFICIENT_DATA' | undefined;
   retryAttempts?: number | undefined;
   mergeDependencies?: number[] | undefined;
+  /**
+   * Pipeline scope detected at startup (issue #283). Drives which waves the
+   * orchestrator runs. Persisted across checkpoint resumes so a paused
+   * REVIEW_ONLY fix doesn't suddenly run assess/spec on resume.
+   */
+  pipelineScope?: PipelineScope | undefined;
+  /** Human-readable reason for the chosen `pipelineScope` (for logs + audit). */
+  pipelineScopeReason?: string | undefined;
 }
