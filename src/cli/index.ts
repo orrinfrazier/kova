@@ -853,4 +853,28 @@ prompts
     console.log(formatABTestStats(stats));
   });
 
+// Issue #278: retrieval-quality eval harness.
+// `kova eval context` compares context-on vs context-off runs and reports the
+// tool-call / Read / first-pass-pass-rate deltas, gated by AB_TEST_MIN_RUNS.
+const evalCmd = program.command('eval').description('Run kova eval harnesses');
+
+evalCmd
+  .command('context')
+  .description("Retrieval-quality eval: does injected context reduce the agent's own tool calls?")
+  .option('--repo <name-or-path>', 'Repository name or path', '.')
+  .action(async (opts: { repo?: string }) => {
+    const kovaConfig = await tryLoadConfig(program.opts().config);
+    const { repoPath, repoName } = resolveRepo(opts.repo ?? '.', kovaConfig);
+
+    const { readHistory } = await import('../services/history.js');
+    const { computeContextArmDelta, formatContextArmDelta, groupEntriesByContextArm } = await import(
+      '../services/eval-context-arm.js'
+    );
+
+    const entries = await readHistory(repoPath, { repo: repoName });
+    const grouped = groupEntriesByContextArm(entries);
+    const delta = computeContextArmDelta(grouped.on, grouped.off);
+    console.log(formatContextArmDelta(delta));
+  });
+
 program.parse();

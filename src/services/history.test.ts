@@ -81,6 +81,47 @@ describe('HistoryEntrySchema', () => {
       expect(result.data.abTestVariants).toBeUndefined();
     }
   });
+
+  // Issue #278: retrieval-quality eval harness extension.
+  it('validates entry with contextArm and toolCallCounts (issue #278)', () => {
+    const entry = makeEntry({
+      contextArm: 'on',
+      toolCallCounts: { total: 12, reads: 8, byTool: { Read: 8, Grep: 3, Edit: 1 } },
+    });
+    const result = HistoryEntrySchema.safeParse(entry);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.contextArm).toBe('on');
+      expect(result.data.toolCallCounts?.total).toBe(12);
+      expect(result.data.toolCallCounts?.reads).toBe(8);
+      expect(result.data.toolCallCounts?.byTool.Read).toBe(8);
+    }
+  });
+
+  it('accepts contextArm: "off" as the control variant (issue #278)', () => {
+    const entry = makeEntry({ contextArm: 'off' });
+    const result = HistoryEntrySchema.safeParse(entry);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.contextArm).toBe('off');
+    }
+  });
+
+  it('rejects unknown contextArm values (issue #278)', () => {
+    const entry = makeEntry({ contextArm: 'maybe' as unknown as 'on' });
+    const result = HistoryEntrySchema.safeParse(entry);
+    expect(result.success).toBe(false);
+  });
+
+  it('validates entry without contextArm/toolCallCounts (backward compat, issue #278)', () => {
+    const entry = makeEntry();
+    const result = HistoryEntrySchema.safeParse(entry);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.contextArm).toBeUndefined();
+      expect(result.data.toolCallCounts).toBeUndefined();
+    }
+  });
 });
 
 describe('appendHistoryEntry', () => {

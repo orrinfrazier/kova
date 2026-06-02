@@ -299,11 +299,24 @@ export const SkillsConfigSchema = z.object({
 });
 export type SkillsConfig = z.infer<typeof SkillsConfigSchema>;
 
+/**
+ * Eval-harness config (issue #278). When `context_arm` is set, every fix run
+ * in this repo is tagged as part of that arm of the retrieval-quality eval and
+ * the tag is persisted into `history.jsonl` so `kova eval context` can compute
+ * the on-vs-off delta.
+ */
+export const EvalConfigSchema = z.object({
+  /** Which arm of the retrieval-quality eval this repo is running. */
+  context_arm: z.enum(['on', 'off']).optional(),
+});
+export type EvalConfig = z.infer<typeof EvalConfigSchema>;
+
 export const RepoConfigSchema = z.object({
   path: z.string(),
   prompts_dir: z.string().optional(),
   ab_test: ABTestConfigSchema.optional(),
   ab_test_policy: ABTestPolicySchema.optional(),
+  eval: EvalConfigSchema.optional(),
   skills: SkillsConfigSchema.optional(),
   vectordb: VectorDBConfigSchema.optional(),
   episodes: EpisodicMemoryConfigSchema.optional(),
@@ -487,6 +500,13 @@ export interface WaveResult {
    * wave was invoked with an `outputFormat`; omitted otherwise.
    */
   structured_output_metrics?: StructuredOutputMetrics | undefined;
+  /**
+   * Per-wave tool-call counts (issue #278). Populated by `spawnWaveAgent`.
+   * Aggregated across waves into the run-level `toolCallCounts` field in
+   * `history.jsonl` so the retrieval-quality eval harness can compute the
+   * context-on vs context-off delta.
+   */
+  toolCallCounts?: { total: number; reads: number; byTool: Record<string, number> } | undefined;
 }
 
 export interface FailedPiece {
