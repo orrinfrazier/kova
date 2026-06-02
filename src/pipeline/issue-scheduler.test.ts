@@ -277,3 +277,173 @@ describe('buildDependencyTiers', () => {
     expect(tiers).toEqual([[0, 1]]);
   });
 });
+
+describe('runFixesWithConcurrency — file-overlap conflict avoidance', () => {
+  it('serializes issues with overlapping file footprints (concurrency=2)', async () => {
+    // Two issues both touching src/shared.ts. With concurrency=2 they would normally
+    // run in parallel; the footprint map MUST cause them to run sequentially.
+    const issues = [makeIssue(1), makeIssue(2)];
+    let activeCount = 0;
+    let maxActiveCount = 0;
+
+    const executor: FixExecutor = async (_issue) => {
+      activeCount++;
+      maxActiveCount = Math.max(maxActiveCount, activeCount);
+      await delay(30);
+      activeCount--;
+      return { success: true };
+    };
+
+    const costAccumulator = { current: 0 };
+    const footprints = new Map<number, string[]>([
+      [1, ['src/shared.ts']],
+      [2, ['src/shared.ts']],
+    ]);
+    const options: ConcurrencyOptions = {
+      concurrency: 2,
+      costAccumulator,
+      footprints,
+    };
+
+    await runFixesWithConcurrency(issues, [[0, 1]], executor, options);
+
+    expect(maxActiveCount).toBe(1);
+  });
+
+  it('runs disjoint-footprint issues in parallel (concurrency=2)', async () => {
+    const issues = [makeIssue(1), makeIssue(2)];
+    let activeCount = 0;
+    let maxActiveCount = 0;
+
+    const executor: FixExecutor = async (_issue) => {
+      activeCount++;
+      maxActiveCount = Math.max(maxActiveCount, activeCount);
+      await delay(30);
+      activeCount--;
+      return { success: true };
+    };
+
+    const costAccumulator = { current: 0 };
+    const footprints = new Map<number, string[]>([
+      [1, ['src/a.ts']],
+      [2, ['src/b.ts']],
+    ]);
+    const options: ConcurrencyOptions = {
+      concurrency: 2,
+      costAccumulator,
+      footprints,
+    };
+
+    await runFixesWithConcurrency(issues, [[0, 1]], executor, options);
+
+    expect(maxActiveCount).toBe(2);
+  });
+
+  it('mixes disjoint and overlapping: serializes only the overlapping pair', async () => {
+    // 3 issues, concurrency=3. Issues 1&2 share a file; issue 3 is disjoint.
+    // Expected: {1, 3} parallel, then 2 alone.
+    const issues = [makeIssue(1), makeIssue(2), makeIssue(3)];
+    const concurrentSamples: number[] = [];
+    let activeCount = 0;
+
+    const executor: FixExecutor = async (_issue) => {
+      activeCount++;
+      concurrentSamples.push(activeCount);
+      await delay(30);
+      activeCount--;
+      return { success: true };
+    };
+
+    const costAccumulator = { current: 0 };
+    const footprints = new Map<number, string[]>([
+      [1, ['src/shared.ts']],
+      [2, ['src/shared.ts']],
+      [3, ['src/other.ts']],
+    ]);
+    const options: ConcurrencyOptions = {
+      concurrency: 3,
+      costAccumulator,
+      footprints,
+    };
+
+    await runFixesWithConcurrency(issues, [[0, 1, 2]], executor, options);
+
+    const maxConcurrent = Math.max(...concurrentSamples);
+    // Issues 1 and 3 should be parallel; 2 must wait
+    expect(maxConcurrent).toBe(2);
+  });
+
+  it('preserves existing behavior when footprints is omitted', async () => {
+    // No footprints map — should behave exactly like before, allowing full parallelism.
+    const issues = [makeIssue(1), makeIssue(2)];
+    let activeCount = 0;
+    let maxActiveCount = 0;
+
+    const executor: FixExecutor = async (_issue) => {
+      activeCount++;
+      maxActiveCount = Math.max(maxActiveCount, activeCount);
+      await delay(30);
+      activeCount--;
+      return { success: true };
+    };
+
+    const costAccumulator = { current: 0 };
+    const options: ConcurrencyOptions = { concurrency: 2, costAccumulator };
+
+    await runFixesWithConcurrency(issues, [[0, 1]], executor, options);
+
+    // Two issues, concurrency=2, no footprints → parallel allowed
+    expect(maxActiveCount).toBe(2);
+  });
+
+  it('preserves existing behavior when concurrency=1 even with overlapping footprints', async () => {
+    // concurrency=1 already serializes — footprints map has no effect on max concurrency
+    // but result shape should be identical.
+    const issues = [makeIssue(1), makeIssue(2)];
+    const executionOrder: number[] = [];
+
+    const executor: FixExecutor = async (issue) => {
+      executionOrder.push(issue.number);
+      await delay(10);
+      return { success: true };
+    };
+
+    const costAccumulator = { current: 0 };
+    const footprints = new Map<number, string[]>([
+      [1, ['src/shared.ts']],
+      [2, ['src/shared.ts']],
+    ]);
+    const options: ConcurrencyOptions = { concurrency: 1, costAccumulator, footprints };
+
+    const results = await runFixesWithConcurrency(issues, [[0, 1]], executor, options);
+
+    expect(executionOrder).toEqual([1, 2]);
+    expect(results).toHaveLength(2);
+    expect(results.every((r) => r.success)).toBe(true);
+  });
+
+  it('returns correct result shape with footprint-partitioned sub-tiers', async () => {
+    const issues = [makeIssue(1), makeIssue(2), makeIssue(3)];
+
+    const executor: FixExecutor = async (issue) => {
+      await delay(5);
+      if (issue.number === 2) throw new Error('issue 2 failed');
+      return { success: true };
+    };
+
+    const costAccumulator = { current: 0 };
+    const footprints = new Map<number, string[]>([
+      [1, ['src/shared.ts']],
+      [2, ['src/shared.ts']],
+      [3, ['src/other.ts']],
+    ]);
+    const options: ConcurrencyOptions = { concurrency: 3, costAccumulator, footprints };
+
+    const results = await runFixesWithConcurrency(issues, [[0, 1, 2]], executor, options);
+
+    expect(results).toHaveLength(3);
+    expect(results.find((r) => r.issueNumber === 1)?.success).toBe(true);
+    expect(results.find((r) => r.issueNumber === 2)?.success).toBe(false);
+    expect(results.find((r) => r.issueNumber === 3)?.success).toBe(true);
+  });
+});
