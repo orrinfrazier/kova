@@ -38,7 +38,8 @@ import type { AgentMessage, AgentRuntime, AgentRuntimeConfig, AgentRuntimeFactor
  * only touch the interface surface.
  */
 function createPiAgentRuntime(config: AgentRuntimeConfig): AgentRuntime {
-  const { systemPrompt, model, thinkingLevel, tools, transformContext, afterToolCall, getApiKey } = config;
+  const { systemPrompt, model, thinkingLevel, tools, transformContext, afterToolCall, beforeToolCall, getApiKey } =
+    config;
 
   // `exactOptionalPropertyTypes` rejects undefined-valued optional fields, so
   // build the pi-mono `initialState` conditionally instead of inlining `?:`.
@@ -56,6 +57,8 @@ function createPiAgentRuntime(config: AgentRuntimeConfig): AgentRuntime {
     ...(transformContext ? { transformContext: transformContext as any } : {}),
     // biome-ignore lint/suspicious/noExplicitAny: pi-mono afterToolCall is structurally compatible
     ...(afterToolCall ? { afterToolCall: afterToolCall as any } : {}),
+    // biome-ignore lint/suspicious/noExplicitAny: pi-mono beforeToolCall is structurally compatible
+    ...(beforeToolCall ? { beforeToolCall: beforeToolCall as any } : {}),
   });
 
   // The pi-mono Agent already implements the kova interface structurally:

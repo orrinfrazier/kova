@@ -138,6 +138,14 @@ export type RuntimeAfterToolCallContext = any;
 // biome-ignore lint/suspicious/noExplicitAny: opaque adapter-passthrough
 export type RuntimeAfterToolCallResult = any;
 
+/** Context passed to the optional `beforeToolCall` hook. */
+// biome-ignore lint/suspicious/noExplicitAny: opaque adapter-passthrough
+export type RuntimeBeforeToolCallContext = any;
+
+/** Return value of the optional `beforeToolCall` hook — `{ block: true, reason }` rejects the call. */
+// biome-ignore lint/suspicious/noExplicitAny: opaque adapter-passthrough
+export type RuntimeBeforeToolCallResult = any;
+
 /** Provider name → API key resolver. */
 export type RuntimeGetApiKey = (provider: string) => string | undefined | Promise<string | undefined>;
 
@@ -158,6 +166,11 @@ export type RuntimeTransformContext = (messages: AgentMessage[], signal?: AbortS
 export type RuntimeAfterToolCallHook = (
   ctx: RuntimeAfterToolCallContext,
 ) => Promise<RuntimeAfterToolCallResult | undefined>;
+
+/** Optional before-tool-call hook — return `{ block: true, reason }` to reject the call. */
+export type RuntimeBeforeToolCallHook = (
+  ctx: RuntimeBeforeToolCallContext,
+) => Promise<RuntimeBeforeToolCallResult | undefined>;
 
 // ────────────────────────────────────────────────────────────────────────────
 // Model + thinking-level (kova-owned aliases — opaque at the interface level)
@@ -235,6 +248,7 @@ export interface AgentRuntimeConfig {
   tools: ReadonlyArray<RuntimeTool>;
   transformContext?: RuntimeTransformContext;
   afterToolCall?: RuntimeAfterToolCallHook;
+  beforeToolCall?: RuntimeBeforeToolCallHook;
   getApiKey: RuntimeGetApiKey;
 }
 
