@@ -10,6 +10,8 @@ export interface AutoOptions {
   repoName: string;
   config: RepoConfig;
   filter?: string | undefined;
+  /** Milestone title — forwarded to fixLoop to scope the issue fetch + enable progress reporting. */
+  milestone?: string | undefined;
   max?: number | undefined;
   force?: boolean | undefined;
   budgetTracker?: SharedBudgetTracker | undefined;
@@ -21,7 +23,7 @@ export interface AutoResult {
 }
 
 export async function runAuto(options: AutoOptions): Promise<AutoResult> {
-  const { repoPath, repoName, config, filter, max, force, budgetTracker } = options;
+  const { repoPath, repoName, config, filter, milestone, max, force, budgetTracker } = options;
   const autoConfig = config.auto;
 
   const resolvedFilter = filter ?? autoConfig?.filter;
@@ -31,6 +33,9 @@ export async function runAuto(options: AutoOptions): Promise<AutoResult> {
   if (resolvedFilter) {
     log.info(`[auto] Label filter: ${resolvedFilter}`);
   }
+  if (milestone) {
+    log.info(`[auto] Milestone filter: ${milestone}`);
+  }
   log.info(`[auto] Max issues: ${resolvedMax}`);
 
   const loopResult = await fixLoop({
@@ -38,6 +43,7 @@ export async function runAuto(options: AutoOptions): Promise<AutoResult> {
     repoName,
     config,
     filter: resolvedFilter,
+    ...(milestone !== undefined ? { milestone } : {}),
     maxIssues: resolvedMax,
     force,
     budgetTracker,
@@ -62,6 +68,7 @@ export async function runAuto(options: AutoOptions): Promise<AutoResult> {
 export interface MultiRepoAutoOptions {
   config: KovaConfig;
   filter?: string | undefined;
+  milestone?: string | undefined;
   max?: number | undefined;
   force?: boolean | undefined;
 }
@@ -73,7 +80,7 @@ export interface MultiRepoAutoResult {
 
 /** Run auto mode across all repos in a KovaConfig, in config order. */
 export async function runAutoMultiRepo(options: MultiRepoAutoOptions): Promise<MultiRepoAutoResult> {
-  const { config, filter, max, force } = options;
+  const { config, filter, milestone, max, force } = options;
   const repoEntries = Object.entries(config.repos);
 
   log.info(`[auto] Multi-repo mode: ${repoEntries.length} repos`);
@@ -91,6 +98,7 @@ export async function runAutoMultiRepo(options: MultiRepoAutoOptions): Promise<M
       repoName: name,
       config: repoConfig,
       filter,
+      ...(milestone !== undefined ? { milestone } : {}),
       max,
       force,
     });
@@ -114,6 +122,7 @@ export async function runAutoMultiRepo(options: MultiRepoAutoOptions): Promise<M
 export interface MultiRepoParallelOptions {
   config: KovaConfig;
   filter?: string | undefined;
+  milestone?: string | undefined;
   max?: number | undefined;
   force?: boolean | undefined;
   budgetUsd?: number | undefined;
@@ -137,7 +146,7 @@ export interface MultiRepoParallelResult {
 
 /** Run auto mode across all repos concurrently. Each repo gets its own sequential fix queue. */
 export async function runAutoMultiRepoParallel(options: MultiRepoParallelOptions): Promise<MultiRepoParallelResult> {
-  const { config, filter, max, force, budgetUsd } = options;
+  const { config, filter, milestone, max, force, budgetUsd } = options;
   const repoEntries = Object.entries(config.repos);
 
   log.info(`[auto] Multi-repo parallel mode: ${repoEntries.length} repos`);
@@ -155,6 +164,7 @@ export async function runAutoMultiRepoParallel(options: MultiRepoParallelOptions
         repoName: name,
         config: repoConfig,
         filter,
+        ...(milestone !== undefined ? { milestone } : {}),
         max,
         force,
         budgetTracker,

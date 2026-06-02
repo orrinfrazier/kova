@@ -15,6 +15,27 @@ export interface RunReportIssue {
   duration: number;
 }
 
+export interface MilestoneProgress {
+  /** Milestone title the run was scoped to. */
+  milestone: string;
+  /** Open issues remaining on the milestone (after the run). */
+  open: number;
+  /** Closed issues on the milestone (lifetime). */
+  closed: number;
+  /** Number of issues this run attempted (loop.total). */
+  attempted: number;
+}
+
+/**
+ * Inputs needed to compute milestone progress for a report. The caller fetches
+ * `open`/`closed` counts from gh; `attempted` is taken from the loop result.
+ */
+export interface MilestoneProgressInput {
+  milestone: string;
+  openCount: number;
+  closedCount: number;
+}
+
 export interface RunReport {
   total: number;
   succeeded: number;
@@ -27,6 +48,8 @@ export interface RunReport {
   issues: RunReportIssue[];
   startedAt: string;
   completedAt: string;
+  /** Populated when the loop was milestone-scoped — omitted otherwise. */
+  milestoneProgress?: MilestoneProgress;
 }
 
 function sumWaveField(
@@ -42,7 +65,7 @@ function sumWaveField(
   return total;
 }
 
-export function buildRunReport(loopResult: LoopResult): RunReport {
+export function buildRunReport(loopResult: LoopResult, milestoneInput?: MilestoneProgressInput): RunReport {
   const issues: RunReportIssue[] = loopResult.results.map(({ issue, result }) => ({
     number: issue.number,
     title: issue.title,
@@ -54,7 +77,7 @@ export function buildRunReport(loopResult: LoopResult): RunReport {
     duration: sumWaveField(result.state.waveResults, 'duration'),
   }));
 
-  return {
+  const report: RunReport = {
     total: loopResult.total,
     succeeded: loopResult.succeeded,
     failed: loopResult.failed,
@@ -67,6 +90,17 @@ export function buildRunReport(loopResult: LoopResult): RunReport {
     startedAt: loopResult.startedAt,
     completedAt: new Date().toISOString(),
   };
+
+  if (milestoneInput) {
+    report.milestoneProgress = {
+      milestone: milestoneInput.milestone,
+      open: milestoneInput.openCount,
+      closed: milestoneInput.closedCount,
+      attempted: loopResult.total,
+    };
+  }
+
+  return report;
 }
 
 function formatDuration(ms: number): string {
@@ -100,11 +134,24 @@ function renderMarkdown(report: RunReport): string {
     `| **Total duration** | ${formatDuration(report.totalDuration)} |`,
     `| **Total turns** | ${report.totalTurns} |`,
     '',
+  ];
+
+  if (report.milestoneProgress) {
+    const mp = report.milestoneProgress;
+    lines.push(
+      '## Milestone progress',
+      '',
+      `**${escapeTableCell(mp.milestone)}** — ${mp.open} open / ${mp.closed} closed / ${mp.attempted} attempted this run`,
+      '',
+    );
+  }
+
+  lines.push(
     '## Per-Issue Breakdown',
     '',
     '| Issue | Status | Cost | Duration | PR |',
     '|-------|--------|------|----------|-----|',
-  ];
+  );
 
   for (const issue of report.issues) {
     const status = issue.success ? 'OK' : 'FAIL';
@@ -218,6 +265,10 @@ export function printRunReport(report: RunReport): void {
   log.info(
     `Total cost: $${report.totalCost.toFixed(2)} | ${report.totalTurns} turns | ${formatDuration(report.totalDuration)}`,
   );
+  if (report.milestoneProgress) {
+    const mp = report.milestoneProgress;
+    log.info(`Milestone progress: ${mp.milestone} — ${mp.open} open / ${mp.closed} closed / ${mp.attempted} attempted`);
+  }
   log.info('');
   log.info('Per-issue breakdown:');
   for (const issue of report.issues) {

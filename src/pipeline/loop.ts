@@ -1,5 +1,5 @@
 import { $ } from 'zx';
-import { fetchIssue, fetchIssues } from '../services/github.js';
+import { fetchIssue, fetchIssues, fetchMilestoneCounts } from '../services/github.js';
 import * as metrics from '../services/metrics.js';
 import { extractPRFromResult, fetchOpenPRsDetailed, type OpenPR } from '../services/pr-context.js';
 import { prioritizeIssues } from '../services/prioritize.js';
@@ -19,6 +19,11 @@ export interface LoopOptions {
   repoName: string;
   config: RepoConfig;
   filter?: string | undefined;
+  /**
+   * Milestone title — scopes the issue fetch (via `gh --milestone`) and triggers
+   * milestone progress reporting in the run report.
+   */
+  milestone?: string | undefined;
   maxIssues?: number | undefined;
   budgetUsd?: number | undefined;
   force?: boolean | undefined;
@@ -72,18 +77,21 @@ function emptyResult(startedAt: string): LoopResult {
 }
 
 export async function fixLoop(options: LoopOptions): Promise<LoopResult> {
-  const { repoPath, repoName, config, filter, maxIssues, budgetUsd, budgetTracker } = options;
+  const { repoPath, repoName, config, filter, milestone, maxIssues, budgetUsd, budgetTracker } = options;
   const startedAt = new Date().toISOString();
   const limit = maxIssues ?? config.auto?.max_per_run ?? config.rules.max_issues_per_run;
   const budget = budgetTracker ? undefined : (budgetUsd ?? config.rules.budget_usd);
   const concurrency = config.rules.concurrency ?? 1;
   log.info(`Fetching open issues for ${repoName}...`);
+  if (milestone) {
+    log.info(`[loop] Milestone filter: ${milestone}`);
+  }
   if (budgetTracker) {
     log.info(`Shared budget cap: $${budgetTracker.limitUsd.toFixed(2)}`);
   } else if (budget !== undefined) {
     log.info(`Budget cap: $${budget.toFixed(2)}`);
   }
-  const issues = await fetchIssues(repoPath, filter);
+  const issues = await fetchIssues(repoPath, filter, { milestone });
   if (issues.length === 0) {
     log.info('No open issues found.');
     return emptyResult(startedAt);
@@ -231,7 +239,12 @@ export async function fixLoop(options: LoopOptions): Promise<LoopResult> {
     results,
   };
 
-  const runReport = buildRunReport(loopResult);
+  let milestoneInput: { milestone: string; openCount: number; closedCount: number } | undefined;
+  if (milestone) {
+    const counts = await fetchMilestoneCounts(repoPath, milestone);
+    milestoneInput = { milestone, openCount: counts.open, closedCount: counts.closed };
+  }
+  const runReport = buildRunReport(loopResult, milestoneInput);
   printRunReport(runReport);
   await writeRunReport(repoPath, runReport).catch((err) => {
     log.warn(`Failed to write run report: ${err instanceof Error ? err.message : String(err)}`);
