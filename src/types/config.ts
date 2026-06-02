@@ -248,6 +248,7 @@ export const RepoConfigSchema = z.object({
       wave_cost_cap_usd: z.number().optional(),
       focus: z.array(z.string()).optional(),
       ci_merge: z.enum(['require', 'warn']).default('require'),
+      review_merge: z.enum(['require', 'warn']).default('require'),
       concurrency: z.number().int().positive().default(1),
       // Per-wave wall-clock timeout overrides (seconds, positive integers).
       // Issue #244 — large workspaces with local models need 30+ min for T/I.
@@ -269,6 +270,7 @@ export const RepoConfigSchema = z.object({
       auto_merge: false,
       max_issues_per_run: 10,
       ci_merge: 'require' as const,
+      review_merge: 'require' as const,
       concurrency: 1,
     })),
   auto: z

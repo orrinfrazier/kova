@@ -222,6 +222,110 @@ export interface PRReviewComment {
 
 const BOT_AUTHORS = new Set(['kova', 'github-actions']);
 
+/** Represents the latest review state and any unresolved blocking review threads on a PR. */
+export interface PRReviewState {
+  /**
+   * GitHub-level review decision: APPROVED | CHANGES_REQUESTED | REVIEW_REQUIRED | undefined.
+   * `undefined` when no reviews exist or gh returned null.
+   */
+  decision: 'APPROVED' | 'CHANGES_REQUESTED' | 'REVIEW_REQUIRED' | undefined;
+  /**
+   * Unresolved review threads that block the merge. Each entry carries enough
+   * context to dispatch a resolution pass (path/line/body) and to reply when
+   * the thread is addressed (threadId / first comment id).
+   */
+  blockingThreads: PRReviewThread[];
+}
+
+export interface PRReviewThread {
+  /** GraphQL thread id — required when calling resolveReviewThread. */
+  threadId: string;
+  /** First (root) comment id — used to reply via REST `pulls/comments/:id/replies`. */
+  rootCommentId: number | undefined;
+  path: string | undefined;
+  line: number | undefined;
+  body: string;
+  author: string;
+}
+
+/**
+ * Fetch latest review decision + any unresolved blocking review threads for a PR.
+ *
+ * Uses `gh pr view --json reviewDecision,reviewThreads` to get both decision and
+ * thread state in one call. A thread is "blocking" when it's not resolved and not
+ * outdated. Bot-authored threads are excluded (same filter as fetchPRReviewComments).
+ */
+export async function fetchPRReviewState(repoPath: string, prNumber: number): Promise<PRReviewState> {
+  try {
+    const result = await $({
+      cwd: repoPath,
+    })`gh pr view ${prNumber} --json reviewDecision,reviewThreads`;
+    const raw = JSON.parse(result.stdout) as {
+      reviewDecision: 'APPROVED' | 'CHANGES_REQUESTED' | 'REVIEW_REQUIRED' | null;
+      reviewThreads?: Array<{
+        id: string;
+        isResolved: boolean;
+        isOutdated: boolean;
+        comments: {
+          nodes?: Array<{
+            databaseId?: number;
+            author?: { login?: string };
+            body?: string;
+            path?: string | null;
+            line?: number | null;
+          }>;
+        };
+      }>;
+    };
+
+    const decision: PRReviewState['decision'] = raw.reviewDecision ?? undefined;
+    const threads = raw.reviewThreads ?? [];
+
+    const blockingThreads: PRReviewThread[] = threads
+      .filter((t) => !t.isResolved && !t.isOutdated)
+      .flatMap((t) => {
+        const nodes = t.comments?.nodes ?? [];
+        const root = nodes[0];
+        if (!root) return [];
+        const author = root.author?.login ?? 'unknown';
+        if (BOT_AUTHORS.has(author)) return [];
+        return [
+          {
+            threadId: t.id,
+            rootCommentId: root.databaseId ?? undefined,
+            path: root.path ?? undefined,
+            line: root.line ?? undefined,
+            body: root.body ?? '',
+            author,
+          },
+        ];
+      });
+
+    return { decision, blockingThreads };
+  } catch {
+    return { decision: undefined, blockingThreads: [] };
+  }
+}
+
+/** Reply to a review thread via the REST endpoint. Returns silently on failure. */
+export async function replyToReviewComment(
+  repoPath: string,
+  ownerRepo: string,
+  prNumber: number,
+  rootCommentId: number,
+  body: string,
+): Promise<void> {
+  try {
+    await $({
+      cwd: repoPath,
+    })`gh api repos/${ownerRepo}/pulls/${prNumber}/comments/${rootCommentId}/replies -f body=${body}`;
+  } catch (error) {
+    log.warn(
+      `[github] Failed to reply to review comment ${rootCommentId} on PR #${prNumber}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
 export async function fetchPRReviewComments(repoPath: string, prNumber: number): Promise<PRReviewComment[]> {
   try {
     const result = await $({ cwd: repoPath })`gh pr view ${prNumber} --json comments --jq .comments`;

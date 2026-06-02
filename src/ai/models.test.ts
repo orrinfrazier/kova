@@ -446,6 +446,7 @@ describe('models', () => {
             auto_merge: false,
             max_issues_per_run: 10,
             ci_merge: 'require' as const,
+            review_merge: 'require' as const,
             concurrency: 1,
           },
           model: {
@@ -475,6 +476,7 @@ describe('models', () => {
             auto_merge: false,
             max_issues_per_run: 10,
             ci_merge: 'require' as const,
+            review_merge: 'require' as const,
             concurrency: 1,
           },
           model: {
@@ -503,6 +505,7 @@ describe('models', () => {
             auto_merge: false,
             max_issues_per_run: 10,
             ci_merge: 'require' as const,
+            review_merge: 'require' as const,
             concurrency: 1,
           },
           model: {
@@ -530,6 +533,7 @@ describe('models', () => {
             auto_merge: false,
             max_issues_per_run: 10,
             ci_merge: 'require' as const,
+            review_merge: 'require' as const,
             concurrency: 1,
           },
           model: {
@@ -566,6 +570,7 @@ describe('models', () => {
             auto_merge: false,
             max_issues_per_run: 10,
             ci_merge: 'require' as const,
+            review_merge: 'require' as const,
             concurrency: 1,
           },
           model: {
@@ -598,6 +603,7 @@ describe('models', () => {
             auto_merge: false,
             max_issues_per_run: 10,
             ci_merge: 'require' as const,
+            review_merge: 'require' as const,
             concurrency: 1,
           },
           model: {
@@ -630,6 +636,7 @@ describe('models', () => {
             auto_merge: false,
             max_issues_per_run: 10,
             ci_merge: 'require' as const,
+            review_merge: 'require' as const,
             concurrency: 1,
           },
           model: {
@@ -661,6 +668,7 @@ describe('models', () => {
             auto_merge: false,
             max_issues_per_run: 10,
             ci_merge: 'require' as const,
+            review_merge: 'require' as const,
             concurrency: 1,
           },
           model: {
@@ -694,6 +702,7 @@ describe('models', () => {
             auto_merge: false,
             max_issues_per_run: 10,
             ci_merge: 'require' as const,
+            review_merge: 'require' as const,
             concurrency: 1,
           },
           model: {
@@ -1015,6 +1024,7 @@ describe('models', () => {
             auto_merge: false,
             max_issues_per_run: 10,
             ci_merge: 'require' as const,
+            review_merge: 'require' as const,
             concurrency: 1,
           },
           model: {
@@ -1049,6 +1059,7 @@ describe('models', () => {
             auto_merge: false,
             max_issues_per_run: 10,
             ci_merge: 'require' as const,
+            review_merge: 'require' as const,
             concurrency: 1,
           },
           model: {
@@ -1082,6 +1093,7 @@ describe('models', () => {
             auto_merge: false,
             max_issues_per_run: 10,
             ci_merge: 'require' as const,
+            review_merge: 'require' as const,
             concurrency: 1,
           },
           model: {
@@ -1114,6 +1126,7 @@ describe('models', () => {
             auto_merge: false,
             max_issues_per_run: 10,
             ci_merge: 'require' as const,
+            review_merge: 'require' as const,
             concurrency: 1,
           },
           model: {
