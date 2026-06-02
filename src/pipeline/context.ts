@@ -44,6 +44,13 @@ export interface ContextOptions {
   playbookContext?: string;
   /** Pre-formatted repo-intel context — architecture overview (only for assess wave). */
   repoContextText?: string;
+  /**
+   * Pre-formatted recurring-pattern context (#267) — top (diagnosis × module)
+   * failure patterns aggregated across past episodes in this repo. Injected
+   * into assess and spec waves so early decomposition is aware of known
+   * repeated failure modes in the same area.
+   */
+  patternContext?: string;
   /** Pre-formatted repo-intel search results — similar implementations (only for spec wave). */
   repoSearchText?: string;
   /** Pre-formatted repo-intel standards — project conventions (only for quality wave). */
@@ -203,6 +210,10 @@ function buildAssessContext(issue: Issue, options: ContextOptions): string {
     sections.push(options.episodicContext);
   }
 
+  if (options.patternContext) {
+    sections.push(options.patternContext);
+  }
+
   return sections.join('\n\n');
 }
 
@@ -218,6 +229,10 @@ function buildSpecContext(issue: Issue, handoffs: Handoffs, options: ContextOpti
 
   if (options.episodicContext) {
     sections.push(options.episodicContext);
+  }
+
+  if (options.patternContext) {
+    sections.push(options.patternContext);
   }
 
   if (options.playbookContext) {
