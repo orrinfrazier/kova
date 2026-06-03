@@ -1,18 +1,26 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+// Tests for the public surface of `episode-rest.ts` after the #433 migration
+// to sqlite-vec. The REST-fetch tests that lived here previously are gone
+// because there is no remote endpoint anymore — the local sqlite-vec store
+// is the only path. What remains:
+//   - `queryEpisodeContext` integration against the local DB (graceful gates +
+//     happy-path roundtrip).
+//   - `recordEpisode` integration (writes a row that the next query reads).
+//   - The pure helpers `formatEpisodes` and `formatFailedEpisodes`, which are
+//     unchanged.
+
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { EpisodicMemoryConfig } from '../../types/config.js';
-import { type EpisodeContext, formatEpisodes, formatFailedEpisodes, queryEpisodeContext } from './episode-rest.js';
-
-const mockFetch = vi.fn<(input: string | URL | Request, init?: RequestInit) => Promise<Response>>();
-
-beforeEach(() => {
-  vi.stubGlobal('fetch', mockFetch);
-});
-
-afterEach(() => {
-  vi.restoreAllMocks();
-});
-
-const ENDPOINT = 'http://localhost:8100/query';
+import type { EpisodeRecord } from '../../types/memory.js';
+import {
+  type EpisodeContext,
+  formatEpisodes,
+  formatFailedEpisodes,
+  queryEpisodeContext,
+  recordEpisode,
+} from './episode-rest.js';
 
 const sampleEpisodes: EpisodeContext[] = [
   {
@@ -44,7 +52,6 @@ const sampleEpisodes: EpisodeContext[] = [
 function makeEpisodeConfig(overrides?: Partial<EpisodicMemoryConfig>): EpisodicMemoryConfig {
   return {
     enabled: true,
-    endpoint: ENDPOINT,
     max_episodes: 3,
     cross_repo: true,
     same_repo_weight: 1.5,
@@ -53,136 +60,123 @@ function makeEpisodeConfig(overrides?: Partial<EpisodicMemoryConfig>): EpisodicM
   };
 }
 
-function mockJsonResponse(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { 'Content-Type': 'application/json' },
-  });
+function makeRecord(overrides?: Partial<EpisodeRecord>): EpisodeRecord {
+  return {
+    issue_number: 1,
+    issue_title: 'database connection pool exhausted',
+    labels: ['bug'],
+    repo: 'org/repo',
+    approach: 'increased pool size and added timeout',
+    files_changed: ['src/db.ts'],
+    quality_gates: null,
+    review_findings: [],
+    outcome: 'pr_created',
+    failed_at_wave: null,
+    total_cost: 0.5,
+    total_duration: 1000,
+    total_turns: 3,
+    timestamp: new Date().toISOString(),
+    ...overrides,
+  };
 }
 
-describe('queryEpisodeContext', () => {
-  it('returns episodes from endpoint', async () => {
-    mockFetch.mockResolvedValueOnce(mockJsonResponse({ episodes: sampleEpisodes }));
+describe('queryEpisodeContext (sqlite-vec)', () => {
+  let tmp: string;
 
-    const episodes = await queryEpisodeContext(makeEpisodeConfig(), 'fix token bug');
-
-    expect(episodes).toHaveLength(3);
-    expect(episodes[0]?.issue_title).toBe('Fix token expiry handling');
-    expect(episodes[0]?.score).toBe(0.91);
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), 'kova-episode-rest-'));
   });
 
-  it('sends query and max_episodes in POST body', async () => {
-    mockFetch.mockResolvedValueOnce(mockJsonResponse({ episodes: [] }));
-
-    await queryEpisodeContext(makeEpisodeConfig({ max_episodes: 2 }), 'search query');
-
-    expect(mockFetch).toHaveBeenCalledOnce();
-    const [url, init] = mockFetch.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe(ENDPOINT);
-    expect(init.method).toBe('POST');
-    const body = JSON.parse(init.body as string) as { query: string; top_k: number };
-    expect(body.query).toBe('search query');
-    expect(body.top_k).toBe(2);
-  });
-
-  it('sends repo and language when cross_repo is enabled', async () => {
-    mockFetch.mockResolvedValueOnce(mockJsonResponse({ episodes: [] }));
-
-    await queryEpisodeContext(makeEpisodeConfig({ cross_repo: true, language_filter: true }), 'search query', {
-      repo: 'my-repo',
-      language: 'typescript',
-    });
-
-    const body = JSON.parse((mockFetch.mock.calls[0] as [string, RequestInit])[1].body as string) as Record<
-      string,
-      unknown
-    >;
-    expect(body.repo).toBe('my-repo');
-    expect(body.language).toBe('typescript');
-    expect(body.cross_repo).toBe(true);
-  });
-
-  it('sends repo without cross_repo flag when cross_repo is false', async () => {
-    mockFetch.mockResolvedValueOnce(mockJsonResponse({ episodes: [] }));
-
-    await queryEpisodeContext(makeEpisodeConfig({ cross_repo: false }), 'search query', {
-      repo: 'my-repo',
-      language: 'typescript',
-    });
-
-    const body = JSON.parse((mockFetch.mock.calls[0] as [string, RequestInit])[1].body as string) as Record<
-      string,
-      unknown
-    >;
-    expect(body.repo).toBe('my-repo');
-    expect(body.cross_repo).toBe(false);
-  });
-
-  it('omits language when language_filter is false', async () => {
-    mockFetch.mockResolvedValueOnce(mockJsonResponse({ episodes: [] }));
-
-    await queryEpisodeContext(makeEpisodeConfig({ cross_repo: true, language_filter: false }), 'search query', {
-      repo: 'my-repo',
-      language: 'typescript',
-    });
-
-    const body = JSON.parse((mockFetch.mock.calls[0] as [string, RequestInit])[1].body as string) as Record<
-      string,
-      unknown
-    >;
-    expect(body.language).toBeUndefined();
+  afterEach(() => {
+    if (existsSync(tmp)) rmSync(tmp, { recursive: true, force: true });
   });
 
   it('returns empty array when disabled', async () => {
-    const episodes = await queryEpisodeContext(makeEpisodeConfig({ enabled: false }), 'query');
-
-    expect(episodes).toEqual([]);
-    expect(mockFetch).not.toHaveBeenCalled();
+    const result = await queryEpisodeContext(makeEpisodeConfig({ enabled: false }), 'query', undefined, tmp);
+    expect(result).toEqual([]);
   });
 
-  it('returns empty array on network error (graceful degradation)', async () => {
-    mockFetch.mockRejectedValueOnce(new Error('ECONNREFUSED'));
-
-    const episodes = await queryEpisodeContext(makeEpisodeConfig(), 'query');
-
-    expect(episodes).toEqual([]);
+  it('returns empty array when workDir is missing', async () => {
+    const result = await queryEpisodeContext(makeEpisodeConfig(), 'query');
+    expect(result).toEqual([]);
   });
 
-  it('returns empty array on non-200 response', async () => {
-    mockFetch.mockResolvedValueOnce(mockJsonResponse({ error: 'fail' }, 500));
-
-    const episodes = await queryEpisodeContext(makeEpisodeConfig(), 'query');
-
-    expect(episodes).toEqual([]);
+  it('returns empty array on empty DB', async () => {
+    const result = await queryEpisodeContext(makeEpisodeConfig(), 'query', { repo: 'org/repo' }, tmp);
+    expect(result).toEqual([]);
   });
 
-  it('returns empty array on malformed response', async () => {
-    mockFetch.mockResolvedValueOnce(mockJsonResponse({ wrong: 'shape' }));
-
-    const episodes = await queryEpisodeContext(makeEpisodeConfig(), 'query');
-
-    expect(episodes).toEqual([]);
+  it('returns recorded episodes via roundtrip', async () => {
+    await recordEpisode(makeEpisodeConfig(), makeRecord({ issue_number: 42 }), tmp);
+    const results = await queryEpisodeContext(
+      makeEpisodeConfig(),
+      'database connection pool',
+      { repo: 'org/repo' },
+      tmp,
+    );
+    expect(results.length).toBeGreaterThan(0);
+    expect(results[0]?.issue_number).toBe(42);
   });
 
   it('caps results at max_episodes', async () => {
-    const base = sampleEpisodes[0] as EpisodeContext;
-    const manyEpisodes = Array.from({ length: 5 }, (_, i) => ({
-      ...base,
-      issue_number: i + 1,
-      score: 0.9 - i * 0.05,
-    }));
-    mockFetch.mockResolvedValueOnce(mockJsonResponse({ episodes: manyEpisodes }));
-
-    const episodes = await queryEpisodeContext(makeEpisodeConfig({ max_episodes: 3 }), 'query');
-
-    expect(episodes).toHaveLength(3);
+    const config = makeEpisodeConfig({ max_episodes: 2 });
+    for (let i = 1; i <= 5; i++) {
+      await recordEpisode(config, makeRecord({ issue_number: i, approach: `approach ${i}` }), tmp);
+    }
+    const results = await queryEpisodeContext(config, 'approach', { repo: 'org/repo' }, tmp);
+    expect(results.length).toBeLessThanOrEqual(2);
   });
 
-  it('returns empty array when endpoint is missing', async () => {
-    const episodes = await queryEpisodeContext(makeEpisodeConfig({ endpoint: undefined }), 'query');
+  it('filters by language when language_filter is true and language is provided', async () => {
+    const config = makeEpisodeConfig({ language_filter: true });
+    await recordEpisode(
+      config,
+      makeRecord({ issue_number: 1, language: 'typescript', approach: 'a typescript approach' }),
+      tmp,
+    );
+    await recordEpisode(
+      config,
+      makeRecord({ issue_number: 2, language: 'rust', approach: 'a typescript approach' }),
+      tmp,
+    );
 
-    expect(episodes).toEqual([]);
-    expect(mockFetch).not.toHaveBeenCalled();
+    const results = await queryEpisodeContext(
+      config,
+      'a typescript approach',
+      { repo: 'org/repo', language: 'typescript' },
+      tmp,
+    );
+    expect(results.length).toBe(1);
+    expect(results[0]?.issue_number).toBe(1);
+  });
+});
+
+describe('recordEpisode (sqlite-vec)', () => {
+  let tmp: string;
+
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), 'kova-episode-rest-record-'));
+  });
+
+  afterEach(() => {
+    if (existsSync(tmp)) rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it('returns false when disabled', async () => {
+    const ok = await recordEpisode(makeEpisodeConfig({ enabled: false }), makeRecord(), tmp);
+    expect(ok).toBe(false);
+  });
+
+  it('returns false when workDir is missing', async () => {
+    const ok = await recordEpisode(makeEpisodeConfig(), makeRecord());
+    expect(ok).toBe(false);
+  });
+
+  it('returns true and persists the record on success', async () => {
+    const ok = await recordEpisode(makeEpisodeConfig(), makeRecord({ issue_number: 7 }), tmp);
+    expect(ok).toBe(true);
+    const results = await queryEpisodeContext(makeEpisodeConfig(), 'database connection', { repo: 'org/repo' }, tmp);
+    expect(results.some((r) => r.issue_number === 7)).toBe(true);
   });
 });
 

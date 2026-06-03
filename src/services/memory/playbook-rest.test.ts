@@ -1,4 +1,7 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { PlaybooksConfig } from '../../types/config.js';
 import {
   clusterEpisodes,
@@ -11,32 +14,28 @@ import {
   synthesizePlaybook,
 } from './playbook-rest.js';
 
-const mockFetch = vi.fn<(input: string | URL | Request, init?: RequestInit) => Promise<Response>>();
+let tmpRoot: string | null = null;
 
 beforeEach(() => {
-  vi.stubGlobal('fetch', mockFetch);
+  tmpRoot = mkdtempSync(join(tmpdir(), 'kova-playbook-rest-'));
 });
 
 afterEach(() => {
-  vi.restoreAllMocks();
+  if (tmpRoot && existsSync(tmpRoot)) rmSync(tmpRoot, { recursive: true, force: true });
+  tmpRoot = null;
 });
 
-const PLAYBOOK_ENDPOINT = 'http://localhost:8100/playbooks';
+function getTmp(): string {
+  if (!tmpRoot) throw new Error('tmpRoot not initialised');
+  return tmpRoot;
+}
 
 function makePlaybooksConfig(overrides?: Partial<PlaybooksConfig>): PlaybooksConfig {
   return {
     enabled: true,
-    endpoint: PLAYBOOK_ENDPOINT,
     min_episodes: 3,
     ...overrides,
   };
-}
-
-function mockJsonResponse(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { 'Content-Type': 'application/json' },
-  });
 }
 
 const clusterEpisodeFixtures: EpisodeForCluster[] = [
@@ -228,62 +227,60 @@ describe('formatPlaybook', () => {
   });
 });
 
-describe('queryPlaybook', () => {
-  it('returns playbook from endpoint', async () => {
-    const pb: PlaybookRecord = {
-      trigger: { labels: ['bug'], language: 'typescript', file_globs: ['src/a.ts'] },
-      steps: ['s'],
-      gotchas: [],
-      files_to_touch: ['src/a.ts'],
-      episode_refs: [1, 2, 3],
-      synthesized_from_count: 3,
-      created_at: '2026-06-01T00:00:00.000Z',
-    };
-    mockFetch.mockResolvedValueOnce(mockJsonResponse({ playbook: pb }));
+describe('queryPlaybook (sqlite-vec)', () => {
+  const pb: PlaybookRecord = {
+    trigger: { labels: ['bug'], language: 'typescript', file_globs: ['src/auth.ts'] },
+    steps: ['auth token refresh check before api call', 'guard middleware path'],
+    gotchas: ['watch the ttl drift'],
+    files_to_touch: ['src/auth.ts'],
+    episode_refs: [1, 2, 3],
+    synthesized_from_count: 3,
+    created_at: '2026-06-01T00:00:00.000Z',
+  };
 
-    const result = await queryPlaybook(makePlaybooksConfig(), 'auth token bug', {
-      repo: 'my-repo',
-      language: 'typescript',
-    });
-
-    expect(result).toEqual(pb);
+  it('returns playbook after roundtrip', async () => {
+    await recordPlaybook(makePlaybooksConfig(), pb, getTmp());
+    const result = await queryPlaybook(
+      makePlaybooksConfig(),
+      'auth token refresh check before api call',
+      { repo: 'my-repo', language: 'typescript' },
+      getTmp(),
+    );
+    expect(result).not.toBeNull();
+    expect(result?.steps[0]).toContain('auth token refresh');
   });
 
   it('returns null when disabled', async () => {
-    const result = await queryPlaybook(makePlaybooksConfig({ enabled: false }), 'q');
+    const result = await queryPlaybook(makePlaybooksConfig({ enabled: false }), 'q', undefined, getTmp());
     expect(result).toBeNull();
-    expect(mockFetch).not.toHaveBeenCalled();
   });
 
-  it('returns null when endpoint missing', async () => {
-    const result = await queryPlaybook(makePlaybooksConfig({ endpoint: undefined }), 'q');
-    expect(result).toBeNull();
-    expect(mockFetch).not.toHaveBeenCalled();
-  });
-
-  it('returns null on non-200 response (graceful degradation)', async () => {
-    mockFetch.mockResolvedValueOnce(mockJsonResponse({ error: 'oops' }, 500));
+  it('returns null when workDir is missing', async () => {
     const result = await queryPlaybook(makePlaybooksConfig(), 'q');
     expect(result).toBeNull();
   });
 
-  it('returns null on network error (graceful degradation)', async () => {
-    mockFetch.mockRejectedValueOnce(new Error('ECONNREFUSED'));
-    const result = await queryPlaybook(makePlaybooksConfig(), 'q');
+  it('returns null when no rows exist', async () => {
+    const result = await queryPlaybook(makePlaybooksConfig(), 'anything', undefined, getTmp());
     expect(result).toBeNull();
   });
 
-  it('returns null on malformed response missing playbook field', async () => {
-    mockFetch.mockResolvedValueOnce(mockJsonResponse({ wrong: 'shape' }));
-    const result = await queryPlaybook(makePlaybooksConfig(), 'q');
+  it('filters by language when language is provided and does not match', async () => {
+    await recordPlaybook(makePlaybooksConfig(), pb, getTmp());
+    const result = await queryPlaybook(
+      makePlaybooksConfig(),
+      'auth token refresh check before api call',
+      { language: 'rust' },
+      getTmp(),
+    );
     expect(result).toBeNull();
   });
 });
 
-describe('recordPlaybook', () => {
+describe('recordPlaybook (sqlite-vec)', () => {
   const pb: PlaybookRecord = {
     trigger: { labels: ['bug'], language: 'typescript', file_globs: ['src/a.ts'] },
-    steps: ['s'],
+    steps: ['record then query'],
     gotchas: [],
     files_to_touch: ['src/a.ts'],
     episode_refs: [1, 2, 3],
@@ -292,32 +289,17 @@ describe('recordPlaybook', () => {
   };
 
   it('returns false when disabled', async () => {
-    const ok = await recordPlaybook(makePlaybooksConfig({ enabled: false }), pb);
+    const ok = await recordPlaybook(makePlaybooksConfig({ enabled: false }), pb, getTmp());
     expect(ok).toBe(false);
-    expect(mockFetch).not.toHaveBeenCalled();
   });
 
-  it('returns false when endpoint missing', async () => {
-    const ok = await recordPlaybook(makePlaybooksConfig({ endpoint: undefined }), pb);
-    expect(ok).toBe(false);
-    expect(mockFetch).not.toHaveBeenCalled();
-  });
-
-  it('returns true on 200 response', async () => {
-    mockFetch.mockResolvedValueOnce(mockJsonResponse({ ok: true }));
+  it('returns false when workDir is missing', async () => {
     const ok = await recordPlaybook(makePlaybooksConfig(), pb);
+    expect(ok).toBe(false);
+  });
+
+  it('returns true on successful persist', async () => {
+    const ok = await recordPlaybook(makePlaybooksConfig(), pb, getTmp());
     expect(ok).toBe(true);
-  });
-
-  it('returns false on non-200 response (graceful degradation)', async () => {
-    mockFetch.mockResolvedValueOnce(mockJsonResponse({ error: 'oops' }, 500));
-    const ok = await recordPlaybook(makePlaybooksConfig(), pb);
-    expect(ok).toBe(false);
-  });
-
-  it('returns false on network error (graceful degradation)', async () => {
-    mockFetch.mockRejectedValueOnce(new Error('ECONNREFUSED'));
-    const ok = await recordPlaybook(makePlaybooksConfig(), pb);
-    expect(ok).toBe(false);
   });
 });

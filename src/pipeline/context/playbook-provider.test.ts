@@ -39,6 +39,7 @@ describe('playbookProvider', () => {
       expect.anything(),
       expect.any(String),
       expect.objectContaining({ language: 'rust' }),
+      expect.any(String),
     );
   });
 
@@ -49,6 +50,7 @@ describe('playbookProvider', () => {
       expect.anything(),
       expect.any(String),
       expect.objectContaining({ language: undefined }),
+      expect.any(String),
     );
   });
 });

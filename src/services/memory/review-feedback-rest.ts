@@ -1,13 +1,31 @@
-// Review-feedback REST client — classifies reviewer comments, persists
-// them to the episodic memory endpoint, formats them for retry-prompt
-// injection, and queries the endpoint for past feedback similar to a query.
+// Review-feedback client — classifies reviewer comments, persists them to
+// the local sqlite-vec store, formats them for retry-prompt injection, and
+// queries the local store for past feedback similar to a query (#433 — was
+// REST, now sqlite-vec per ADR 002). Filename retained as `*-rest.ts` for
+// the duration of #433 → #434 to keep the patch minimal.
 
+import { join as joinPath } from 'node:path';
 import type { EpisodicMemoryConfig } from '../../types/config.js';
 import type { ReviewFeedbackItem, ReviewFeedbackRecord } from '../../types/memory.js';
 import type { FeedbackType } from '../../types/vectordb.js';
 import { log } from '../../utils/logger.js';
+import { ReviewFeedbackStore } from './review-feedback-store.js';
 
 export type { ReviewFeedbackInput, ReviewFeedbackItem, ReviewFeedbackRecord } from '../../types/memory.js';
+
+function resolveFeedbackDbPath(workDir: string): string {
+  return joinPath(workDir, '.kova', 'review-feedback-vec.db');
+}
+
+function openFeedbackStore(workDir: string): ReviewFeedbackStore | null {
+  try {
+    return new ReviewFeedbackStore(resolveFeedbackDbPath(workDir));
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    log.warn(`[review-feedback] Failed to open local sqlite-vec store: ${msg}`);
+    return null;
+  }
+}
 
 /* ------------------------------------------------------------------ */
 /*  classifyFeedback                                                    */
@@ -47,40 +65,35 @@ export function classifyFeedback(text: string): FeedbackType {
 }
 
 /* ------------------------------------------------------------------ */
-/*  recordReviewFeedback — REST endpoint (graceful degradation)         */
+/*  recordReviewFeedback — local sqlite-vec store                       */
 /* ------------------------------------------------------------------ */
 
 export async function recordReviewFeedback(
   config: EpisodicMemoryConfig,
   records: ReviewFeedbackRecord[],
+  workDir?: string,
 ): Promise<boolean> {
   if (!config.enabled) {
     return false;
   }
-
-  if (!config.endpoint) {
-    log.warn('[review-feedback] Enabled but no endpoint configured — skipping recording');
+  if (!workDir) {
+    log.warn('[review-feedback] Enabled but no workDir provided — skipping recording');
     return false;
   }
 
+  const store = openFeedbackStore(workDir);
+  if (!store) return false;
+
   try {
-    const response = await fetch(config.endpoint, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(records),
-    });
-
-    if (!response.ok) {
-      log.warn(`[review-feedback] Recording endpoint returned ${response.status} — feedback not saved`);
-      return false;
-    }
-
+    store.recordFeedback(records);
     log.info(`[review-feedback] Recorded ${records.length} feedback items`);
     return true;
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     log.warn(`[review-feedback] Failed to record feedback: ${msg}`);
     return false;
+  } finally {
+    store.close();
   }
 }
 
@@ -105,60 +118,41 @@ export function formatReviewFeedback(feedback: ReviewFeedbackItem[]): string {
 }
 
 /* ------------------------------------------------------------------ */
-/*  queryReviewFeedbackContext — REST endpoint (pipeline context)        */
+/*  queryReviewFeedbackContext — local sqlite-vec store                 */
 /* ------------------------------------------------------------------ */
 
-interface ReviewFeedbackContextResponse {
-  feedback?: ReviewFeedbackItem[];
-}
-
 /**
- * Query the episodic memory REST endpoint for past review feedback similar to the given query.
- * Returns an empty array if disabled, on error, or if the response is malformed.
+ * Query the local sqlite-vec store for past review feedback similar to the
+ * given query. Returns an empty array on disabled / missing workDir / no match.
  */
 export async function queryReviewFeedbackContext(
   config: EpisodicMemoryConfig,
   query: string,
   repo?: string,
+  workDir?: string,
 ): Promise<ReviewFeedbackItem[]> {
   if (!config.enabled) {
     return [];
   }
-
-  if (!config.endpoint) {
-    log.warn('[review-feedback] Enabled but no endpoint configured — skipping');
+  if (!workDir) {
+    log.warn('[review-feedback] Enabled but no workDir provided — skipping');
     return [];
   }
 
+  const store = openFeedbackStore(workDir);
+  if (!store) return [];
+
   try {
-    const body: Record<string, unknown> = { query, type: 'review_feedback', top_k: config.max_episodes };
-    if (repo) {
-      body.repo = repo;
+    const results = store.queryFeedback(query, config.max_episodes, repo);
+    if (results.length > 0) {
+      log.info(`[review-feedback] Retrieved ${results.length} past feedback items`);
     }
-
-    const response = await fetch(config.endpoint, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-
-    if (!response.ok) {
-      log.warn(`[review-feedback] Endpoint returned ${response.status} — skipping feedback context`);
-      return [];
-    }
-
-    const data = (await response.json()) as ReviewFeedbackContextResponse;
-
-    if (!data.feedback || !Array.isArray(data.feedback)) {
-      log.warn('[review-feedback] Malformed response (missing feedback array) — skipping');
-      return [];
-    }
-
-    log.info(`[review-feedback] Retrieved ${data.feedback.length} past feedback items`);
-    return data.feedback;
+    return results;
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
-    log.warn(`[review-feedback] Failed to query endpoint: ${msg} — skipping feedback context`);
+    log.warn(`[review-feedback] Failed to query local store: ${msg} — skipping feedback context`);
     return [];
+  } finally {
+    store.close();
   }
 }

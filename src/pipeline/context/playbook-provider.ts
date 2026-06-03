@@ -13,10 +13,15 @@ export const playbookProvider: ContextProvider = {
   async resolve(ctx: ContextProviderInput): Promise<string | undefined> {
     if (!ctx.config.playbooks?.enabled) return undefined;
     const query = `${ctx.issue.title}\n\n${ctx.issue.body}`;
-    const playbook = await queryPlaybook(ctx.config.playbooks, query, {
-      repo: ctx.repoName,
-      language: ctx.language !== 'unknown' ? ctx.language : undefined,
-    });
+    const playbook = await queryPlaybook(
+      ctx.config.playbooks,
+      query,
+      {
+        repo: ctx.repoName,
+        language: ctx.language !== 'unknown' ? ctx.language : undefined,
+      },
+      ctx.workDir,
+    );
     if (!playbook) return undefined;
     return formatPlaybook(playbook);
   },
