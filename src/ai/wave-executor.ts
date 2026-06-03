@@ -3,12 +3,13 @@
 // and explicit handoff context. Returns WaveHandoff<T>.
 // executeWave() is a backward-compat wrapper that resolves model/tools internally.
 //
-// Agent construction goes through the kova-owned `AgentRuntimeFactory` (kova#309)
+// Agent construction goes through the kova-owned `AgentRuntimeFactory` (kova#309/#310)
 // rather than instantiating pi-mono `Agent` directly. The default factory wraps
-// pi-mono today; kova#310 will extract a full `PiAgentRuntime` with event/message
-// translation, and kova#NEW-13 will add a ClaudeCliRuntime alternative.
+// pi-mono and lives in `src/ai/runtime/pi-agent-runtime.ts` — the only place in
+// this file's transitive imports that touches `@earendil-works/pi-agent-core`
+// or `@earendil-works/pi-ai`. Future runtimes (kova#NEW-13 ClaudeCliRuntime,
+// OpenAI Assistants, …) plug in via the same `AgentRuntimeFactory` seam.
 
-import type { AgentTool } from '@earendil-works/pi-agent-core';
 import type { z } from 'zod';
 import type { EventBus } from '../services/event-bus/bus.js';
 import type { EventWaveName } from '../services/event-bus/schema.js';
@@ -29,6 +30,7 @@ import {
   type CacheRetention,
   defaultAgentRuntimeFactory,
   type RuntimeBeforeToolCallHook,
+  type RuntimeTool,
   type ThinkingLevel,
 } from './runtime/index.js';
 import type { TruncationOptions } from './tool-result-truncate.js';
@@ -40,8 +42,14 @@ export interface OutputFormat {
   zodSchema?: z.ZodType;
 }
 
-// biome-ignore lint/suspicious/noExplicitAny: pi-mono AgentTool uses any for tool parameter schemas
-type AnyTool = AgentTool<any>;
+/**
+ * Local tool alias — opaque at this layer. The kova-owned `RuntimeTool` type
+ * (`./runtime/types.ts`) is `any` by design: the wave-executor treats tools
+ * as adapter-typed payloads and never inspects their shape directly. The
+ * underlying runtime (today: pi-mono `AgentTool`) is the only place that
+ * narrows the type.
+ */
+type AnyTool = RuntimeTool;
 
 /**
  * Runtime type guard for the kova-owned `AssistantTurn` shape (kova#309).
