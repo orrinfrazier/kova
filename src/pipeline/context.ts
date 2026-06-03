@@ -67,6 +67,15 @@ export interface ContextOptions {
   repoStandardsText?: string;
   /** Pre-formatted past reviewer feedback context (only for review wave). */
   reviewFeedbackContext?: string;
+  /**
+   * Pre-formatted regression-surface context (#276) — list of dependents
+   * (direct callers and importing files) of the symbols/files changed in the
+   * worktree. Computed from the codegraph at WAVE R dispatch time. Injected
+   * into the review wave so the reviewer verifies behavioral consistency at
+   * each dependent rather than relying on local diff context alone.
+   * Source: {@link formatRegressionSurface} in `src/pipeline/regression-surface.ts`.
+   */
+  regressionSurfaceContext?: string;
 }
 
 export interface PieceContextOptions {
@@ -364,6 +373,14 @@ function buildReviewContext(handoffs: Handoffs, options: ContextOptions = {}): s
 
   if (options.reviewFeedbackContext) {
     sections.push(options.reviewFeedbackContext);
+  }
+
+  // Issue #276 — regression-surface (affected dependents) sits AFTER quality
+  // gates so the reviewer reads the quality report first, then the dependent
+  // list. `formatRegressionSurface` returns `''` when no dependents resolve
+  // and the empty string is filtered out by the join below.
+  if (options.regressionSurfaceContext) {
+    sections.push(options.regressionSurfaceContext);
   }
 
   return sections.join('\n\n');

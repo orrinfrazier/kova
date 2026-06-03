@@ -139,6 +139,14 @@ export interface ReviewLoopConfig {
   projectContext?: ProjectContext | undefined;
   playwright?: { enabled: boolean } | undefined;
   reviewFeedbackContext?: string;
+  /**
+   * Pre-formatted regression-surface context (#276) — dependents (callers +
+   * importers) of the symbols/files changed in the worktree. Computed by
+   * fix.ts from the codegraph before this loop is entered. When set, it is
+   * injected into every review iteration so the reviewer reads dependents
+   * alongside the quality report.
+   */
+  regressionSurfaceContext?: string;
   /** Route every wave through the docker sandbox container when set. */
   sandbox?: SandboxContext | undefined;
   /**
@@ -1428,6 +1436,7 @@ export async function runReviewLoop(config: ReviewLoopConfig): Promise<ReviewLoo
     prContext,
     projectContext,
     reviewFeedbackContext,
+    regressionSurfaceContext,
     testRunner = defaultTestRunner,
     fileWriter = defaultFileWriter,
     sandbox,
@@ -1556,6 +1565,7 @@ export async function runReviewLoop(config: ReviewLoopConfig): Promise<ReviewLoo
     const prescanContext = buildPrescanContext();
     const baseUserMessage = buildWaveContext('review', issue, waveResults, {
       ...(reviewFeedbackContext != null && { reviewFeedbackContext }),
+      ...(regressionSurfaceContext != null && { regressionSurfaceContext }),
     });
     const reviewUserMessage = prescanContext != null ? `${prescanContext}\n\n${baseUserMessage}` : baseUserMessage;
     const reviewExecResult = await dispatchExecuteWave(

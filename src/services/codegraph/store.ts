@@ -128,6 +128,19 @@ export class CodegraphStore {
       .map(rowToNode);
   }
 
+  /**
+   * List all symbols declared in the given file path. Issue #276 — used by
+   * the review wave's regression-surface helper and the spec-validator's
+   * dependency-overlap predicate to walk symbols of changed files without
+   * loading the source.
+   */
+  listFileSymbols(filePath: string): SymbolNode[] {
+    return this.db
+      .prepare<[string], NodeRow>('SELECT * FROM nodes WHERE file_path = ? ORDER BY start_line')
+      .all(filePath)
+      .map(rowToNode);
+  }
+
   /** Symbols whose outgoing `calls` edges point at the given node. */
   getCallers(nodeId: string): SymbolNode[] {
     return this.db

@@ -1219,3 +1219,75 @@ describe('mergeGraphAndVectorContext', () => {
     expect(merged).not.toContain('duplicate by key');
   });
 });
+
+// --- Regression-surface context (#276) ---
+
+describe('review wave — regression-surface injection', () => {
+  const regressionSurfaceContext =
+    '## Regression Surface (affected dependents)\n\n' +
+    'Symbols and files that depend on the changes below.\n\n' +
+    '### `src/auth.ts`\n' +
+    'Changed symbols: `verifyToken`\n\n' +
+    '- `loginHandler` in `src/routes/login.ts` calls `verifyToken`';
+
+  it('includes regressionSurfaceContext in review wave when provided', () => {
+    const handoffs: Partial<Record<string, WaveResult>> = {
+      spec: makeWaveResult('spec', specArtifact),
+      quality: makeWaveResult('quality', qualityArtifact),
+    };
+    const ctx = buildWaveContext('review', makeIssue(), handoffs, { regressionSurfaceContext });
+
+    expect(ctx).toContain('Regression Surface');
+    expect(ctx).toContain('verifyToken');
+    expect(ctx).toContain('loginHandler');
+    expect(ctx).toContain('src/routes/login.ts');
+  });
+
+  it('omits regression-surface section when regressionSurfaceContext is undefined', () => {
+    const handoffs: Partial<Record<string, WaveResult>> = {
+      spec: makeWaveResult('spec', specArtifact),
+      quality: makeWaveResult('quality', qualityArtifact),
+    };
+    const ctx = buildWaveContext('review', makeIssue(), handoffs, {});
+
+    expect(ctx).not.toContain('Regression Surface');
+  });
+
+  it('omits regression-surface section when regressionSurfaceContext is empty string', () => {
+    const handoffs: Partial<Record<string, WaveResult>> = {
+      spec: makeWaveResult('spec', specArtifact),
+      quality: makeWaveResult('quality', qualityArtifact),
+    };
+    const ctx = buildWaveContext('review', makeIssue(), handoffs, { regressionSurfaceContext: '' });
+
+    expect(ctx).not.toContain('Regression Surface');
+  });
+
+  it('does NOT inject regression-surface into non-review waves', () => {
+    const handoffs: Partial<Record<string, WaveResult>> = {
+      spec: makeWaveResult('spec', specArtifact),
+    };
+    const specCtx = buildWaveContext('spec', makeIssue(), handoffs, { regressionSurfaceContext });
+    const implCtx = buildWaveContext('impl', makeIssue(), handoffs, { regressionSurfaceContext });
+    const qualityCtx = buildWaveContext('quality', makeIssue(), handoffs, { regressionSurfaceContext });
+
+    expect(specCtx).not.toContain('Regression Surface');
+    expect(implCtx).not.toContain('Regression Surface');
+    expect(qualityCtx).not.toContain('Regression Surface');
+  });
+
+  it('renders quality gates BEFORE the regression-surface section', () => {
+    const handoffs: Partial<Record<string, WaveResult>> = {
+      spec: makeWaveResult('spec', specArtifact),
+      quality: makeWaveResult('quality', qualityArtifact),
+    };
+    const ctx = buildWaveContext('review', makeIssue(), handoffs, { regressionSurfaceContext });
+
+    const qualityIdx = ctx.indexOf('Quality Gates');
+    const surfaceIdx = ctx.indexOf('Regression Surface');
+
+    expect(qualityIdx).toBeGreaterThanOrEqual(0);
+    expect(surfaceIdx).toBeGreaterThanOrEqual(0);
+    expect(qualityIdx).toBeLessThan(surfaceIdx);
+  });
+});

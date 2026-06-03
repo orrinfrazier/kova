@@ -1,3 +1,4 @@
+import type { SymbolNode } from '../types/codegraph.js';
 import type { SpecPiece } from '../types/index.js';
 import { log } from '../utils/logger.js';
 
@@ -11,6 +12,46 @@ export interface PendingPRConflict {
   file: string;
   pieceName: string;
   pieceIndex: number;
+}
+
+/**
+ * A dependency edge between two spec pieces with disjoint file sets.
+ *
+ * Issue #276 — captures the case where two pieces touch no shared file but a
+ * symbol defined in piece A is called from a file in piece B. Running A and B
+ * concurrently risks collision (rename → unresolved import; signature change →
+ * type error) that file-overlap detection alone misses.
+ */
+export interface DependencyOverlap {
+  /** Symbol name defined in the source piece. */
+  symbolName: string;
+  /** File path of the symbol's definition (member of the source piece's files). */
+  sourceFile: string;
+  /** Index of the piece that defines the symbol. */
+  sourcePieceIndex: number;
+  /** Name of the piece that defines the symbol. */
+  sourcePieceName: string;
+  /** File path of the dependent caller (member of the dependent piece's files). */
+  dependentFile: string;
+  /** Index of the piece that contains the caller. */
+  dependentPieceIndex: number;
+  /** Name of the piece that contains the caller. */
+  dependentPieceName: string;
+}
+
+/**
+ * Read-only slice of the codegraph store used by {@link detectDependencyOverlaps}.
+ *
+ * Intentionally narrower than `CodegraphHandle` so tests can construct a tiny
+ * in-memory fake without taking a dependency on SQLite. Production callers
+ * pass an adapter over `openCodegraph()` that satisfies this interface
+ * structurally — see `src/pipeline/fix.ts`.
+ */
+export interface DependencyOverlapLookup {
+  /** Symbols defined in the given file. */
+  listFileSymbols: (filePath: string) => SymbolNode[];
+  /** Symbols whose outgoing `calls` edges point at the given node. */
+  getCallers: (nodeId: string) => SymbolNode[];
 }
 
 export interface ValidationResult {
@@ -253,6 +294,101 @@ export function formatPendingPRConflictFeedback(conflicts: PendingPRConflict[]):
   );
 
   return `## Pending PR Conflict Feedback\n\nThe spec includes pieces that modify files already changed by open PRs. Restructure pieces to avoid these files, or use different files to achieve the same goal.\n\n${lines.join('\n')}`;
+}
+
+/**
+ * Detect cross-piece dependency edges via the codegraph (#276).
+ *
+ * For each piece, walk the symbols defined in its files. If any caller of
+ * those symbols lives in a different piece's files, flag a dependency overlap.
+ * Pure function — takes the lookup; never opens a DB or reads a file.
+ *
+ * Returns `[]` when the lookup yields no symbols for any piece (graceful
+ * on missing index) or when no cross-piece edges exist.
+ *
+ * Per-file/per-symbol exceptions from the lookup are swallowed so a single
+ * bad entry does not blank the whole result. The function never throws to
+ * the caller.
+ */
+export function detectDependencyOverlaps(pieces: SpecPiece[], lookup: DependencyOverlapLookup): DependencyOverlap[] {
+  if (pieces.length <= 1) return [];
+
+  // Build file → piece index map. Symbols defined in `file` belong to that piece.
+  const fileToPiece = new Map<string, number>();
+  for (let i = 0; i < pieces.length; i++) {
+    const piece = pieces[i];
+    if (!piece) continue;
+    for (const file of piece.files) {
+      fileToPiece.set(file, i);
+    }
+  }
+
+  const overlaps: DependencyOverlap[] = [];
+  const seen = new Set<string>();
+
+  for (let i = 0; i < pieces.length; i++) {
+    const piece = pieces[i];
+    if (!piece) continue;
+    for (const file of piece.files) {
+      let symbols: SymbolNode[];
+      try {
+        symbols = lookup.listFileSymbols(file);
+      } catch (err) {
+        log.debug(
+          `[spec-validator] dependency-overlap: listFileSymbols threw for "${file}" — skipping: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        continue;
+      }
+
+      for (const sym of symbols) {
+        let callers: SymbolNode[];
+        try {
+          callers = lookup.getCallers(sym.id);
+        } catch {
+          continue;
+        }
+
+        for (const caller of callers) {
+          const callerPiece = fileToPiece.get(caller.filePath);
+          if (callerPiece === undefined || callerPiece === i) continue;
+
+          const dependentPiece = pieces[callerPiece];
+          if (!dependentPiece) continue;
+
+          const key = `${i}:${file}:${sym.name}->${callerPiece}:${caller.filePath}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+
+          overlaps.push({
+            symbolName: sym.name,
+            sourceFile: file,
+            sourcePieceIndex: i,
+            sourcePieceName: piece.name,
+            dependentFile: caller.filePath,
+            dependentPieceIndex: callerPiece,
+            dependentPieceName: dependentPiece.name,
+          });
+        }
+      }
+    }
+  }
+
+  return overlaps;
+}
+
+/**
+ * Format dependency-overlap information into a feedback message for spec re-run
+ * or for surfacing in a conflict report. Returns `''` when there are no overlaps.
+ */
+export function formatDependencyOverlapFeedback(overlaps: DependencyOverlap[]): string {
+  if (overlaps.length === 0) return '';
+
+  const lines = overlaps.map(
+    (o) =>
+      `Piece "${o.sourcePieceName}" defines \`${o.symbolName}\` (in ${o.sourceFile}) but piece "${o.dependentPieceName}" calls it (from ${o.dependentFile}). Running these pieces concurrently risks a rename/signature collision.`,
+  );
+
+  return `## Dependency Overlap Feedback (#276)\n\nThe spec includes pieces whose files are disjoint but linked by a call/import edge in the codegraph. Restructure to serialize the coupled pieces, or merge them so a single piece owns both ends of the edge.\n\n${lines.join('\n')}`;
 }
 
 function mergePieces(toMerge: SpecPiece[]): SpecPiece {
