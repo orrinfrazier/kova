@@ -746,6 +746,66 @@ program
     process.exit(exitCodeForSignal(getShutdownSignal()));
   });
 
+// Issue #291: persistent `kova daemon` — a detached background process that
+// owns a fix queue (with on-disk snapshot persistence) and outlives the
+// terminal that started it. `kova auto`/`loop`/`epic` can submit work to
+// the daemon when one is running; otherwise they fall through to inline
+// execution unchanged.
+program
+  .command('daemon [action]')
+  .description('Manage the persistent kova daemon — actions: start, status, stop, run')
+  .action(async (action: string | undefined) => {
+    const verb = action ?? 'help';
+    if (verb === 'help' || !['start', 'status', 'stop', 'run'].includes(verb)) {
+      console.log(
+        [
+          'Usage: kova daemon <action>',
+          '',
+          'Actions:',
+          '  start    Spawn the daemon as a detached background process',
+          '  status   Print pid + queued + running state',
+          '  stop     Send shutdown command, wait for drain',
+          '  run      (internal) Run the daemon in the foreground — used by `start`',
+        ].join('\n'),
+      );
+      if (verb !== 'help') process.exit(1);
+      return;
+    }
+
+    const { runDaemonRun, runDaemonStart, runDaemonStatus, runDaemonStop } = await import('./daemon.js');
+    if (verb === 'daemon-start' || verb === 'start') {
+      const result = await runDaemonStart();
+      if (!result.ok) {
+        console.error(`kova daemon start: ${result.reason ?? 'unknown error'}`);
+        process.exit(1);
+      }
+      console.log(`Daemon started (pid=${result.pid ?? '?'}) listening on ${result.socketPath}`);
+      return;
+    }
+    if (verb === 'daemon-status' || verb === 'status') {
+      const result = await runDaemonStatus();
+      if (!result.running) {
+        console.log('Daemon: not running');
+        process.exit(1);
+      }
+      console.log(`Daemon: running (pid=${result.pid ?? '?'}, queued=${result.queued ?? 0})`);
+      return;
+    }
+    if (verb === 'daemon-stop' || verb === 'stop') {
+      const result = await runDaemonStop();
+      if (!result.ok) {
+        console.error(`kova daemon stop: ${result.reason ?? 'unknown error'}`);
+        process.exit(1);
+      }
+      console.log('Daemon: stopped');
+      return;
+    }
+    if (verb === 'daemon-run' || verb === 'run') {
+      await runDaemonRun();
+      return;
+    }
+  });
+
 program
   .command('capture <fix-id>')
   .description('Print the per-fix scrollback ring buffer (replay) from a running kova daemon')
