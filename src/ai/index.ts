@@ -41,6 +41,12 @@ export {
   resolveOllamaApiKey,
 } from './ollama.js';
 export {
+  getPricing,
+  type ModelPricing,
+  priceUsage,
+  type TokenUsage,
+} from './pricing.js';
+export {
   createRouterModel,
   getRouterBaseUrl,
   getRouterDefaultModel,
