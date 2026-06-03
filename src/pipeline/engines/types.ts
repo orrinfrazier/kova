@@ -16,8 +16,8 @@ import type { FixAIWaveName } from '../../ai/wave-tools.js';
 import type { SandboxContext } from '../../sandbox/dispatch.js';
 import type { ProjectContext } from '../../services/project-context.js';
 import type { WaveHandoff } from '../../types/handoffs.js';
-import type { Issue, RepoConfig, SkillWaveName, WaveName, WaveResult } from '../../types/index.js';
-import type { DiffRunner, TestRunner } from '../loops.js';
+import type { Issue, RepoConfig, ReviewFinding, SkillWaveName, WaveName, WaveResult } from '../../types/index.js';
+import type { DiffRunner, FileWriter, PrescanRunner, TestRunner } from '../loops.js';
 
 /**
  * Cached per-run skills + enabled-wave list — mirrors `FixRunSkills` from `fix.ts`.
@@ -152,4 +152,113 @@ export interface QualityEngineInput {
   waveResults: Partial<Record<WaveName, WaveResult>>;
   testRunner?: TestRunner | undefined;
   testCommand?: string | undefined;
+}
+
+// --- ReviewEngine input (issue #356) ---
+//
+// Wave-specific input payload for the ReviewEngine. The engine merges these
+// with orchestrator-owned EngineContext fields (workDir, repoConfig, sandbox,
+// projectContext, cacheContext, playwright) before delegating to
+// `runReviewLoop`. Fields here mirror the loop's config minus the ctx-shaped
+// slots.
+
+export interface ReviewEngineInput {
+  issue: Issue;
+  /** Accumulated wave handoffs. Review reads quality + impl + test results. */
+  waveResults: Partial<Record<WaveName, WaveResult>>;
+  maxIterations?: number | undefined;
+  testCommand?: string | undefined;
+  testRunner?: TestRunner | undefined;
+  fileWriter?: FileWriter | undefined;
+  prContext?: string | undefined;
+  reviewFeedbackContext?: string | undefined;
+  prescanRunner?: PrescanRunner | undefined;
+  /** Baseline failing-test names recorded before WAVE I ran. */
+  baselineFailures?: string[] | undefined;
+  /** Current failing-test names after WAVE I. Paired with baselineFailures. */
+  currentFailures?: string[] | undefined;
+  /** Override the wave's playwright wiring at input level. EngineContext.playwright wins. */
+  playwright?: { enabled: boolean } | undefined;
+}
+
+// --- ShipEngine (issue #356) ---
+//
+// Ship is NOT an AI wave — it has no model, no cost, no turns. It encapsulates
+// the deterministic git operations phase: pre-ship conflict detection,
+// conditional impl retry on overlapping conflicts, rebase, secrets scan,
+// commit, push, PR creation. ShipEngine therefore lives outside the
+// `WaveEngine<TInput, TOutput>` contract (whose `name` is `FixAIWaveName`).
+
+/**
+ * Hook for re-running the parallel piece T+I loop when ship detects
+ * overlapping spec-file conflicts. Injected by callers so this engine stays
+ * decoupled from the TIEngine module. Returning `testsPassing: false` is a
+ * non-fatal signal — ship logs a warning and proceeds to rebase.
+ */
+export type ShipRetryParallelTILoop = (input: { codebaseContext: string }) => Promise<{ testsPassing: boolean }>;
+
+/**
+ * Context every ShipEngine run receives. A strict subset of `EngineContext` —
+ * ship only needs the working directory and the repo path (for `listOpenPRs`).
+ * Keeping it separate from `EngineContext` avoids dragging AI-wave-only fields
+ * (mcpHandles, runSkills, abTestVariant) into a non-AI engine.
+ */
+export interface ShipEngineContext {
+  /** Worktree path where the engine performs git operations. */
+  workDir: string;
+  /** The user's repo checkout — used for repo-level gh queries (listOpenPRs). */
+  repoPath: string;
+  /** Repo-level configuration. Optional — ship's deterministic gates do not consult it. */
+  config?: RepoConfig | undefined;
+}
+
+/**
+ * Input payload for a ShipEngine run.
+ */
+export interface ShipEngineInput {
+  issue: Issue;
+  /** Branch name on origin where the PR will be created. */
+  branch: string;
+  /** Files declared in the spec — used by `checkForConflicts` to bucket overlapping vs not. */
+  specFiles: string[];
+  /** Other PRs currently open against the repo — surfaced in the PR body for merge ordering. */
+  openPRs: string[];
+  /** Issue numbers this fix depends on (for the "Merge Dependencies" PR-body section). */
+  mergeDependencies?: number[] | undefined;
+  /** Findings from WAVE R the loop could not resolve — listed under "Known Issues" in PR body. */
+  reviewKnownIssues?: ReviewFinding[] | undefined;
+  /** Optional retry hook — invoked when overlapping conflicts are detected. */
+  retryParallelTILoop?: ShipRetryParallelTILoop | undefined;
+}
+
+/**
+ * Discriminated-union outcome of a ShipEngine run.
+ *
+ * `shipped` — PR created. Carries the URL + commit + staged-file list.
+ * `no_changes` — `commitAndPush` reported nothing to commit (the fix was a no-op).
+ * `failed` — A deterministic gate (secrets / rebase / conflict-resolution) blocked the ship.
+ */
+export type ShipEngineResult =
+  | {
+      status: 'shipped';
+      prUrl: string;
+      commitMessage?: string;
+      filesStaged: string[];
+    }
+  | {
+      status: 'no_changes';
+    }
+  | {
+      status: 'failed';
+      reason: 'secrets' | 'rebase' | 'conflict';
+      error: string;
+    };
+
+/**
+ * The ShipEngine contract. Stateless. Implementations encapsulate the
+ * conflict-detect → rebase → secrets-scan → commit → push → PR sequence.
+ */
+export interface ShipEngine {
+  readonly name: 'ship';
+  run(ctx: ShipEngineContext, input: ShipEngineInput): Promise<ShipEngineResult>;
 }
