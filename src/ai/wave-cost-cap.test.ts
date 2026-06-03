@@ -59,20 +59,43 @@ describe('per-wave cost cap (maxCostUsd)', () => {
     delete process.env.ANTHROPIC_API_KEY;
   });
 
+  // Issue #313: cost is now priced from token counts via the kova pricing
+  // table, not read from `usage.cost.total`. We use `claude-sonnet-4-6`
+  // pricing (output = $15 per Mtok) to back-compute the output-token count
+  // that produces a given turn cost. cost.total stays on the fixture for
+  // completeness but isn't read by the executor anymore.
+  function outputTokensFor(cost: number): number {
+    // claude-sonnet-4-6 output rate is $15 per million tokens.
+    return Math.ceil((cost * 1_000_000) / 15);
+  }
+
   function simulateTurnsWithCost(costs: number[]): void {
     mockPrompt.mockImplementation(async () => {
       for (const turnCost of costs) {
+        const output = outputTokensFor(turnCost);
         mockAgentState.messages.push({
           role: 'assistant',
           content: [{ type: 'text', text: 'working...' }],
-          usage: { cost: { total: turnCost } },
+          usage: {
+            input: 0,
+            output,
+            cacheRead: 0,
+            cacheWrite: 0,
+            cost: { total: turnCost },
+          },
         });
         subscribeCb?.({
           type: 'turn_end',
           message: {
             role: 'assistant',
             content: [{ type: 'text', text: 'working...' }],
-            usage: { input: 100, cost: { total: turnCost } },
+            usage: {
+              input: 100,
+              output,
+              cacheRead: 0,
+              cacheWrite: 0,
+              cost: { total: turnCost },
+            },
           },
         });
       }

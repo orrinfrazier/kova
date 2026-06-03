@@ -22,7 +22,8 @@ import { createImportPreservationGuard, type ImportPreservationGuardOptions } fr
 import { getModelString, resolveModelFromString, resolveWaveModel } from './models.js';
 import { isOllamaProvider, resolveOllamaApiKey } from './ollama.js';
 import { composeBeforeToolCallHooks, createPieceScopeGuard } from './piece-scope-guard.js';
-import { isRouterProvider, resolveRouterApiKey } from './router.js';
+import { priceUsage, type TokenUsage } from './pricing.js';
+import { getRouterDefaultModel, isRouterProvider, resolveRouterApiKey } from './router.js';
 import {
   type AgentMessage,
   type AgentRuntimeFactory,
@@ -71,6 +72,37 @@ export function isAssistantMessage(msg: unknown): msg is AssistantTurn {
     typeof (msg as { usage: unknown }).usage === 'object' &&
     (msg as { usage: unknown }).usage !== null
   );
+}
+
+/**
+ * Project an assistant message's `usage` onto the kova-owned `TokenUsage`
+ * shape. Defensive against runtimes (or test fixtures) that omit cache
+ * fields — those default to 0. Issue #313.
+ */
+function toTokenUsage(usage: AssistantTurn['usage']): TokenUsage {
+  const u = usage as {
+    input?: number;
+    output?: number;
+    cacheRead?: number;
+    cacheWrite?: number;
+  };
+  return {
+    input: u.input ?? 0,
+    output: u.output ?? 0,
+    cacheRead: u.cacheRead ?? 0,
+    cacheWrite: u.cacheWrite ?? 0,
+  };
+}
+
+/**
+ * Extract the bare model id from a `ROUTER_DEFAULT`-style string. Accepts
+ * either `provider:modelId` (the round-trip form, e.g.
+ * `anthropic:claude-sonnet-4-6`) or a bare modelId. Returns the bare id so
+ * pricing can look it up against the kova table. Issue #313.
+ */
+function extractUnderlyingRouterModelId(routerDefault: string): string {
+  const colonIndex = routerDefault.indexOf(':');
+  return colonIndex > 0 ? routerDefault.slice(colonIndex + 1) : routerDefault;
 }
 
 /**
@@ -381,6 +413,16 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
 
   const beforeToolCallHook = composeBeforeToolCallHooks([scopeHook, destructiveHook, importHook]);
 
+  // Issue #313: price every assistant turn through the kova-owned pricing
+  // table, not pi-ai's `cost.total`. For router-mode we resolve to the
+  // underlying ROUTER_DEFAULT model id so the router placeholder Model
+  // object's all-zero `cost` field never leaks into pricing.
+  // `pricingModelId` is captured once per wave because `model` doesn't change
+  // across turns inside a single spawnWaveAgent invocation.
+  const pricingModelId = isRouterProvider(model.provider)
+    ? extractUnderlyingRouterModelId(getRouterDefaultModel())
+    : model.id;
+
   // Construct via the AgentRuntime factory (kova#309). The default factory
   // wraps pi-mono Agent; kova#310 will extract a full PiAgentRuntime adapter.
   //
@@ -442,8 +484,10 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
         if (msg.stopReason === 'error' || msg.stopReason === 'aborted') {
           lastErrorMessage = msg.errorMessage ?? `Agent ${msg.stopReason} during ${wave}`;
         }
-        // Track cost incrementally from assistant turn_end events
-        const turnCost = msg.usage.cost.total;
+        // Track cost incrementally from assistant turn_end events.
+        // Issue #313: price through kova's table, not pi-ai's `cost.total`
+        // (which is $0 for router-mode and won't model #297 cache retention).
+        const turnCost = priceUsage(pricingModelId, toTokenUsage(msg.usage));
         accumulatedCost += turnCost;
         // Issue #297: accumulate input + cacheRead tokens for the cache-share
         // telemetry line emitted at wave completion. The kova-owned
@@ -582,7 +626,10 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
       const stateMessages = agent.state.messages;
       for (const msg of stateMessages) {
         if (isAssistantMessage(msg)) {
-          collected += msg.usage.cost.total;
+          // Issue #313: re-price via kova's table so the final tally matches
+          // the per-turn accumulation. Router-mode in particular reports $0
+          // via `cost.total`; pricing through `pricingModelId` fixes that.
+          collected += priceUsage(pricingModelId, toTokenUsage(msg.usage));
         }
       }
       const last = [...stateMessages].reverse().find((m): m is AssistantTurn => isAssistantMessage(m));

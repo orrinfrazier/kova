@@ -77,6 +77,7 @@ vi.mock('./router.js', () => ({
     maxTokens: 8192,
   }),
   resolveRouterApiKey: () => 'mock-router-key',
+  getRouterDefaultModel: () => process.env.ROUTER_DEFAULT ?? 'anthropic:claude-sonnet-4-6',
 }));
 
 const { Agent } = await import('@earendil-works/pi-agent-core');
@@ -893,20 +894,41 @@ describe('per-wave cost cap (maxCostUsd)', () => {
     delete process.env.ANTHROPIC_API_KEY;
   });
 
+  // Issue #313: cost is now priced from token counts via the kova pricing
+  // table, not read from `usage.cost.total`. Back-compute the output-token
+  // count that produces a given turn cost at claude-sonnet-4-6 pricing
+  // ($15 per Mtok output).
+  function outputTokensFor(cost: number): number {
+    return Math.ceil((cost * 1_000_000) / 15);
+  }
+
   function simulateTurnsWithCost(costs: number[]): void {
     mockPrompt.mockImplementation(async () => {
       for (const turnCost of costs) {
+        const output = outputTokensFor(turnCost);
         mockAgentState.messages.push({
           role: 'assistant',
           content: [{ type: 'text', text: 'working...' }],
-          usage: { cost: { total: turnCost } },
+          usage: {
+            input: 0,
+            output,
+            cacheRead: 0,
+            cacheWrite: 0,
+            cost: { total: turnCost },
+          },
         });
         subscribeCb?.({
           type: 'turn_end',
           message: {
             role: 'assistant',
             content: [{ type: 'text', text: 'working...' }],
-            usage: { input: 100, cost: { total: turnCost } },
+            usage: {
+              input: 100,
+              output,
+              cacheRead: 0,
+              cacheWrite: 0,
+              cost: { total: turnCost },
+            },
           },
         });
       }
