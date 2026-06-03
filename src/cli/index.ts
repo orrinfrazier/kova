@@ -17,6 +17,13 @@ import { runAuto, runAutoMultiRepo, runAutoMultiRepoParallel } from '../pipeline
 import { runBabysit } from '../pipeline/babysit.js';
 import { makeRunReviewLoopDispatch, previewDispatch } from '../pipeline/babysit-dispatch.js';
 import { brainstorm, printBrainstormPreview } from '../pipeline/brainstorm.js';
+import {
+  applyConsensusToConfig,
+  DEFAULT_CONSENSUS_WAVES,
+  formatConsensusActivationLog,
+  parseConsensusWavesList,
+  parsePoolSpec,
+} from '../pipeline/consensus-flags.js';
 import { fix } from '../pipeline/fix.js';
 import { indexCodebase } from '../pipeline/index-codebase.js';
 import { fixLoop } from '../pipeline/loop.js';
@@ -154,6 +161,18 @@ program
     '--runtime <runtime>',
     `Agent runtime: ${RUNTIME_KINDS.join(' | ')}. Overrides per-repo config.runtime (default 'pi'). (#407)`,
   )
+  .option(
+    '--consensus',
+    'Route high-stakes waves through multi-model consensus + adjudicator (issue #261). Pair with --pool to choose the pool; default waves: assess, spec, review.',
+  )
+  .option(
+    '--pool <spec>',
+    'Consensus pool spec: "diverse" (anthropic+openai+google) or a comma-separated provider:model list (2-5 members). Requires --consensus.',
+  )
+  .option(
+    '--consensus-waves <waves>',
+    'Comma-separated wave names to route through consensus: assess|spec|test|impl|quality|review. Default when --consensus is set: assess,spec,review.',
+  )
   .option('--no-comment', 'Suppress GitHub comment on grade D/F skip')
   .action(
     async (
@@ -170,6 +189,9 @@ program
         comment?: boolean;
         mode?: string;
         runtime?: string;
+        consensus?: boolean;
+        pool?: string;
+        consensusWaves?: string;
       },
     ) => {
       const kovaConfig = await tryLoadConfig(program.opts().config);
@@ -219,8 +241,40 @@ program
 
       log.info(`Fixing issue #${issueNumber} in ${repoName}`);
 
+      // Issue #261: resolve --consensus / --pool / --consensus-waves into a
+      // pool + wave list, mutate the repo config so target waves dispatch
+      // through `spawnConsensusWave`, and surface the routing + cost hint.
+      // Done BEFORE validateModelConfig so any missing pool-member API key
+      // fails fast at startup (per the issue AC).
+      let effectiveConfig = config;
+      if (opts.pool != null && opts.consensus !== true) {
+        console.error('--pool requires --consensus; pass --consensus to enable multi-model routing.');
+        process.exit(1);
+      }
+      if (opts.consensusWaves != null && opts.consensus !== true) {
+        console.error('--consensus-waves requires --consensus; pass --consensus to enable multi-model routing.');
+        process.exit(1);
+      }
+      let consensusPool: ReturnType<typeof parsePoolSpec> | undefined;
+      let consensusWaves: ReturnType<typeof parseConsensusWavesList> | undefined;
+      if (opts.consensus === true) {
+        try {
+          consensusPool = parsePoolSpec(opts.pool ?? 'diverse');
+          consensusWaves =
+            opts.consensusWaves != null ? parseConsensusWavesList(opts.consensusWaves) : [...DEFAULT_CONSENSUS_WAVES];
+        } catch (err) {
+          console.error(err instanceof Error ? err.message : String(err));
+          process.exit(1);
+        }
+        effectiveConfig = applyConsensusToConfig(config, {
+          pool: consensusPool,
+          waves: consensusWaves,
+        });
+        log.info(formatConsensusActivationLog({ pool: consensusPool, waves: consensusWaves }));
+      }
+
       // Validate configured models and API keys before starting
-      validateModelConfig(config);
+      validateModelConfig(effectiveConfig);
 
       if (!opts.force) {
         const existing = await hasExistingWork(repoPath, issueNumber);
@@ -240,11 +294,13 @@ program
         issue,
         repoPath,
         repoName,
-        config,
+        config: effectiveConfig,
         fresh: opts.fresh,
         noComment: opts.comment === false,
         mode: opts.mode != null ? mode : undefined,
         ...(runtime != null ? { runtime } : {}),
+        ...(consensusPool != null ? { consensusPool } : {}),
+        ...(consensusWaves != null ? { consensusWaves } : {}),
       });
 
       shutdownMetrics();
