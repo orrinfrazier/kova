@@ -6,8 +6,8 @@
 
 import { formatSkillsForPrompt, type Skill } from '@earendil-works/pi-coding-agent';
 import { fs, path } from 'zx';
-import type { ProjectContext } from '../services/project-context.js';
 import type { CustomTool, SkillWaveName } from '../types/index.js';
+import type { ProjectContext } from './project-context.js';
 
 const PROMPTS_DIR = path.join(import.meta.dirname, '..', '..', 'prompts');
 

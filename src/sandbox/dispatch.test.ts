@@ -18,8 +18,8 @@ vi.mock('../ai/index.js', async (importOriginal) => {
   };
 });
 
-vi.mock('../services/sandbox.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../services/sandbox.js')>();
+vi.mock('./sandbox.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./sandbox.js')>();
   return {
     ...actual,
     execWaveInContainer: vi.fn(),
@@ -27,9 +27,9 @@ vi.mock('../services/sandbox.js', async (importOriginal) => {
 });
 
 import { executeWaveWithRetry, spawnWaveAgentWithFallback } from '../ai/index.js';
-import { execWaveInContainer } from '../services/sandbox.js';
 import type { SandboxBackend } from './backend.js';
 import { dispatchExecuteWave, dispatchSpawnWave, resolveOutputSchemaName } from './dispatch.js';
+import { execWaveInContainer } from './sandbox.js';
 
 const mockSpawnWaveAgentWithFallback = vi.mocked(spawnWaveAgentWithFallback);
 const mockExecuteWaveWithRetry = vi.mocked(executeWaveWithRetry);
