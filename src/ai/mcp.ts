@@ -92,19 +92,64 @@ export async function resolveMCPServers(
   return { ...userServers, ...repoServers };
 }
 
+/** Substitute `${workspaceFolder}` and `${cwd}` tokens with the supplied workDir.
+ *  When workDir is undefined the input is returned unchanged so intentional shell
+ *  strings like `${HOME}` are not silently swallowed by this helper.
+ *  Exported for unit testing. */
+export function substituteWorkDirTokens(value: string, workDir: string | undefined): string {
+  if (workDir == null) return value;
+  return value.replace(/\$\{workspaceFolder\}/g, workDir).replace(/\$\{cwd\}/g, workDir);
+}
+
+/** Apply token substitution across an args array. */
+function substituteArgs(args: string[] | undefined, workDir: string | undefined): string[] | undefined {
+  if (args == null) return args;
+  if (workDir == null) return args;
+  return args.map((arg) => substituteWorkDirTokens(arg, workDir));
+}
+
+/** Apply token substitution across env values. Keys are not substituted. */
+function substituteEnv(
+  env: Record<string, string> | undefined,
+  workDir: string | undefined,
+): Record<string, string> | undefined {
+  if (env == null) return env;
+  if (workDir == null) return env;
+  const result: Record<string, string> = {};
+  for (const [k, v] of Object.entries(env)) {
+    result[k] = substituteWorkDirTokens(v, workDir);
+  }
+  return result;
+}
+
 /** Start an MCP server as a child process and discover its tools.
- *  Returns a handle for tool execution and lifecycle management. */
-export async function startMCPServer(name: string, config: MCPServerConfig): Promise<MCPServerHandle> {
-  log.info(`[mcp] Starting MCP server: ${name} (${config.command})`);
+ *
+ *  When `workDir` is provided the child process is spawned with `cwd = workDir`
+ *  and `${workspaceFolder}` / `${cwd}` tokens in args and env values are
+ *  resolved to `workDir`. This lets path-sensitive servers (codegraph,
+ *  language servers) index the per-fix worktree instead of the orchestrator's
+ *  cwd. When `workDir` is undefined the child inherits the parent's cwd and
+ *  template tokens are left literal (backward compatible). */
+export async function startMCPServer(
+  name: string,
+  config: MCPServerConfig,
+  workDir?: string,
+): Promise<MCPServerHandle> {
+  log.info(`[mcp] Starting MCP server: ${name} (${config.command})${workDir ? ` (cwd=${workDir})` : ''}`);
+
+  const resolvedArgs = substituteArgs(config.args, workDir);
+  const resolvedEnv = substituteEnv(config.env, workDir);
 
   const transportParams: {
     command: string;
     args?: string[];
     env?: Record<string, string>;
     stderr: 'pipe';
+    cwd?: string;
   } = { command: config.command, stderr: 'pipe' };
-  if (config.args) transportParams.args = config.args;
-  if (config.env) transportParams.env = { ...process.env, ...config.env } as Record<string, string>;
+  if (resolvedArgs) transportParams.args = resolvedArgs;
+  if (resolvedEnv) transportParams.env = { ...process.env, ...resolvedEnv } as Record<string, string>;
+  if (workDir != null) transportParams.cwd = workDir;
 
   const transport = new StdioClientTransport(transportParams);
 
@@ -128,9 +173,16 @@ export async function stopMCPServer(handle: MCPServerHandle): Promise<void> {
 }
 
 /** Start all resolved MCP servers. Returns a map of name → handle.
- *  Servers that fail to start are logged and skipped (graceful degradation). */
+ *  Servers that fail to start are logged and skipped (graceful degradation).
+ *
+ *  `workDir` is forwarded to each server: child processes spawn with
+ *  `cwd = workDir` and `${workspaceFolder}` / `${cwd}` tokens in args/env
+ *  resolve to it. This lets per-fix runs point path-sensitive servers
+ *  (codegraph, language servers) at the worktree instead of the orchestrator's
+ *  cwd. Omit `workDir` to preserve legacy behavior (child inherits parent cwd). */
 export async function startAllMCPServers(
   servers: Record<string, MCPServerConfig>,
+  workDir?: string,
 ): Promise<Map<string, MCPServerHandle>> {
   const handles = new Map<string, MCPServerHandle>();
   const entries = Object.entries(servers);
@@ -138,7 +190,7 @@ export async function startAllMCPServers(
 
   const results = await Promise.allSettled(
     entries.map(async ([name, config]) => {
-      const handle = await startMCPServer(name, config);
+      const handle = await startMCPServer(name, config, workDir);
       return { name, handle };
     }),
   );
