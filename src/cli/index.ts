@@ -523,10 +523,28 @@ program
 
 program
   .command('serve')
-  .description('Start webhook listener for GitHub events')
-  .option('--port <number>', 'Port to listen on', '3000')
+  .description('Start webhook listener for GitHub events, or `--mcp` to expose kova waves as MCP tools over stdio')
+  .option('--port <number>', 'Port to listen on (webhook mode only)', '3000')
   .option('--repo <name-or-path>', 'Repository name (from config) or path', '.')
-  .action(async (opts: { port?: string; repo?: string }) => {
+  .option('--mcp', 'Expose kova waves as MCP server tools over stdio (issue #311)')
+  .action(async (opts: { port?: string; repo?: string; mcp?: boolean }) => {
+    // MCP server mode — exposes kova.run_<wave> tools to external MCP clients
+    // (claude-code, Claude Desktop, pi-mono) over stdio. Diverges from the
+    // webhook listener before any GH-specific env or config requirements.
+    if (opts.mcp) {
+      const kovaConfig = await tryLoadConfig(program.opts().config);
+      const { config } = resolveRepo(opts.repo ?? '.', kovaConfig);
+      registerOllamaProvidersFromConfig(config);
+      const { startKovaMcpServerOnStdio } = await import('../ai/mcp-server/index.js');
+      await startKovaMcpServerOnStdio();
+      // The stdio transport keeps the event loop open until the parent closes
+      // stdin. Block here so the CLI process stays alive for incoming requests.
+      await new Promise<void>(() => {
+        /* run forever — transport owns the lifecycle */
+      });
+      return;
+    }
+
     const kovaConfig = await tryLoadConfig(program.opts().config);
     const { repoPath, repoName, config } = resolveRepo(opts.repo ?? '.', kovaConfig);
     initMetrics(config.metrics);
