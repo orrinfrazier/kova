@@ -13,6 +13,8 @@
 export type { ClaudeCliRuntimeConfig } from './claude-cli-runtime.js';
 export { claudeCliRuntimeFactory } from './claude-cli-runtime.js';
 export { createPiAgentRuntime, defaultAgentRuntimeFactory } from './pi-agent-runtime.js';
+export type { RuntimeKind } from './resolver.js';
+export { RUNTIME_KINDS, resolveRuntimeFactory, wrapClaudeCliFactoryWithMcp } from './resolver.js';
 export type {
   AgentMessage,
   AgentRuntime,

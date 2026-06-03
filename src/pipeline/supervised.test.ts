@@ -142,6 +142,7 @@ const DEFAULT_CONFIG: RepoConfig = {
     brainstorm: 'large',
   },
   isolation: 'worktree',
+  runtime: 'pi',
 };
 
 function makeBrainstormReturn(overrides?: Partial<{ success: boolean; issues: BrainstormIssue[]; error: string }>) {

@@ -278,6 +278,7 @@ describe('fix — PR context injection', () => {
             brainstorm: 'large',
           },
           isolation: 'none',
+          runtime: 'pi',
         },
         pendingPRs,
       });
@@ -332,6 +333,7 @@ describe('fix — PR context injection', () => {
             brainstorm: 'large',
           },
           isolation: 'none',
+          runtime: 'pi',
         },
         pendingPRs,
       });
@@ -490,6 +492,7 @@ describe('fix — PR context injection', () => {
             brainstorm: 'large',
           },
           isolation: 'none',
+          runtime: 'pi',
         },
         pendingPRs,
       });
@@ -622,6 +625,7 @@ describe('fix — PR context injection', () => {
             brainstorm: 'large',
           },
           isolation: 'none',
+          runtime: 'pi',
         },
         pendingPRs,
       });
@@ -668,6 +672,7 @@ describe('fix — PR context injection', () => {
             brainstorm: 'large',
           },
           isolation: 'none',
+          runtime: 'pi',
         },
         pendingPRs: [],
       });

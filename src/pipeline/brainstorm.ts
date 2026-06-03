@@ -6,6 +6,7 @@ import {
   getModelString,
   getWaveTools,
   type OutputFormat,
+  type RuntimeKind,
   resolveThinkingLevel,
   resolveWaveModel,
   spawnWaveAgent,
@@ -30,6 +31,7 @@ import type { BrainstormIssue, BrainstormResult, CoverageEntry, RepoConfig } fro
 import { BrainstormResultSchema } from '../types/index.js';
 import { log } from '../utils/logger.js';
 import { loadPrompt, resolvePromptsDir } from './prompts.js';
+import { buildRuntimeFactory, resolveRuntimeKind } from './runtime-select.js';
 import { loadWaveSkills } from './skills-loader.js';
 
 function toOutputFormat(schema: z.ZodType): OutputFormat {
@@ -48,6 +50,14 @@ export interface BrainstormOptions {
   threshold?: number;
   focus?: string[] | undefined;
   kovaConfig?: CrossRepoConfig | undefined;
+  /**
+   * Per-invocation runtime selector (issue #407). Overrides `config.runtime`.
+   * When undefined, falls back to `config.runtime` (default `'pi'`). Brainstorm
+   * does not currently start MCP servers, so the `claude-cli` factory receives
+   * no `mcpServers` map here — the CLI runs with whatever default tool
+   * allowlist the `claude` binary is configured for.
+   */
+  runtime?: RuntimeKind | undefined;
 }
 
 export interface BrainstormReturn {
@@ -72,6 +82,16 @@ export interface BrainstormReturn {
 
 export async function brainstorm(options: BrainstormOptions): Promise<BrainstormReturn> {
   const { repoPath, config, threshold = DEFAULT_CONFIDENCE_THRESHOLD, focus, kovaConfig } = options;
+
+  // Issue #407 — runtime selection. When the caller passed `runtime` (CLI flag
+  // or programmatic override) or set `config.runtime`, build the matching
+  // factory and forward it to spawnWaveAgent. When BOTH are undefined we
+  // intentionally pass `runtimeFactory: undefined` so spawnWaveAgent applies
+  // its own `defaultAgentRuntimeFactory` default — preserves bit-for-bit
+  // behavior for existing callers that haven't seen the field yet.
+  const runtimeKindExplicit = options.runtime ?? config.runtime;
+  const runtimeFactory =
+    runtimeKindExplicit != null ? buildRuntimeFactory(resolveRuntimeKind(options.runtime, config.runtime)) : undefined;
 
   const model = resolveWaveModel(config.model.brainstorm);
   const tools = getWaveTools('brainstorm', repoPath);
@@ -137,6 +157,7 @@ export async function brainstorm(options: BrainstormOptions): Promise<Brainstorm
       cwd: repoPath,
       thinkingLevel,
       outputFormat: toOutputFormat(BrainstormResultSchema),
+      ...(runtimeFactory != null ? { runtimeFactory } : {}),
     });
 
     if (handoff.confidence === 'low' || handoff.parsed === false) {
