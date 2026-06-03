@@ -209,4 +209,142 @@ describe('daemon server', () => {
     });
     await expect(second.start()).rejects.toThrow();
   });
+
+  // Issue #294: send-keys-style steering — daemon routes `steer` / `abort`
+  // commands to its in-process LiveFixRegistry.
+  describe('steer/abort RPC commands (issue #294)', () => {
+    it('steer command routes to the LiveFixRegistry handle for that fixId', async () => {
+      const { createLiveFixRegistry } = await import('./live-fix-registry.js');
+      const reg = createLiveFixRegistry();
+      const steer = (): void => {};
+      const abort = (): void => {};
+      const steerSpy = ((): { fn: (h: string) => void; calls: string[] } => {
+        const calls: string[] = [];
+        return { fn: (h: string) => calls.push(h), calls };
+      })();
+      reg.register('fix-abc', { steer: steerSpy.fn, abort });
+
+      daemon = createDaemonServer({
+        socketPath,
+        homeDir,
+        handler: async () => {},
+        liveFixRegistry: reg,
+      });
+      await daemon.start();
+
+      const reply = await rpc(socketPath, { cmd: 'steer', fixId: 'fix-abc', hint: 'focus' });
+      expect(reply.ok).toBe(true);
+      expect(reply.steered).toBe(true);
+      expect(steerSpy.calls).toEqual(['focus']);
+      // Silence unused-variable warning
+      void steer;
+    });
+
+    it('steer command returns ok:false when fixId is not running', async () => {
+      const { createLiveFixRegistry } = await import('./live-fix-registry.js');
+      const reg = createLiveFixRegistry();
+      daemon = createDaemonServer({
+        socketPath,
+        homeDir,
+        handler: async () => {},
+        liveFixRegistry: reg,
+      });
+      await daemon.start();
+
+      const reply = await rpc(socketPath, { cmd: 'steer', fixId: 'missing', hint: 'hi' });
+      expect(reply.ok).toBe(false);
+      expect(typeof reply.error).toBe('string');
+      expect(String(reply.error)).toMatch(/not running/i);
+    });
+
+    it('abort command routes to the LiveFixRegistry handle for that fixId', async () => {
+      const { createLiveFixRegistry } = await import('./live-fix-registry.js');
+      const reg = createLiveFixRegistry();
+      const abortSpy = ((): { fn: () => void; count: number } => {
+        const ref = { count: 0, fn: (): void => {} };
+        ref.fn = (): void => {
+          ref.count++;
+        };
+        return ref;
+      })();
+      reg.register('fix-abc', { steer: () => {}, abort: abortSpy.fn });
+
+      daemon = createDaemonServer({
+        socketPath,
+        homeDir,
+        handler: async () => {},
+        liveFixRegistry: reg,
+      });
+      await daemon.start();
+
+      const reply = await rpc(socketPath, { cmd: 'abort', fixId: 'fix-abc' });
+      expect(reply.ok).toBe(true);
+      expect(reply.aborted).toBe(true);
+      expect(abortSpy.count).toBe(1);
+    });
+
+    it('abort command returns ok:false when fixId is not running', async () => {
+      const { createLiveFixRegistry } = await import('./live-fix-registry.js');
+      const reg = createLiveFixRegistry();
+      daemon = createDaemonServer({
+        socketPath,
+        homeDir,
+        handler: async () => {},
+        liveFixRegistry: reg,
+      });
+      await daemon.start();
+
+      const reply = await rpc(socketPath, { cmd: 'abort', fixId: 'missing' });
+      expect(reply.ok).toBe(false);
+      expect(String(reply.error)).toMatch(/not running/i);
+    });
+
+    it('steer aborts only the requested fix, not siblings', async () => {
+      const { createLiveFixRegistry } = await import('./live-fix-registry.js');
+      const reg = createLiveFixRegistry();
+      let a = 0;
+      let b = 0;
+      reg.register('fix-A', {
+        steer: () => {},
+        abort: () => {
+          a++;
+        },
+      });
+      reg.register('fix-B', {
+        steer: () => {},
+        abort: () => {
+          b++;
+        },
+      });
+
+      daemon = createDaemonServer({
+        socketPath,
+        homeDir,
+        handler: async () => {},
+        liveFixRegistry: reg,
+      });
+      await daemon.start();
+
+      const reply = await rpc(socketPath, { cmd: 'abort', fixId: 'fix-A' });
+      expect(reply.ok).toBe(true);
+      expect(a).toBe(1);
+      expect(b).toBe(0);
+    });
+
+    it('steer/abort require a liveFixRegistry — without one, returns ok:false', async () => {
+      // Backward-compat: daemons constructed without `liveFixRegistry` reject
+      // steer/abort cleanly rather than crashing.
+      daemon = createDaemonServer({
+        socketPath,
+        homeDir,
+        handler: async () => {},
+      });
+      await daemon.start();
+
+      const steerReply = await rpc(socketPath, { cmd: 'steer', fixId: 'x', hint: 'y' });
+      expect(steerReply.ok).toBe(false);
+      const abortReply = await rpc(socketPath, { cmd: 'abort', fixId: 'x' });
+      expect(abortReply.ok).toBe(false);
+    });
+  });
 });

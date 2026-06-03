@@ -18,6 +18,7 @@ import {
 } from '../../ai/index.js';
 import type { FixAIWaveName } from '../../ai/wave-tools.js';
 import { dispatchSpawnWave } from '../../sandbox/dispatch.js';
+import { buildLiveHandleSink } from '../../services/live-fix-registry.js';
 import { detectPromptChange, hashPrompt, recordPromptVersion } from '../../services/prompt-versions.js';
 import type { AssessResult } from '../../types/index.js';
 import { log } from '../../utils/logger.js';
@@ -58,6 +59,7 @@ export const AssessEngine: WaveEngine<AssessEngineInput, AssessResult> = {
       runtimeFactory,
       resolvedMcpServers,
       eventContext,
+      liveFixRegistry,
     } = ctx;
     const { userMessage, outputFormat } = input;
 
@@ -109,33 +111,56 @@ export const AssessEngine: WaveEngine<AssessEngineInput, AssessResult> = {
     const sandboxMcpWaveOverrides =
       sandbox != null ? (config.mcp?.waves as Partial<Record<FixAIWaveName, string[]>> | undefined) : undefined;
 
-    const handoff = await dispatchSpawnWave<AssessResult>(
-      {
-        wave: WAVE,
-        model: modelString,
-        tools,
-        systemPrompt,
-        handoffContext: '',
-        userMessage,
-        cwd: workDir,
-        thinkingLevel,
-        fallbackModel,
-        ...(outputFormat != null && { outputFormat }),
-        ...(timeoutMs != null && { timeoutMs }),
-        ...(sessionId != null ? { sessionId } : {}),
-        ...(eventContext != null
-          ? {
-              eventBus: eventContext.eventBus,
-              eventContext: { runId: eventContext.runId, repoId: eventContext.repoId, fixId: eventContext.fixId },
-            }
-          : {}),
-        ...(runtimeFactory != null ? { runtimeFactory } : {}),
-        ...(sandboxMcpServers != null ? { mcpServers: sandboxMcpServers } : {}),
-        ...(sandboxMcpWaveOverrides != null ? { mcpWaveOverrides: sandboxMcpWaveOverrides } : {}),
-      },
-      sandbox,
-    );
+    // Issue #294: build a `liveHandleSink` when a registry + fixId are present
+    // AND we're on the host path (no sandbox). The sandbox path's agent runs
+    // in a remote container with no in-process handle to expose.
+    const fixIdForRegistry = eventContext?.fixId;
+    const liveHandleSink = buildLiveHandleSink({
+      registry: liveFixRegistry,
+      fixId: fixIdForRegistry,
+      sandboxActive: sandbox != null,
+      ...(eventContext != null
+        ? { eventBus: eventContext.eventBus, eventContext: { runId: eventContext.runId, repoId: eventContext.repoId } }
+        : {}),
+      wave: WAVE,
+    });
 
-    return { handoff, promptHash };
+    try {
+      const handoff = await dispatchSpawnWave<AssessResult>(
+        {
+          wave: WAVE,
+          model: modelString,
+          tools,
+          systemPrompt,
+          handoffContext: '',
+          userMessage,
+          cwd: workDir,
+          thinkingLevel,
+          fallbackModel,
+          ...(outputFormat != null && { outputFormat }),
+          ...(timeoutMs != null && { timeoutMs }),
+          ...(sessionId != null ? { sessionId } : {}),
+          ...(eventContext != null
+            ? {
+                eventBus: eventContext.eventBus,
+                eventContext: { runId: eventContext.runId, repoId: eventContext.repoId, fixId: eventContext.fixId },
+              }
+            : {}),
+          ...(runtimeFactory != null ? { runtimeFactory } : {}),
+          ...(sandboxMcpServers != null ? { mcpServers: sandboxMcpServers } : {}),
+          ...(sandboxMcpWaveOverrides != null ? { mcpWaveOverrides: sandboxMcpWaveOverrides } : {}),
+          ...(liveHandleSink != null ? { liveHandleSink } : {}),
+        },
+        sandbox,
+      );
+
+      return { handoff, promptHash };
+    } finally {
+      // Issue #294: clear the entry so a between-wave `kova send <fixId>`
+      // surfaces "not running" instead of routing into a stale agent.
+      if (liveFixRegistry != null && fixIdForRegistry != null) {
+        liveFixRegistry.clear(fixIdForRegistry);
+      }
+    }
   },
 };
