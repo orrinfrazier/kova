@@ -2,8 +2,31 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { loadAllHandoffs, loadHandoff, saveHandoff, type WaveHandoff, WaveHandoffSchema } from './handoffs.js';
-import type { AssessResult, SpecResult, WaveName } from './index.js';
+import {
+  loadAllHandoffs,
+  loadAssessHandoff,
+  loadBrainstormHandoff,
+  loadHandoff,
+  loadImplHandoff,
+  loadQualityHandoff,
+  loadReviewHandoff,
+  loadSpecHandoff,
+  loadTestHandoff,
+  saveHandoff,
+  type WaveHandoff,
+  WaveHandoffSchema,
+} from './handoffs.js';
+import type {
+  AssessResult,
+  BrainstormResult,
+  ImplResult,
+  QualityRemediation,
+  QualityResult,
+  ReviewResult,
+  SpecResult,
+  TestResult,
+  WaveName,
+} from './index.js';
 
 function makeAssessHandoff(overrides?: Partial<WaveHandoff<AssessResult>>): WaveHandoff<AssessResult> {
   return {
@@ -352,6 +375,295 @@ describe('WaveHandoff', () => {
 
       const all = await loadAllHandoffs(workDir);
       expect(all).toHaveLength(1);
+    });
+  });
+
+  // Per-wave typed loaders — issue #307.
+  //
+  // loadHandoff<T> is type-only; the generic T is unchecked at runtime.
+  // These loaders validate the artifact against the appropriate Zod schema
+  // at read time and return null when the shape doesn't match.
+  describe('per-wave typed loaders', () => {
+    const baseFields = {
+      timestamp: '2026-04-06T12:00:00.000Z',
+      model: 'claude-opus-4-6',
+      cost: 0.05,
+      turns: 3,
+      confidence: 'high' as const,
+      parsed: true,
+      approach_notes: '',
+    };
+
+    function makeTestHandoff(): WaveHandoff<TestResult> {
+      return {
+        ...baseFields,
+        wave: 'test',
+        artifact: { test_files_created: ['src/foo.test.ts'], test_count: 3, all_failing: true },
+      };
+    }
+
+    function makeImplHandoff(): WaveHandoff<ImplResult> {
+      return {
+        ...baseFields,
+        wave: 'impl',
+        artifact: {
+          files_modified: ['src/foo.ts'],
+          files_created: [],
+          tests_passing: true,
+          approach_notes: 'minimal change',
+        },
+      };
+    }
+
+    function makeQualityResultHandoff(): WaveHandoff<QualityResult> {
+      return {
+        ...baseFields,
+        wave: 'quality',
+        artifact: {
+          lint: 'pass',
+          typecheck: 'pass',
+          tests: 'pass',
+          coverage: 85,
+          audit: 'pass',
+          all_passing: true,
+        },
+      };
+    }
+
+    function makeQualityRemediationHandoff(): WaveHandoff<QualityRemediation> {
+      return {
+        ...baseFields,
+        wave: 'quality',
+        artifact: {
+          gates: [
+            {
+              gate: 'lint',
+              status: 'passed',
+              auto_fixable: true,
+              fix_applied: false,
+              remaining_errors: [],
+              suggested_action: 'none',
+            },
+          ],
+          all_passing: true,
+          coverage_percent: 85,
+          auto_fixes_applied: [],
+          files_modified: [],
+        },
+      };
+    }
+
+    function makeReviewHandoff(): WaveHandoff<ReviewResult> {
+      return {
+        ...baseFields,
+        wave: 'review',
+        artifact: { verdict: 'pass', findings: [], summary: 'looks good' },
+      };
+    }
+
+    function makeBrainstormHandoff(): WaveHandoff<BrainstormResult> {
+      return {
+        ...baseFields,
+        wave: 'brainstorm',
+        artifact: { issues: [], summary: 'no issues', coverage: [] },
+      };
+    }
+
+    describe('loadAssessHandoff', () => {
+      it('returns the typed handoff when artifact matches AssessResultSchema', async () => {
+        await saveHandoff(workDir, makeAssessHandoff());
+        const loaded = await loadAssessHandoff(workDir);
+        expect(loaded).not.toBeNull();
+        expect(loaded?.wave).toBe('assess');
+        expect(loaded?.artifact.grade).toBe('A');
+      });
+
+      it('returns null when no handoff exists', async () => {
+        const loaded = await loadAssessHandoff(workDir);
+        expect(loaded).toBeNull();
+      });
+
+      it('returns null when artifact does not match AssessResultSchema', async () => {
+        // Mismatched shape: missing surface_area, wrong grade type
+        await saveHandoff(workDir, {
+          ...baseFields,
+          wave: 'assess',
+          artifact: { not: 'an assess result' } as unknown as AssessResult,
+        });
+        const loaded = await loadAssessHandoff(workDir);
+        expect(loaded).toBeNull();
+      });
+
+      it('returns null when artifact is the raw string fallback (parsed=false)', async () => {
+        await saveHandoff(workDir, {
+          ...baseFields,
+          parsed: false,
+          wave: 'assess',
+          artifact: 'raw model output' as unknown as AssessResult,
+        });
+        const loaded = await loadAssessHandoff(workDir);
+        expect(loaded).toBeNull();
+      });
+    });
+
+    describe('loadSpecHandoff', () => {
+      it('returns the typed handoff when artifact matches SpecResultSchema', async () => {
+        await saveHandoff(workDir, makeSpecHandoff());
+        const loaded = await loadSpecHandoff(workDir);
+        expect(loaded).not.toBeNull();
+        expect(loaded?.artifact.pieces).toHaveLength(1);
+        expect(loaded?.artifact.pieces[0]?.name).toBe('foo');
+      });
+
+      it('returns null when no handoff exists', async () => {
+        const loaded = await loadSpecHandoff(workDir);
+        expect(loaded).toBeNull();
+      });
+
+      it('returns null when artifact does not match SpecResultSchema', async () => {
+        await saveHandoff(workDir, {
+          ...baseFields,
+          wave: 'spec',
+          artifact: { summary: 'no pieces array' } as unknown as SpecResult,
+        });
+        const loaded = await loadSpecHandoff(workDir);
+        expect(loaded).toBeNull();
+      });
+    });
+
+    describe('loadTestHandoff', () => {
+      it('returns the typed handoff when artifact matches TestResultSchema', async () => {
+        await saveHandoff(workDir, makeTestHandoff());
+        const loaded = await loadTestHandoff(workDir);
+        expect(loaded).not.toBeNull();
+        expect(loaded?.artifact.test_count).toBe(3);
+        expect(loaded?.artifact.all_failing).toBe(true);
+      });
+
+      it('returns null when no handoff exists', async () => {
+        const loaded = await loadTestHandoff(workDir);
+        expect(loaded).toBeNull();
+      });
+
+      it('returns null when artifact does not match TestResultSchema', async () => {
+        await saveHandoff(workDir, {
+          ...baseFields,
+          wave: 'test',
+          artifact: { test_files_created: 'not an array' } as unknown as TestResult,
+        });
+        const loaded = await loadTestHandoff(workDir);
+        expect(loaded).toBeNull();
+      });
+    });
+
+    describe('loadImplHandoff', () => {
+      it('returns the typed handoff when artifact matches ImplResultSchema', async () => {
+        await saveHandoff(workDir, makeImplHandoff());
+        const loaded = await loadImplHandoff(workDir);
+        expect(loaded).not.toBeNull();
+        expect(loaded?.artifact.tests_passing).toBe(true);
+        expect(loaded?.artifact.files_modified).toEqual(['src/foo.ts']);
+      });
+
+      it('returns null when no handoff exists', async () => {
+        const loaded = await loadImplHandoff(workDir);
+        expect(loaded).toBeNull();
+      });
+
+      it('returns null when artifact does not match ImplResultSchema', async () => {
+        await saveHandoff(workDir, {
+          ...baseFields,
+          wave: 'impl',
+          artifact: { wrong: 'shape' } as unknown as ImplResult,
+        });
+        const loaded = await loadImplHandoff(workDir);
+        expect(loaded).toBeNull();
+      });
+    });
+
+    describe('loadQualityHandoff', () => {
+      it('returns the typed handoff when artifact matches QualityRemediationSchema', async () => {
+        await saveHandoff(workDir, makeQualityRemediationHandoff());
+        const loaded = await loadQualityHandoff(workDir);
+        expect(loaded).not.toBeNull();
+        // Remediation has a `gates` array.
+        const artifact = loaded?.artifact as QualityRemediation;
+        expect(Array.isArray(artifact.gates)).toBe(true);
+        expect(artifact.gates[0]?.gate).toBe('lint');
+      });
+
+      it('returns the typed handoff when artifact matches QualityResultSchema (legacy shape)', async () => {
+        await saveHandoff(workDir, makeQualityResultHandoff());
+        const loaded = await loadQualityHandoff(workDir);
+        expect(loaded).not.toBeNull();
+        const artifact = loaded?.artifact as QualityResult;
+        expect(artifact.lint).toBe('pass');
+        expect(artifact.all_passing).toBe(true);
+      });
+
+      it('returns null when no handoff exists', async () => {
+        const loaded = await loadQualityHandoff(workDir);
+        expect(loaded).toBeNull();
+      });
+
+      it('returns null when artifact matches neither QualityRemediation nor QualityResult', async () => {
+        await saveHandoff(workDir, {
+          ...baseFields,
+          wave: 'quality',
+          artifact: { not: 'a quality result' } as unknown as QualityResult,
+        });
+        const loaded = await loadQualityHandoff(workDir);
+        expect(loaded).toBeNull();
+      });
+    });
+
+    describe('loadReviewHandoff', () => {
+      it('returns the typed handoff when artifact matches ReviewResultSchema', async () => {
+        await saveHandoff(workDir, makeReviewHandoff());
+        const loaded = await loadReviewHandoff(workDir);
+        expect(loaded).not.toBeNull();
+        expect(loaded?.artifact.verdict).toBe('pass');
+        expect(loaded?.artifact.findings).toEqual([]);
+      });
+
+      it('returns null when no handoff exists', async () => {
+        const loaded = await loadReviewHandoff(workDir);
+        expect(loaded).toBeNull();
+      });
+
+      it('returns null when artifact does not match ReviewResultSchema', async () => {
+        await saveHandoff(workDir, {
+          ...baseFields,
+          wave: 'review',
+          artifact: { verdict: 'sometimes' } as unknown as ReviewResult,
+        });
+        const loaded = await loadReviewHandoff(workDir);
+        expect(loaded).toBeNull();
+      });
+    });
+
+    describe('loadBrainstormHandoff', () => {
+      it('returns the typed handoff when artifact matches BrainstormResultSchema', async () => {
+        await saveHandoff(workDir, makeBrainstormHandoff());
+        const loaded = await loadBrainstormHandoff(workDir);
+        expect(loaded).not.toBeNull();
+        expect(loaded?.artifact.summary).toBe('no issues');
+      });
+
+      it('returns null when no handoff exists', async () => {
+        const loaded = await loadBrainstormHandoff(workDir);
+        expect(loaded).toBeNull();
+      });
+
+      it('returns null when artifact does not match BrainstormResultSchema', async () => {
+        await saveHandoff(workDir, {
+          ...baseFields,
+          wave: 'brainstorm',
+          artifact: { issues: 'not an array' } as unknown as BrainstormResult,
+        });
+        const loaded = await loadBrainstormHandoff(workDir);
+        expect(loaded).toBeNull();
+      });
     });
   });
 });
