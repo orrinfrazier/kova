@@ -13,11 +13,14 @@ import {
   getWaveTools,
   isConsensusPool,
   isLocalModel,
+  resolveConsensusPool,
   resolveThinkingLevel,
   resolveWaveModel,
 } from '../../ai/index.js';
+import { spawnConsensusWave } from '../../ai/parallel-executor.js';
 import type { FixAIWaveName } from '../../ai/wave-tools.js';
 import { dispatchSpawnWave } from '../../sandbox/dispatch.js';
+import { appendConsensusDisagreement } from '../../services/consensus-disagreements.js';
 import { buildLiveHandleSink } from '../../services/live-fix-registry.js';
 import { detectPromptChange, hashPrompt, recordPromptVersion } from '../../services/prompt-versions.js';
 import type { AssessResult } from '../../types/index.js';
@@ -63,7 +66,11 @@ export const AssessEngine: WaveEngine<AssessEngineInput, AssessResult> = {
     } = ctx;
     const { userMessage, outputFormat } = input;
 
-    const model = resolveWaveModel(config.model[WAVE]);
+    const waveConfig = config.model[WAVE];
+
+    // Shared per-wave plumbing — both single-model and consensus paths need
+    // tools, prompt, and the cross-wave knobs. The model resolution + dispatch
+    // call site is the only thing that branches.
     const mcpTools =
       mcpHandles && mcpHandles.size > 0
         ? getMCPToolsForWave(
@@ -93,14 +100,49 @@ export const AssessEngine: WaveEngine<AssessEngineInput, AssessResult> = {
     await recordPromptVersion(repoPath, WAVE, systemPrompt).catch(() => {});
 
     const thinkingLevel = resolveThinkingLevel(config, WAVE);
-    const modelString = getModelString(model);
-    const fallbackModel = waveFallbackModel(config.model[WAVE], modelString, config.model.fallback, {
-      isConsensusPool,
-      isLocalModel,
-    });
     const timeoutSeconds = config.rules.wave_timeout?.[WAVE];
     const timeoutMs = timeoutSeconds != null ? timeoutSeconds * 1000 : undefined;
     const sessionId = cacheContext != null ? buildWaveSessionId({ ...cacheContext, wave: WAVE }) : undefined;
+
+    // Consensus-pool routing (#261): when the wave config is a pool, fan out
+    // through `spawnConsensusWave` instead of the single-model dispatch path.
+    // The disagreement-log callback writes `.kova/consensus_disagreements.jsonl`
+    // (#262) when the adjudicator overrides ≥1 pool member.
+    if (isConsensusPool(waveConfig)) {
+      const { pool, adjudicator } = resolveConsensusPool(waveConfig);
+      const poolModels = pool.map(getModelString);
+      const adjudicatorModel = getModelString(adjudicator);
+      const handoff = await spawnConsensusWave<AssessResult>({
+        wave: WAVE,
+        poolModels,
+        adjudicatorModel,
+        tools,
+        systemPrompt,
+        handoffContext: '',
+        userMessage,
+        cwd: workDir,
+        thinkingLevel,
+        ...(outputFormat != null && { outputFormat }),
+        ...(timeoutMs != null && { timeoutMs }),
+        ...(sessionId != null ? { sessionId } : {}),
+        ...(eventContext != null
+          ? {
+              eventBus: eventContext.eventBus,
+              eventContext: { runId: eventContext.runId, repoId: eventContext.repoId, fixId: eventContext.fixId },
+            }
+          : {}),
+        appendDisagreement: (record) => appendConsensusDisagreement(repoPath, record),
+      });
+      return { handoff, promptHash };
+    }
+
+    // Single-model path: existing dispatch through dispatchSpawnWave.
+    const model = resolveWaveModel(waveConfig);
+    const modelString = getModelString(model);
+    const fallbackModel = waveFallbackModel(waveConfig, modelString, config.model.fallback, {
+      isConsensusPool,
+      isLocalModel,
+    });
     // Issue #306 — sandbox-only MCP plumbing. Host-path waves get MCP tools via
     // `tools` (already resolved above); the sandbox runner reconstructs servers
     // on /workspace from this config map.

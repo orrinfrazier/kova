@@ -117,6 +117,7 @@ import type {
   WaveModelConfig,
   WaveName,
   WaveResult,
+  WaveSingleModelConfig,
 } from '../types/index.js';
 import {
   type AssessResult,
@@ -129,6 +130,7 @@ import {
 } from '../types/index.js';
 import { closeFileLogger, initFileLogger, type Logger, log } from '../utils/logger.js';
 import { resolveCallPaths } from './call-path-context.js';
+import { applyConsensusToConfig, formatConsensusActivationLog } from './consensus-flags.js';
 import { buildWaveContext } from './context.js';
 import { refreshCodebaseContext } from './context-refresh.js';
 import { buildCostReport, printRunSummary, writeCostReport } from './cost-report.js';
@@ -198,6 +200,23 @@ export interface FixOptions {
    * selection").
    */
   runtime?: RuntimeKind | undefined;
+  /**
+   * Consensus-pool members (issue #261). When set together with
+   * `consensusWaves`, fix() mutates `config.model[wave]` for each wave to a
+   * `WaveConsensusConfig` before validation, routing those waves through
+   * `spawnConsensusWave` (multi-model adjudication, ~Nx cost). Caller
+   * (typically the CLI layer) resolves the user-supplied `--pool <spec>` into
+   * this array via `parsePoolSpec`. Length is constrained to 2-5 by
+   * `WaveConsensusConfigSchema`.
+   */
+  consensusPool?: readonly WaveSingleModelConfig[] | undefined;
+  /**
+   * Waves to route through the consensus pool when `consensusPool` is set.
+   * Defaults to `DEFAULT_CONSENSUS_WAVES` (`['assess', 'spec', 'review']`)
+   * when the caller passed `--consensus` without `--consensus-waves`. Caller
+   * resolves the user-supplied list via `parseConsensusWavesList`.
+   */
+  consensusWaves?: readonly FixAIWaveName[] | undefined;
 }
 
 export interface FixResult {
@@ -517,6 +536,24 @@ export async function fix(options: FixOptions): Promise<FixResult> {
   // code paths (isolation check, sandbox startup, MCP wiring) see the input
   // config; WAVE T/I/Q see the mode-overridden config. Issue #282.
   let config: RepoConfig = options.config;
+  // Issue #261 — defense-in-depth: when callers invoke fix() programmatically
+  // (skipping the CLI) and pass `consensusPool` + `consensusWaves` instead of a
+  // pre-mutated config, apply the same `applyConsensusToConfig` mutation the
+  // CLI does so consensus-aware engines see the pool wave configs. The CLI
+  // pre-mutates the config it passes here, so this branch is a no-op for the
+  // normal CLI path — it only fires when a programmatic caller wants the
+  // option-shape ergonomics without doing the mutation themselves.
+  if (options.consensusPool != null && options.consensusWaves != null && options.consensusWaves.length > 0) {
+    // Skip if the requested waves are already pools — caller already mutated.
+    const alreadyApplied = options.consensusWaves.every((w) => isConsensusPool(config.model[w]));
+    if (!alreadyApplied) {
+      config = applyConsensusToConfig(config, {
+        pool: options.consensusPool,
+        waves: options.consensusWaves,
+      });
+      log.info(formatConsensusActivationLog({ pool: options.consensusPool, waves: options.consensusWaves }));
+    }
+  }
   let resolvedMode: PipelineMode | undefined = options.mode;
   // Extra impl attempts per piece, derived from the resolved mode. 0 for all
   // modes except `explore`. Plumbed into runParallelPieceTILoop below.
