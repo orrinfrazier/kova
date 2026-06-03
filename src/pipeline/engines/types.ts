@@ -15,6 +15,7 @@ import type { AgentRuntimeFactory, MCPServerHandle, OutputFormat } from '../../a
 import type { FixAIWaveName } from '../../ai/wave-tools.js';
 import type { SandboxContext } from '../../sandbox/dispatch.js';
 import type { EventBus } from '../../services/event-bus/index.js';
+import type { LiveFixRegistry } from '../../services/live-fix-registry.js';
 import type { ProjectContext } from '../../services/project-context.js';
 import type { WaveHandoff } from '../../types/handoffs.js';
 import type {
@@ -121,6 +122,14 @@ export interface EngineContext {
    * lifecycle on a single fixId.
    */
   eventContext?: EngineEventContext | undefined;
+  /**
+   * Issue #294 — optional LiveFixRegistry to register the wave's live agent
+   * handle in (keyed by `eventContext.fixId`). When set on the host path
+   * (no sandbox), `kova send <fixId>` / `kova kill <fixId>` route into the
+   * running wave via the daemon's steer/abort RPCs. Sandbox path skips
+   * registration (the agent runs in a remote container).
+   */
+  liveFixRegistry?: LiveFixRegistry | undefined;
 }
 
 /**

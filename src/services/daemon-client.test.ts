@@ -9,7 +9,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createDaemonServer, type DaemonServer } from './daemon.js';
-import { defaultSocketPath, isDaemonRunning, submitToDaemon } from './daemon-client.js';
+import {
+  defaultSocketPath,
+  isDaemonRunning,
+  sendAbortToDaemon,
+  sendSteerToDaemon,
+  submitToDaemon,
+} from './daemon-client.js';
+import { createLiveFixRegistry } from './live-fix-registry.js';
 
 describe('daemon-client', () => {
   let homeDir: string;
@@ -89,6 +96,86 @@ describe('daemon-client', () => {
           repoName: 'r',
         }),
       ).rejects.toThrow();
+    });
+  });
+
+  // Issue #294: send-keys-style steering — `sendSteerToDaemon` and
+  // `sendAbortToDaemon` round-trip the new `steer` / `abort` RPC commands.
+  describe('sendSteerToDaemon (issue #294)', () => {
+    it('resolves with ok:true and steered:true when fixId is live', async () => {
+      const reg = createLiveFixRegistry();
+      const calls: string[] = [];
+      reg.register('fix-abc', { steer: (h) => calls.push(h), abort: () => {} });
+      daemon = createDaemonServer({
+        socketPath,
+        homeDir,
+        handler: async () => {},
+        liveFixRegistry: reg,
+      });
+      await daemon.start();
+      const reply = await sendSteerToDaemon(socketPath, 'fix-abc', 'focus on the spec');
+      expect(reply.ok).toBe(true);
+      expect(reply.steered).toBe(true);
+      expect(calls).toEqual(['focus on the spec']);
+    });
+
+    it('resolves with ok:false when fixId is not running', async () => {
+      const reg = createLiveFixRegistry();
+      daemon = createDaemonServer({
+        socketPath,
+        homeDir,
+        handler: async () => {},
+        liveFixRegistry: reg,
+      });
+      await daemon.start();
+      const reply = await sendSteerToDaemon(socketPath, 'missing', 'hi');
+      expect(reply.ok).toBe(false);
+      expect(String(reply.error)).toMatch(/not running/i);
+    });
+
+    it('rejects when the daemon is not running', async () => {
+      await expect(sendSteerToDaemon(socketPath, 'x', 'y')).rejects.toThrow();
+    });
+  });
+
+  describe('sendAbortToDaemon (issue #294)', () => {
+    it('resolves with ok:true and aborted:true when fixId is live', async () => {
+      const reg = createLiveFixRegistry();
+      let aborted = 0;
+      reg.register('fix-abc', {
+        steer: () => {},
+        abort: () => {
+          aborted++;
+        },
+      });
+      daemon = createDaemonServer({
+        socketPath,
+        homeDir,
+        handler: async () => {},
+        liveFixRegistry: reg,
+      });
+      await daemon.start();
+      const reply = await sendAbortToDaemon(socketPath, 'fix-abc');
+      expect(reply.ok).toBe(true);
+      expect(reply.aborted).toBe(true);
+      expect(aborted).toBe(1);
+    });
+
+    it('resolves with ok:false when fixId is not running', async () => {
+      const reg = createLiveFixRegistry();
+      daemon = createDaemonServer({
+        socketPath,
+        homeDir,
+        handler: async () => {},
+        liveFixRegistry: reg,
+      });
+      await daemon.start();
+      const reply = await sendAbortToDaemon(socketPath, 'missing');
+      expect(reply.ok).toBe(false);
+    });
+
+    it('rejects when the daemon is not running', async () => {
+      await expect(sendAbortToDaemon(socketPath, 'x')).rejects.toThrow();
     });
   });
 });

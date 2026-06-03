@@ -170,6 +170,10 @@ export async function runDaemonStop(socketPath: string = defaultSocketPath()): P
  */
 export async function runDaemonRun(): Promise<void> {
   const { createDaemonServer } = await import('../services/daemon.js');
+  // Issue #294: share the same process-singleton LiveFixRegistry between the
+  // daemon's RPC handler (which routes `kova send` / `kova kill` into live
+  // waves) and the fix-pipeline call sites (which register handles per wave).
+  const { defaultLiveFixRegistry } = await import('../services/live-fix-registry.js');
   const socketPath = process.env.KOVA_DAEMON_SOCKET ?? defaultSocketPath();
   const pidPath = process.env.KOVA_DAEMON_PIDFILE ?? defaultPidPath();
   const homeDir = homedir();
@@ -183,6 +187,7 @@ export async function runDaemonRun(): Promise<void> {
       // bridge will land alongside the auto/loop/epic rerouting work).
       log.info(`[daemon] processing request: #${req.issueNumber} @ ${req.repoName}`);
     },
+    liveFixRegistry: defaultLiveFixRegistry,
   });
 
   await writePidFile(pidPath);

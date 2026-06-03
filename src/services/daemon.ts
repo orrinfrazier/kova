@@ -20,6 +20,7 @@ import net from 'node:net';
 import { log } from '../utils/logger.js';
 import { type DaemonSnapshot, loadSnapshot, saveSnapshot } from './daemon-snapshot.js';
 import { createFixQueue, type FixQueue, type FixRequest } from './fix-queue.js';
+import type { LiveFixRegistry } from './live-fix-registry.js';
 
 export interface DaemonServerOptions {
   /** Absolute path of the unix-domain socket the daemon listens on. */
@@ -28,6 +29,13 @@ export interface DaemonServerOptions {
   homeDir: string;
   /** Handler invoked for each enqueued FixRequest. */
   handler: (req: FixRequest) => Promise<void>;
+  /**
+   * Issue #294 — optional LiveFixRegistry used to route `steer` / `abort`
+   * RPC commands to live wave handles. When omitted, those commands return
+   * `ok:false` with a clear error rather than crashing — preserves backward
+   * compatibility with callers that don't wire send-keys steering.
+   */
+  liveFixRegistry?: LiveFixRegistry;
 }
 
 export interface DaemonServer {
@@ -56,7 +64,7 @@ function isFixRequest(v: unknown): v is FixRequest {
 }
 
 export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
-  const { socketPath, homeDir, handler } = options;
+  const { socketPath, homeDir, handler, liveFixRegistry } = options;
   let server: net.Server | undefined;
   let queue: FixQueue | undefined;
   // Track in-flight requests for snapshotting. Same FixRequest reference is
@@ -164,6 +172,40 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
           void stopInternal();
         });
         return { ok: true, cmd: 'shutdown' };
+      }
+      // Issue #294: send-keys-style steering — route `steer` and `abort` to
+      // the optional LiveFixRegistry. Both commands return ok:false with a
+      // clear error when no registry is wired or the fixId is not running,
+      // so the CLI surfaces actionable feedback without ambiguity.
+      case 'steer': {
+        if (!liveFixRegistry) {
+          return { ok: false, error: 'steer not supported: daemon has no live-fix registry wired' };
+        }
+        if (typeof parsed.fixId !== 'string' || typeof parsed.hint !== 'string') {
+          return { ok: false, error: 'steer requires { fixId: string, hint: string }' };
+        }
+        try {
+          liveFixRegistry.steer(parsed.fixId, parsed.hint);
+          return { ok: true, steered: true, fixId: parsed.fixId };
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return { ok: false, error: msg };
+        }
+      }
+      case 'abort': {
+        if (!liveFixRegistry) {
+          return { ok: false, error: 'abort not supported: daemon has no live-fix registry wired' };
+        }
+        if (typeof parsed.fixId !== 'string') {
+          return { ok: false, error: 'abort requires { fixId: string }' };
+        }
+        try {
+          liveFixRegistry.abort(parsed.fixId);
+          return { ok: true, aborted: true, fixId: parsed.fixId };
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return { ok: false, error: msg };
+        }
       }
       default:
         return { ok: false, error: `unknown command: ${parsed.cmd}` };

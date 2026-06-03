@@ -101,3 +101,26 @@ export async function submitToDaemon(socketPath: string, request: FixRequest): P
 export async function shutdownDaemon(socketPath: string): Promise<RpcResult> {
   return rpc(socketPath, { cmd: 'shutdown' });
 }
+
+/**
+ * Issue #294 — send a steering hint into one live fix.
+ *
+ * The daemon routes to its in-process LiveFixRegistry. Resolves with the
+ * server reply (`{ok:true, steered:true}` on success, `{ok:false, error}`
+ * for an unknown fixId or a daemon built without a registry). Rejects only
+ * when the daemon socket itself is unreachable.
+ */
+export async function sendSteerToDaemon(socketPath: string, fixId: string, hint: string): Promise<RpcResult> {
+  return rpc(socketPath, { cmd: 'steer', fixId, hint });
+}
+
+/**
+ * Issue #294 — abort one live fix without affecting siblings.
+ *
+ * Mirrors `sendSteerToDaemon` — same daemon-side routing and error shapes.
+ * Aborting a completed or unknown fix returns `{ok:false, error}` rather
+ * than throwing, so callers can render a clear message.
+ */
+export async function sendAbortToDaemon(socketPath: string, fixId: string): Promise<RpcResult> {
+  return rpc(socketPath, { cmd: 'abort', fixId });
+}

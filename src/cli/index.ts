@@ -806,6 +806,63 @@ program
     }
   });
 
+// Issue #294: send-keys-style steering — inject a hint into a single live fix
+// or abort just that fix. Borrowed from tmux send-keys (per-pane input
+// injection) and kill-pane (per-pane termination). Routes through the kova
+// daemon's `steer` / `abort` RPC commands.
+program
+  .command('send <fix-id> <hint...>')
+  .description('Steer a single live fix — inject a user-role hint into its running wave (kova daemon must be running)')
+  .action(async (fixId: string, hintParts: string[]) => {
+    const hint = hintParts.join(' ');
+    if (!hint.trim()) {
+      console.error('kova send: hint must be non-empty');
+      process.exit(1);
+    }
+    const { defaultSocketPath, isDaemonRunning, sendSteerToDaemon } = await import('../services/daemon-client.js');
+    const socketPath = defaultSocketPath();
+    if (!(await isDaemonRunning(socketPath))) {
+      console.error('kova send: daemon is not running (start it with `kova daemon start`)');
+      process.exit(1);
+    }
+    try {
+      const reply = await sendSteerToDaemon(socketPath, fixId, hint);
+      if (!reply.ok) {
+        console.error(`kova send: ${reply.error ?? 'unknown error'}`);
+        process.exit(1);
+      }
+      console.log(`Steered ${fixId}: ${hint}`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`kova send: ${msg}`);
+      process.exit(1);
+    }
+  });
+
+program
+  .command('kill <fix-id>')
+  .description('Abort a single live fix without affecting siblings (kova daemon must be running)')
+  .action(async (fixId: string) => {
+    const { defaultSocketPath, isDaemonRunning, sendAbortToDaemon } = await import('../services/daemon-client.js');
+    const socketPath = defaultSocketPath();
+    if (!(await isDaemonRunning(socketPath))) {
+      console.error('kova kill: daemon is not running (start it with `kova daemon start`)');
+      process.exit(1);
+    }
+    try {
+      const reply = await sendAbortToDaemon(socketPath, fixId);
+      if (!reply.ok) {
+        console.error(`kova kill: ${reply.error ?? 'unknown error'}`);
+        process.exit(1);
+      }
+      console.log(`Aborted ${fixId}`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`kova kill: ${msg}`);
+      process.exit(1);
+    }
+  });
+
 program
   .command('capture <fix-id>')
   .description('Print the per-fix scrollback ring buffer (replay) from a running kova daemon')
