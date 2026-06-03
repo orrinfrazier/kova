@@ -21,11 +21,11 @@
 // caller-provided `currentContext` unchanged. The fix pipeline never
 // crashes because of a stale-index refresh attempt.
 
-import { getChangedFilesSince } from '../services/git-diff.js';
-import { formatCodeChunks, queryCodeContext } from '../services/memory/code-rest.js';
-import { reindexFiles } from '../services/reindex.js';
+import { formatCodeChunks, queryCodeContext } from '../memory/code-rest.js';
+import { reindexFiles } from '../memory/reindex.js';
 import type { RepoConfig } from '../types/config.js';
 import { log } from '../utils/logger.js';
+import { getChangedFilesSince } from '../vcs/git-diff.js';
 
 export interface RefreshCodebaseContextOptions {
   /** Repo config — `vectordb.enabled` gates the entire helper. */

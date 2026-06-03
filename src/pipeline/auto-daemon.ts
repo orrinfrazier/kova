@@ -11,9 +11,9 @@
 //   - `forceInline: true` option (set by `--no-daemon` CLI flag)
 //   - No daemon listening on the socket
 
-import { defaultSocketPath, isDaemonRunning, submitToDaemon } from '../services/daemon-client.js';
-import type { FixRequest } from '../services/fix-queue.js';
+import { defaultSocketPath, isDaemonRunning, submitToDaemon } from '../core/daemon-client.js';
 import { log } from '../utils/logger.js';
+import type { FixRequest } from './fix-queue.js';
 
 export interface MaybeSubmitOptions {
   /** Socket path of the daemon (default: ~/.kova/daemon.sock). */

@@ -10,7 +10,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { createDaemonServer, type DaemonServer } from '../services/daemon.js';
+import { createDaemonServer, type DaemonServer } from '../core/daemon.js';
 import { runDaemonStatus, runDaemonStop } from './daemon.js';
 
 const root = resolve(import.meta.dirname, '../..');

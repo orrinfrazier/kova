@@ -14,8 +14,8 @@ import type { Skill } from '@earendil-works/pi-coding-agent';
 import type { AgentRuntimeFactory, MCPServerHandle, OutputFormat } from '../../ai/index.js';
 import type { FixAIWaveName } from '../../ai/wave-tools.js';
 import type { SandboxContext } from '../../sandbox/dispatch.js';
-import type { EventBus } from '../../services/event-bus/index.js';
-import type { LiveFixRegistry } from '../../services/live-fix-registry.js';
+import type { EventBus } from '../../telemetry/event-bus/index.js';
+import type { LiveFixRegistry } from '../../telemetry/live-fix-registry.js';
 import type { FixState } from '../../types/config.js';
 import type { WaveHandoff } from '../../types/handoffs.js';
 import type {

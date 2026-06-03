@@ -6,7 +6,7 @@
 // no patterns silently (never throws upward).
 
 import { join as joinPath } from 'node:path';
-import { formatPatterns, type PatternRecord, PatternStore } from '../../services/pattern-store.js';
+import { formatPatterns, type PatternRecord, PatternStore } from '../../memory/pattern-store.js';
 import type { EpisodicMemoryConfig } from '../../types/config.js';
 import type { ContextProvider, ContextProviderInput } from './types.js';
 

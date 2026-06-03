@@ -38,10 +38,10 @@ import {
 } from '../../ai/index.js';
 import { spawnConsensusWave } from '../../ai/parallel-executor.js';
 import type { FixAIWaveName } from '../../ai/wave-tools.js';
+import { detectPromptChange, hashPrompt, recordPromptVersion } from '../../memory/prompt-versions.js';
 import { dispatchSpawnWave } from '../../sandbox/dispatch.js';
-import { appendConsensusDisagreement } from '../../services/consensus-disagreements.js';
-import { buildLiveHandleSink } from '../../services/live-fix-registry.js';
-import { detectPromptChange, hashPrompt, recordPromptVersion } from '../../services/prompt-versions.js';
+import { appendConsensusDisagreement } from '../../telemetry/consensus-disagreements.js';
+import { buildLiveHandleSink } from '../../telemetry/live-fix-registry.js';
 import type { SpecResult } from '../../types/index.js';
 import { log } from '../../utils/logger.js';
 import { loadPrompt } from '../prompts.js';

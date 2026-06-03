@@ -11,7 +11,7 @@
 
 import { join as joinPath } from 'node:path';
 import { extractSymbolCandidates, formatCodegraphContext } from '../../ai/codegraph.js';
-import { openCodegraph } from '../../services/codegraph/index.js';
+import { openCodegraph } from '../../codegraph/index.js';
 import type { ContextProvider, ContextProviderInput } from './types.js';
 
 export const codegraphProvider: ContextProvider = {

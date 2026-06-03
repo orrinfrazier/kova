@@ -70,18 +70,18 @@ vi.mock('./loops.js', () => ({
   runReviewLoop: (...args: unknown[]) => mockRunReviewLoop(...args),
 }));
 
-vi.mock('../services/github.js', () => ({
+vi.mock('../vcs/github.js', () => ({
   listOpenPRs: vi.fn().mockResolvedValue([]),
   createPR: vi.fn().mockResolvedValue('https://github.com/test/repo/pull/1'),
   commentOnIssue: vi.fn().mockResolvedValue(undefined),
   hasExistingWork: vi.fn().mockResolvedValue(false),
 }));
 
-vi.mock('../services/pr-context.js', () => ({
+vi.mock('../vcs/pr-context.js', () => ({
   formatPRContext: vi.fn().mockReturnValue(''),
 }));
 
-vi.mock('../services/language-detect.js', () => ({
+vi.mock('../core/language-detect.js', () => ({
   detectTooling: vi.fn().mockResolvedValue({ language: 'typescript', testRunner: 'vitest' }),
 }));
 
@@ -90,8 +90,8 @@ vi.mock('./prompts.js', () => ({
   resolvePromptsDir: vi.fn().mockReturnValue(undefined),
 }));
 
-vi.mock('../services/worktree.js', async (importOriginal) => {
-  const original = await importOriginal<typeof import('../services/worktree.js')>();
+vi.mock('../vcs/worktree.js', async (importOriginal) => {
+  const original = await importOriginal<typeof import('../vcs/worktree.js')>();
   return {
     ...original,
     createWorktree: vi.fn().mockImplementation((_repoPath: string, issueNumber: number) => ({
@@ -108,7 +108,7 @@ vi.mock('../services/worktree.js', async (importOriginal) => {
   };
 });
 
-vi.mock('../services/conflict-check.js', () => ({
+vi.mock('../vcs/conflict-check.js', () => ({
   checkForConflicts: vi.fn().mockResolvedValue({
     hasConflicts: false,
     conflictingFiles: [],
@@ -117,13 +117,13 @@ vi.mock('../services/conflict-check.js', () => ({
   }),
 }));
 
-vi.mock('../services/conflict-resolver.js', () => ({
+vi.mock('../vcs/conflict-resolver.js', () => ({
   resolveConflicts: vi.fn().mockResolvedValue({ resolved: true, filesResolved: [] }),
 }));
 
 const { fix } = await import('./fix.js');
-const { loadCheckpoint } = await import('../services/checkpoint.js');
-const { installSignalHandlers, removeSignalHandlers, resetShutdown } = await import('../services/shutdown.js');
+const { loadCheckpoint } = await import('./checkpoint.js');
+const { installSignalHandlers, removeSignalHandlers, resetShutdown } = await import('../core/shutdown.js');
 
 function makeIssue(n: number): Issue {
   return { number: n, title: `Test issue ${n}`, body: 'body', labels: [], url: `https://example.com/${n}` };

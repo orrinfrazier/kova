@@ -9,14 +9,10 @@
 // caller supplies (production wires this to runReviewLoop in a worktree; tests
 // inject a stub).
 
-import { fetchKovaPRsWithStatus, type KovaPR } from '../services/github.js';
-import {
-  type DispatchEdits,
-  type ResolvePRReviewThreadsResult,
-  resolvePRReviewThreads,
-} from '../services/review-resolver.js';
 import type { RepoConfig } from '../types/config.js';
 import { log } from '../utils/logger.js';
+import { fetchKovaPRsWithStatus, type KovaPR } from '../vcs/github.js';
+import { type DispatchEdits, type ResolvePRReviewThreadsResult, resolvePRReviewThreads } from './review-resolver.js';
 
 export interface BabysitOptions {
   repoPath: string;

@@ -2,14 +2,14 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { repoSearchProvider } from './repo-search-provider.js';
 import { makeConfig, makeCtx } from './test-helpers.js';
 
-vi.mock('../../services/repo-intel.js', () => ({
+vi.mock('../../memory/repo-intel.js', () => ({
   queryRepoSearch: vi.fn(async () => ''),
   formatRepoSearch: vi.fn(() => 'SEARCH'),
   queryRepoContext: vi.fn(),
   formatRepoContext: vi.fn(),
 }));
 
-import { formatRepoSearch, queryRepoSearch } from '../../services/repo-intel.js';
+import { formatRepoSearch, queryRepoSearch } from '../../memory/repo-intel.js';
 
 describe('repoSearchProvider', () => {
   beforeEach(() => vi.clearAllMocks());

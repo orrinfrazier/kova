@@ -13,7 +13,7 @@ beforeEach(() => {
   mockReindexFiles.mockReset();
 });
 
-vi.mock('../services/github.js', () => ({
+vi.mock('../vcs/github.js', () => ({
   fetchIssues: (...args: unknown[]) => mockFetchIssues(...args),
 }));
 
@@ -21,7 +21,7 @@ vi.mock('./loop.js', () => ({
   fixLoop: (...args: unknown[]) => mockFixLoop(...args),
 }));
 
-vi.mock('../services/reindex.js', () => ({
+vi.mock('../memory/reindex.js', () => ({
   collectChangedFilesFromPRs: (...args: unknown[]) => mockCollectChangedFilesFromPRs(...args),
   reindexFiles: (...args: unknown[]) => mockReindexFiles(...args),
 }));

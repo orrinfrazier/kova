@@ -14,7 +14,7 @@
 
 import { readFileSync } from 'node:fs';
 import { isAbsolute, join as joinPath } from 'node:path';
-import { openCodegraph } from '../../services/codegraph/index.js';
+import { openCodegraph } from '../../codegraph/index.js';
 import { resolveCallPaths } from '../call-path-context.js';
 import type { ContextProvider, ContextProviderInput } from './types.js';
 

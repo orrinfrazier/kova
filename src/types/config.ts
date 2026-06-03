@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { isValidCronExpression } from '../services/cron-evaluator.js';
+import { isValidCronExpression } from '../pipeline/cron-evaluator.js';
 
 export const ModelTierSchema = z.enum(['small', 'medium', 'large']);
 export type ModelTier = z.infer<typeof ModelTierSchema>;

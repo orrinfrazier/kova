@@ -13,10 +13,10 @@
 
 import { join as joinPath } from 'node:path';
 import { $ } from 'zx';
-import { openCodegraph } from '../services/codegraph/index.js';
-import { checkForConflicts } from '../services/conflict-check.js';
-import { detectDefaultBranch, getChangedFiles } from '../services/worktree.js';
+import { openCodegraph } from '../codegraph/index.js';
 import type { SpecPiece } from '../types/index.js';
+import { checkForConflicts } from '../vcs/conflict-check.js';
+import { detectDefaultBranch, getChangedFiles } from '../vcs/worktree.js';
 import { formatRegressionSurface } from './regression-surface.js';
 import { detectDependencyOverlaps } from './spec-validator.js';
 

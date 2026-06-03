@@ -21,11 +21,9 @@ import {
   type SpawnConsensusWaveConfig,
   spawnConsensusWave,
 } from '../ai/parallel-executor.js';
+import { detectTooling } from '../core/language-detect.js';
 import { dispatchExecuteWave, type SandboxContext } from '../sandbox/dispatch.js';
-import { appendConsensusDisagreement } from '../services/consensus-disagreements.js';
-import { detectTooling } from '../services/language-detect.js';
-import { compareBaselineFailures } from '../services/review-baseline.js';
-import { scanDiffForBlockingFindings } from '../services/review-prescan.js';
+import { appendConsensusDisagreement } from '../telemetry/consensus-disagreements.js';
 import type {
   Issue,
   QualityRemediation,
@@ -44,8 +42,10 @@ import { executePiecesInBatches } from './batch-scheduler.js';
 import { buildPieceContext, buildWaveContext } from './context.js';
 import type { ProjectContext } from './project-context.js';
 import { loadPrompt, resolvePromptsDir } from './prompts.js';
+import { compareBaselineFailures } from './review-baseline.js';
 import { classifyReviewFindings } from './review-classifier.js';
 import { loadReviewPersonaPrompt, selectReviewerPersona } from './review-persona.js';
+import { scanDiffForBlockingFindings } from './review-prescan.js';
 
 const exec = promisify(execCb);
 

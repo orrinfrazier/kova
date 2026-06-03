@@ -21,7 +21,7 @@ vi.mock('../../sandbox/dispatch.js', () => ({
 vi.mock('../prompts.js', () => ({
   loadPrompt: vi.fn(async () => 'ASSESS SYSTEM PROMPT'),
 }));
-vi.mock('../../services/prompt-versions.js', () => ({
+vi.mock('../../memory/prompt-versions.js', () => ({
   detectPromptChange: vi.fn(async () => null),
   hashPrompt: vi.fn(() => 'prompt-hash-abc123'),
   recordPromptVersion: vi.fn(async () => undefined),

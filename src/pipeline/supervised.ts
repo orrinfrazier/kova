@@ -4,12 +4,12 @@
 import { confirm, intro, isCancel, note, outro } from '@clack/prompts';
 import { fs, path } from 'zx';
 import type { RuntimeKind } from '../ai/runtime/index.js';
-import { approveIssues } from '../services/approval.js';
-import { resolveBrainstormDependencies } from '../services/brainstorm-deps.js';
-import { createIssue, fetchIssues } from '../services/github.js';
 import type { RepoConfig } from '../types/index.js';
+import { createIssue, fetchIssues } from '../vcs/github.js';
+import { approveIssues } from './approval.js';
 import type { BrainstormReturn } from './brainstorm.js';
 import { brainstorm, printCoverageMap } from './brainstorm.js';
+import { resolveBrainstormDependencies } from './brainstorm-deps.js';
 import type { LoopResult } from './loop.js';
 import { fixByNumbers } from './loop.js';
 

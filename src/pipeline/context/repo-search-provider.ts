@@ -5,7 +5,7 @@
 // them for the spec wave. Gated by `config.repo_intel?.enabled` AND the
 // presence of an `owner/repo` slug.
 
-import { formatRepoSearch, queryRepoSearch } from '../../services/repo-intel.js';
+import { formatRepoSearch, queryRepoSearch } from '../../memory/repo-intel.js';
 import type { ContextProvider, ContextProviderInput } from './types.js';
 
 export const repoSearchProvider: ContextProvider = {

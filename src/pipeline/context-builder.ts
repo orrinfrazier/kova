@@ -27,10 +27,10 @@ import {
   resolveThinkingLevel,
   resolveWaveModel,
 } from '../ai/index.js';
+import { detectPromptChange, hashPrompt, recordPromptVersion } from '../memory/prompt-versions.js';
 import { dispatchSpawnWave, type SandboxContext } from '../sandbox/dispatch.js';
-import type { EventBus } from '../services/event-bus/index.js';
-import { buildLiveHandleSink, type LiveFixRegistry } from '../services/live-fix-registry.js';
-import { detectPromptChange, hashPrompt, recordPromptVersion } from '../services/prompt-versions.js';
+import type { EventBus } from '../telemetry/event-bus/index.js';
+import { buildLiveHandleSink, type LiveFixRegistry } from '../telemetry/live-fix-registry.js';
 import type { MCPServerConfig, RepoConfig, SkillWaveName, WaveHandoff } from '../types/index.js';
 import { log } from '../utils/logger.js';
 import { waveFallbackModel } from './engines/fallback.js';

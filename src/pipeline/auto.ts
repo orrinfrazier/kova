@@ -1,8 +1,8 @@
 import type { RuntimeKind } from '../ai/runtime/index.js';
-import { fetchIssues } from '../services/github.js';
-import { collectChangedFilesFromPRs, reindexFiles } from '../services/reindex.js';
+import { collectChangedFilesFromPRs, reindexFiles } from '../memory/reindex.js';
 import type { Issue, KovaConfig, RepoConfig } from '../types/index.js';
 import { log } from '../utils/logger.js';
+import { fetchIssues } from '../vcs/github.js';
 import { buildCrossRepoTiers } from './cross-repo-scheduler.js';
 import { fixLoop, type LoopResult } from './loop.js';
 import { buildMultiRepoRunReport, printMultiRepoRunReport } from './run-report.js';

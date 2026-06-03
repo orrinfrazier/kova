@@ -9,16 +9,16 @@
 // return either a FixResult (when the wave returns early) or void (when
 // the orchestrator should continue).
 
-import { saveCheckpoint } from '../services/checkpoint.js';
-import * as metrics from '../services/metrics.js';
-import type { ProgressTracker } from '../services/progress.js';
+import * as metrics from '../telemetry/metrics.js';
 import type { FixState, Issue, RepoConfig, SpecResult, WaveResult } from '../types/index.js';
 import { saveHandoff } from '../types/index.js';
 import type { Logger } from '../utils/logger.js';
+import { saveCheckpoint } from './checkpoint.js';
 import { probeShipPreflightOverlaps } from './codegraph-checks.js';
 import type { TIEngineType } from './engines/index.js';
 import { applyEngineStateDelta, createShipEngine, type EngineContext } from './engines/index.js';
 import type { FixResult } from './fix.js';
+import type { ProgressTracker } from './progress.js';
 
 /** Inputs for `runShipWave` — kept lean by taking the orchestrator slots by ref. */
 export interface RunShipWaveInput {
@@ -193,8 +193,8 @@ export async function runShipWave(input: RunShipWaveInput): Promise<RunShipWaveR
 
 import { z as Z2 } from 'zod';
 import type { OutputFormat as _OF } from '../ai/index.js';
-import { getCurrentHeadSha } from '../services/git-diff.js';
 import { type WaveHandoff as _WaveHandoff, SpecResultSchema } from '../types/index.js';
+import { getCurrentHeadSha } from '../vcs/git-diff.js';
 import { refreshCodebaseContext } from './context-refresh.js';
 import { SpecEngine, type SpecEngineInput } from './engines/index.js';
 import { waveResultToHandoff } from './result.js';
@@ -385,9 +385,9 @@ export async function runTIWave(input: RunTIWaveInput): Promise<RunTIWaveResult>
 
 import { z } from 'zod';
 import type { AgentRuntimeFactory, MCPServerHandle, OutputFormat } from '../ai/index.js';
-import type { VariantSelection } from '../services/ab-test.js';
-import { defaultLiveFixRegistry, type LiveFixRegistry } from '../services/live-fix-registry.js';
-import { formatRepoStandards, queryRepoStandards } from '../services/repo-intel.js';
+import { formatRepoStandards, queryRepoStandards } from '../memory/repo-intel.js';
+import type { VariantSelection } from '../telemetry/ab-test.js';
+import { defaultLiveFixRegistry, type LiveFixRegistry } from '../telemetry/live-fix-registry.js';
 import type { MCPServerConfig } from '../types/index.js';
 import { QualityRemediationSchema } from '../types/index.js';
 import { log } from '../utils/logger.js';
@@ -527,7 +527,7 @@ export async function runQualityWave(input: RunQualityWaveInput): Promise<FixSta
 // --- WAVE R runner (review loop) ---
 
 import { syncCodegraph } from '../ai/codegraph.js';
-import { formatReviewFeedback, queryReviewFeedbackContext } from '../services/memory/review-feedback-rest.js';
+import { formatReviewFeedback, queryReviewFeedbackContext } from '../memory/review-feedback-rest.js';
 import { buildRegressionSurface } from './codegraph-checks.js';
 import { createReviewEngine, type ReviewEngineInput } from './engines/index.js';
 

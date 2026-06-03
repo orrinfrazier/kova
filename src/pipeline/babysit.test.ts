@@ -15,11 +15,11 @@ import type { RepoConfig } from '../types/config.js';
 const mockFetchKovaPRsWithStatus = vi.fn();
 const mockResolvePRReviewThreads = vi.fn();
 
-vi.mock('../services/github.js', () => ({
+vi.mock('../vcs/github.js', () => ({
   fetchKovaPRsWithStatus: mockFetchKovaPRsWithStatus,
 }));
 
-vi.mock('../services/review-resolver.js', () => ({
+vi.mock('./review-resolver.js', () => ({
   resolvePRReviewThreads: mockResolvePRReviewThreads,
   DEFAULT_NON_ACTIONABLE_TYPES: ['architectural_concern', 'design_preference', 'discussion'],
 }));

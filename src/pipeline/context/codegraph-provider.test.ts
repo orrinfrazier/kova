@@ -7,12 +7,12 @@ vi.mock('../../ai/codegraph.js', () => ({
   formatCodegraphContext: vi.fn(() => 'CODEGRAPH'),
 }));
 
-vi.mock('../../services/codegraph/index.js', () => ({
+vi.mock('../../codegraph/index.js', () => ({
   openCodegraph: vi.fn(() => ({ close: () => {} })),
 }));
 
 import { extractSymbolCandidates, formatCodegraphContext } from '../../ai/codegraph.js';
-import { openCodegraph } from '../../services/codegraph/index.js';
+import { openCodegraph } from '../../codegraph/index.js';
 
 describe('codegraphProvider', () => {
   beforeEach(() => vi.clearAllMocks());

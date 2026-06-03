@@ -10,12 +10,12 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { EventBus } from '../services/event-bus/bus.js';
-import type { KovaEvent } from '../services/event-bus/schema.js';
+import { EventBus } from '../telemetry/event-bus/bus.js';
+import type { KovaEvent } from '../telemetry/event-bus/schema.js';
 import type { Issue, RepoConfig, WaveHandoff, WaveName, WaveResult } from '../types/index.js';
 
 // --- Metrics mock (must come before importing fix) ---
-vi.mock('../services/metrics.js', () => ({
+vi.mock('../telemetry/metrics.js', () => ({
   recordWaveCompleted: vi.fn(),
   recordWaveDuration: vi.fn(),
   recordIssueFixed: vi.fn(),
@@ -113,19 +113,19 @@ vi.mock('./loops.js', () => ({
   detectThrashing: vi.fn().mockReturnValue(undefined),
 }));
 
-vi.mock('../services/github.js', () => ({
+vi.mock('../vcs/github.js', () => ({
   listOpenPRs: vi.fn().mockResolvedValue([]),
   createPR: vi.fn().mockResolvedValue('https://github.com/test/repo/pull/777'),
   commentOnIssue: vi.fn().mockResolvedValue(undefined),
 }));
 
-vi.mock('../services/language-detect.js', () => ({
+vi.mock('../core/language-detect.js', () => ({
   detectTooling: vi.fn().mockResolvedValue({ language: 'typescript', testRunner: 'vitest' }),
   formatToolingContext: vi.fn().mockReturnValue('Language: typescript'),
 }));
 
-vi.mock('../services/worktree.js', async (importOriginal) => {
-  const original = await importOriginal<typeof import('../services/worktree.js')>();
+vi.mock('../vcs/worktree.js', async (importOriginal) => {
+  const original = await importOriginal<typeof import('../vcs/worktree.js')>();
   return {
     ...original,
     createWorktree: vi.fn().mockImplementation((_repoPath: string, issueNumber: number) => ({
@@ -144,7 +144,7 @@ vi.mock('../services/worktree.js', async (importOriginal) => {
   };
 });
 
-vi.mock('../services/conflict-check.js', () => ({
+vi.mock('../vcs/conflict-check.js', () => ({
   checkForConflicts: vi.fn().mockResolvedValue({
     hasConflicts: false,
     conflictingFiles: [],
@@ -153,11 +153,11 @@ vi.mock('../services/conflict-check.js', () => ({
   }),
 }));
 
-vi.mock('../services/conflict-resolver.js', () => ({
+vi.mock('../vcs/conflict-resolver.js', () => ({
   resolveConflicts: vi.fn().mockResolvedValue({ resolved: true, filesResolved: [] }),
 }));
 
-vi.mock('../services/progress.js', () => ({
+vi.mock('./progress.js', () => ({
   ProgressTracker: vi.fn().mockImplementation(() => ({
     start: vi.fn().mockResolvedValue(undefined),
     waveCompleted: vi.fn().mockResolvedValue(undefined),
@@ -166,11 +166,11 @@ vi.mock('../services/progress.js', () => ({
   })),
 }));
 
-vi.mock('../services/secrets-scan.js', () => ({
+vi.mock('../core/secrets-scan.js', () => ({
   scanForSecrets: vi.fn().mockResolvedValue({ clean: true, findings: [], report: '' }),
 }));
 
-vi.mock('../services/isolation.js', () => ({
+vi.mock('../core/isolation.js', () => ({
   validateIsolation: vi.fn().mockResolvedValue({ valid: true }),
 }));
 
@@ -306,7 +306,7 @@ describe('fix() publishes fix-started / fix-done events (issue #340)', () => {
   });
 
   it('publishes fix-done with outcome=failed when isolation precheck fails', async () => {
-    const { validateIsolation } = await import('../services/isolation.js');
+    const { validateIsolation } = await import('../core/isolation.js');
     vi.mocked(validateIsolation).mockResolvedValueOnce({ valid: false, error: 'docker not running' });
 
     const bus = new EventBus();
@@ -352,7 +352,7 @@ describe('fix() publishes fix-started / fix-done events (issue #340)', () => {
   });
 
   it('uses getDefaultEventBus() when no bus is provided (still publishes lifecycle)', async () => {
-    const { getDefaultEventBus, setDefaultEventBus, EventBus: EB } = await import('../services/event-bus/bus.js');
+    const { getDefaultEventBus, setDefaultEventBus, EventBus: EB } = await import('../telemetry/event-bus/bus.js');
     const original = getDefaultEventBus();
     const probe = new EB();
     const seen: KovaEvent[] = [];

@@ -18,7 +18,7 @@ vi.mock('../../sandbox/dispatch.js', () => ({
 vi.mock('../prompts.js', () => ({
   loadPrompt: vi.fn(async () => 'ASSESS SYSTEM PROMPT'),
 }));
-vi.mock('../../services/prompt-versions.js', () => ({
+vi.mock('../../memory/prompt-versions.js', () => ({
   detectPromptChange: vi.fn(async () => null),
   hashPrompt: vi.fn(() => 'prompt-hash-consensus'),
   recordPromptVersion: vi.fn(async () => undefined),
@@ -26,7 +26,7 @@ vi.mock('../../services/prompt-versions.js', () => ({
 vi.mock('../../ai/parallel-executor.js', () => ({
   spawnConsensusWave: vi.fn(),
 }));
-vi.mock('../../services/consensus-disagreements.js', () => ({
+vi.mock('../../telemetry/consensus-disagreements.js', () => ({
   appendConsensusDisagreement: vi.fn(async () => undefined),
 }));
 vi.mock('../../ai/index.js', () => ({
@@ -58,7 +58,7 @@ vi.mock('../../ai/index.js', () => ({
 
 import { spawnConsensusWave } from '../../ai/parallel-executor.js';
 import { dispatchSpawnWave } from '../../sandbox/dispatch.js';
-import { appendConsensusDisagreement } from '../../services/consensus-disagreements.js';
+import { appendConsensusDisagreement } from '../../telemetry/consensus-disagreements.js';
 import { AssessEngine } from './assess.js';
 
 function makeConsensusConfig(): EngineContext['config'] {

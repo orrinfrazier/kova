@@ -5,8 +5,8 @@
 // history.jsonl entry. Pure helpers — no IO except the appendHistoryEntry
 // caller resolves.
 
-import type { VariantSelection } from '../services/ab-test.js';
-import { appendHistoryEntry } from '../services/history.js';
+import type { VariantSelection } from '../telemetry/ab-test.js';
+import { appendHistoryEntry } from '../telemetry/history.js';
 import type { FixState, Issue, RepoConfig } from '../types/index.js';
 import { log } from '../utils/logger.js';
 import type { CostReport } from './cost-report.js';

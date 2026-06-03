@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { patternProvider } from './pattern-provider.js';
 import { makeConfig, makeCtx } from './test-helpers.js';
 
-vi.mock('../../services/pattern-store.js', () => ({
+vi.mock('../../memory/pattern-store.js', () => ({
   PatternStore: vi.fn().mockImplementation(() => ({
     queryTopPatterns: () => [],
     close: () => {},
@@ -11,7 +11,7 @@ vi.mock('../../services/pattern-store.js', () => ({
   upsertPatternFromEpisode: vi.fn(),
 }));
 
-import { formatPatterns, PatternStore } from '../../services/pattern-store.js';
+import { formatPatterns, PatternStore } from '../../memory/pattern-store.js';
 
 describe('patternProvider', () => {
   beforeEach(() => vi.clearAllMocks());

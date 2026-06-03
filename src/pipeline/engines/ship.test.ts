@@ -11,33 +11,31 @@ import { createShipEngine } from './ship.js';
 import type { ShipEngineContext, ShipEngineInput } from './types.js';
 
 // Stub every git-touching service so the tests stay hermetic.
-vi.mock('../../services/conflict-check.js', () => ({
+vi.mock('../../vcs/conflict-check.js', () => ({
   checkForConflicts: vi.fn(),
 }));
-vi.mock('../../services/conflict-resolver.js', () => ({
+vi.mock('../../vcs/conflict-resolver.js', () => ({
   resolveConflicts: vi.fn(),
 }));
-vi.mock('../../services/secrets-scan.js', () => ({
+vi.mock('../../core/secrets-scan.js', () => ({
   scanForSecrets: vi.fn(),
 }));
-vi.mock('../../services/github.js', () => ({
+vi.mock('../../vcs/github.js', () => ({
   createPR: vi.fn(),
   listOpenPRs: vi.fn(),
 }));
-vi.mock('../../services/worktree.js', () => ({
+vi.mock('../../vcs/worktree.js', () => ({
   commitAndPush: vi.fn(),
   detectDefaultBranch: vi.fn(),
   getChangedFiles: vi.fn(),
   rebaseOnDefault: vi.fn(),
 }));
 
-const { checkForConflicts } = await import('../../services/conflict-check.js');
-const { resolveConflicts } = await import('../../services/conflict-resolver.js');
-const { scanForSecrets } = await import('../../services/secrets-scan.js');
-const { createPR, listOpenPRs } = await import('../../services/github.js');
-const { commitAndPush, detectDefaultBranch, getChangedFiles, rebaseOnDefault } = await import(
-  '../../services/worktree.js'
-);
+const { checkForConflicts } = await import('../../vcs/conflict-check.js');
+const { resolveConflicts } = await import('../../vcs/conflict-resolver.js');
+const { scanForSecrets } = await import('../../core/secrets-scan.js');
+const { createPR, listOpenPRs } = await import('../../vcs/github.js');
+const { commitAndPush, detectDefaultBranch, getChangedFiles, rebaseOnDefault } = await import('../../vcs/worktree.js');
 
 const mockCheckConflicts = checkForConflicts as unknown as ReturnType<typeof vi.fn>;
 const mockResolveConflicts = resolveConflicts as unknown as ReturnType<typeof vi.fn>;

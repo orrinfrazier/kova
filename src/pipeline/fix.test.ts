@@ -15,7 +15,7 @@ const mockRecordFixDuration = vi.fn();
 const mockRecordFixCost = vi.fn();
 const mockSetCurrentCostUsd = vi.fn();
 
-vi.mock('../services/metrics.js', () => ({
+vi.mock('../telemetry/metrics.js', () => ({
   recordWaveCompleted: (...args: unknown[]) => mockRecordWaveCompleted(...args),
   recordWaveDuration: (...args: unknown[]) => mockRecordWaveDuration(...args),
   recordIssueFixed: (...args: unknown[]) => mockRecordIssueFixed(...args),
@@ -118,19 +118,19 @@ vi.mock('./loops.js', () => ({
   runQualityRetryLoop: (...args: unknown[]) => mockRunQualityRetryLoop(...args),
 }));
 
-vi.mock('../services/github.js', () => ({
+vi.mock('../vcs/github.js', () => ({
   listOpenPRs: vi.fn().mockResolvedValue([]),
   createPR: vi.fn().mockResolvedValue('https://github.com/test/repo/pull/1'),
   commentOnIssue: vi.fn().mockResolvedValue(undefined),
 }));
 
-vi.mock('../services/language-detect.js', () => ({
+vi.mock('../core/language-detect.js', () => ({
   detectTooling: vi.fn().mockResolvedValue({ language: 'typescript', testRunner: 'vitest' }),
   formatToolingContext: vi.fn().mockReturnValue('Language: typescript'),
 }));
 
-vi.mock('../services/worktree.js', async (importOriginal) => {
-  const original = await importOriginal<typeof import('../services/worktree.js')>();
+vi.mock('../vcs/worktree.js', async (importOriginal) => {
+  const original = await importOriginal<typeof import('../vcs/worktree.js')>();
   return {
     ...original,
     createWorktree: vi.fn().mockImplementation((_repoPath: string, issueNumber: number) => ({
@@ -148,7 +148,7 @@ vi.mock('../services/worktree.js', async (importOriginal) => {
   };
 });
 
-vi.mock('../services/conflict-check.js', () => ({
+vi.mock('../vcs/conflict-check.js', () => ({
   checkForConflicts: vi.fn().mockResolvedValue({
     hasConflicts: false,
     conflictingFiles: [],
@@ -157,7 +157,7 @@ vi.mock('../services/conflict-check.js', () => ({
   }),
 }));
 
-vi.mock('../services/conflict-resolver.js', () => ({
+vi.mock('../vcs/conflict-resolver.js', () => ({
   resolveConflicts: vi.fn().mockResolvedValue({ resolved: true, filesResolved: [] }),
 }));
 
@@ -166,7 +166,7 @@ const mockProgressWaveCompleted = vi.fn().mockResolvedValue(undefined);
 const mockProgressComplete = vi.fn().mockResolvedValue(undefined);
 const mockProgressFailed = vi.fn().mockResolvedValue(undefined);
 
-vi.mock('../services/progress.js', () => ({
+vi.mock('./progress.js', () => ({
   ProgressTracker: vi.fn().mockImplementation(() => ({
     start: mockProgressStart,
     waveCompleted: mockProgressWaveCompleted,
@@ -176,8 +176,8 @@ vi.mock('../services/progress.js', () => ({
 }));
 
 const { fix } = await import('./fix.js');
-const { ProgressTracker: MockedProgressTracker } = await import('../services/progress.js');
-const { saveCheckpoint } = await import('../services/checkpoint.js');
+const { ProgressTracker: MockedProgressTracker } = await import('./progress.js');
+const { saveCheckpoint } = await import('./checkpoint.js');
 
 // --- Factories ---
 
@@ -360,7 +360,7 @@ describe('fix — grade D/F issue comment', () => {
       }),
     );
 
-    const { commentOnIssue } = await import('../services/github.js');
+    const { commentOnIssue } = await import('../vcs/github.js');
     const mockComment = vi.mocked(commentOnIssue);
     mockComment.mockClear();
 
@@ -385,7 +385,7 @@ describe('fix — grade D/F issue comment', () => {
       }),
     );
 
-    const { commentOnIssue } = await import('../services/github.js');
+    const { commentOnIssue } = await import('../vcs/github.js');
     const mockComment = vi.mocked(commentOnIssue);
     mockComment.mockClear();
 
@@ -408,7 +408,7 @@ describe('fix — grade D/F issue comment', () => {
       }),
     );
 
-    const { commentOnIssue } = await import('../services/github.js');
+    const { commentOnIssue } = await import('../vcs/github.js');
     const mockComment = vi.mocked(commentOnIssue);
     mockComment.mockClear();
 
@@ -423,7 +423,7 @@ describe('fix — grade D/F issue comment', () => {
   });
 
   it('does NOT post comment when assess grade allows proceeding', async () => {
-    const { commentOnIssue } = await import('../services/github.js');
+    const { commentOnIssue } = await import('../vcs/github.js');
     const mockComment = vi.mocked(commentOnIssue);
     mockComment.mockClear();
 

@@ -47,7 +47,7 @@ export async function createTempRepo(): Promise<TempRepo> {
 }
 
 // ---------------------------------------------------------------------------
-// Mock worktree functions — drop-in replacements for vi.mock('../services/worktree.js')
+// Mock worktree functions — drop-in replacements for vi.mock('../vcs/worktree.js')
 // ---------------------------------------------------------------------------
 
 export interface MockWorktreeFns {

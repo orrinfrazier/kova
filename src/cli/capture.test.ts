@@ -5,8 +5,8 @@
 // Issue: kova#295.
 
 import { describe, expect, it } from 'vitest';
-import { EventBus } from '../services/event-bus/bus.js';
-import type { KovaEvent, KovaEventInput } from '../services/event-bus/schema.js';
+import { EventBus } from '../telemetry/event-bus/bus.js';
+import type { KovaEvent, KovaEventInput } from '../telemetry/event-bus/schema.js';
 import { filterCaptureEvents, formatCaptureLine, runCaptureFromSnapshot } from './capture.js';
 
 function publishWave(bus: EventBus, fixId: string, wave: 'assess' | 'spec' | 'impl', turn = 0): KovaEvent {

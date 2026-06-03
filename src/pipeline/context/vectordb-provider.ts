@@ -5,7 +5,7 @@
 // for injection into the spec/impl wave context. Gated by
 // `config.vectordb?.enabled`; empty results produce `undefined`.
 
-import { formatCodeChunks, queryCodeContext } from '../../services/memory/code-rest.js';
+import { formatCodeChunks, queryCodeContext } from '../../memory/code-rest.js';
 import type { ContextProvider, ContextProviderInput } from './types.js';
 
 export const vectordbProvider: ContextProvider = {
