@@ -29,19 +29,15 @@ import type { EngineConfig, EngineResult, WaveEngine } from './types.js';
  * Input for the assess wave. The orchestrator pre-builds `userMessage` from
  * the issue body + episodic context + repo-intel + pattern context (so this
  * engine stays decoupled from the context-builder), and supplies the schema
- * to route structured output. `eventContext` is optional — when present the
- * runtime threads it into wave-executor for lifecycle events.
+ * to route structured output.
+ *
+ * `eventContext`, `runtimeFactory`, and `resolvedMcpServers` are sourced from
+ * `EngineContext` (orchestrator-owned plumbing). Engines forward them into
+ * `dispatchSpawnWave` so the runtime choice and event tagging stay consistent
+ * across every wave in a single fix run.
  */
 export interface AssessEngineInput extends EngineConfig {
   userMessage: string;
-  eventContext?:
-    | {
-        eventBus: import('../../services/event-bus/index.js').EventBus;
-        runId: string;
-        repoId: string;
-        fixId: string;
-      }
-    | undefined;
 }
 
 const WAVE: FixAIWaveName = 'assess';
@@ -49,8 +45,21 @@ const WAVE: FixAIWaveName = 'assess';
 export const AssessEngine: WaveEngine<AssessEngineInput, AssessResult> = {
   name: WAVE,
   async run(ctx, input): Promise<EngineResult<AssessResult>> {
-    const { workDir, repoPath, config, sandbox, mcpHandles, promptsDir, projectContext, runSkills, cacheContext } = ctx;
-    const { userMessage, outputFormat, eventContext } = input;
+    const {
+      workDir,
+      repoPath,
+      config,
+      sandbox,
+      mcpHandles,
+      promptsDir,
+      projectContext,
+      runSkills,
+      cacheContext,
+      runtimeFactory,
+      resolvedMcpServers,
+      eventContext,
+    } = ctx;
+    const { userMessage, outputFormat } = input;
 
     const model = resolveWaveModel(config.model[WAVE]);
     const mcpTools =
@@ -90,6 +99,15 @@ export const AssessEngine: WaveEngine<AssessEngineInput, AssessResult> = {
     const timeoutSeconds = config.rules.wave_timeout?.[WAVE];
     const timeoutMs = timeoutSeconds != null ? timeoutSeconds * 1000 : undefined;
     const sessionId = cacheContext != null ? buildWaveSessionId({ ...cacheContext, wave: WAVE }) : undefined;
+    // Issue #306 — sandbox-only MCP plumbing. Host-path waves get MCP tools via
+    // `tools` (already resolved above); the sandbox runner reconstructs servers
+    // on /workspace from this config map.
+    const sandboxMcpServers =
+      sandbox != null && resolvedMcpServers != null && Object.keys(resolvedMcpServers).length > 0
+        ? resolvedMcpServers
+        : undefined;
+    const sandboxMcpWaveOverrides =
+      sandbox != null ? (config.mcp?.waves as Partial<Record<FixAIWaveName, string[]>> | undefined) : undefined;
 
     const handoff = await dispatchSpawnWave<AssessResult>(
       {
@@ -111,6 +129,9 @@ export const AssessEngine: WaveEngine<AssessEngineInput, AssessResult> = {
               eventContext: { runId: eventContext.runId, repoId: eventContext.repoId, fixId: eventContext.fixId },
             }
           : {}),
+        ...(runtimeFactory != null ? { runtimeFactory } : {}),
+        ...(sandboxMcpServers != null ? { mcpServers: sandboxMcpServers } : {}),
+        ...(sandboxMcpWaveOverrides != null ? { mcpWaveOverrides: sandboxMcpWaveOverrides } : {}),
       },
       sandbox,
     );

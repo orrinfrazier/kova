@@ -73,14 +73,6 @@ export interface SpecEngineInput extends EngineConfig {
   userMessage: string;
   pendingPRFiles: readonly string[];
   pendingPRs?: readonly SpecEnginePendingPR[] | undefined;
-  eventContext?:
-    | {
-        eventBus: import('../../services/event-bus/index.js').EventBus;
-        runId: string;
-        repoId: string;
-        fixId: string;
-      }
-    | undefined;
 }
 
 /**
@@ -240,8 +232,21 @@ async function spawnSpec(
   userMessage: string,
   input: SpecEngineInput,
 ): Promise<EngineResult<SpecResult>> {
-  const { workDir, repoPath, config, sandbox, mcpHandles, promptsDir, projectContext, runSkills, cacheContext } = ctx;
-  const { outputFormat, eventContext } = input;
+  const {
+    workDir,
+    repoPath,
+    config,
+    sandbox,
+    mcpHandles,
+    promptsDir,
+    projectContext,
+    runSkills,
+    cacheContext,
+    runtimeFactory,
+    resolvedMcpServers,
+    eventContext,
+  } = ctx;
+  const { outputFormat } = input;
 
   const model = resolveWaveModel(config.model[WAVE]);
   const mcpTools =
@@ -276,6 +281,13 @@ async function spawnSpec(
   const timeoutSeconds = config.rules.wave_timeout?.[WAVE];
   const timeoutMs = timeoutSeconds != null ? timeoutSeconds * 1000 : undefined;
   const sessionId = cacheContext != null ? buildWaveSessionId({ ...cacheContext, wave: WAVE }) : undefined;
+  // Issue #306 — sandbox-only MCP plumbing. Host-path waves use `tools` above.
+  const sandboxMcpServers =
+    sandbox != null && resolvedMcpServers != null && Object.keys(resolvedMcpServers).length > 0
+      ? resolvedMcpServers
+      : undefined;
+  const sandboxMcpWaveOverrides =
+    sandbox != null ? (config.mcp?.waves as Partial<Record<FixAIWaveName, string[]>> | undefined) : undefined;
 
   const handoff = await dispatchSpawnWave<SpecResult>(
     {
@@ -297,6 +309,9 @@ async function spawnSpec(
             eventContext: { runId: eventContext.runId, repoId: eventContext.repoId, fixId: eventContext.fixId },
           }
         : {}),
+      ...(runtimeFactory != null ? { runtimeFactory } : {}),
+      ...(sandboxMcpServers != null ? { mcpServers: sandboxMcpServers } : {}),
+      ...(sandboxMcpWaveOverrides != null ? { mcpWaveOverrides: sandboxMcpWaveOverrides } : {}),
     },
     sandbox,
   );

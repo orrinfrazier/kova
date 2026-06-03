@@ -256,4 +256,46 @@ describe('SpecEngine', () => {
       'spec wave timeout',
     );
   });
+
+  it('forwards runtimeFactory + eventContext from ctx into dispatchSpawnWave', async () => {
+    const spec: SpecResult = { summary: 's', pieces: [], dependency_order: [], constraints: [] };
+    vi.mocked(dispatchSpawnWave).mockResolvedValueOnce(makeSpecHandoff(spec));
+
+    const runtimeFactory = vi.fn() as unknown as NonNullable<EngineContext['runtimeFactory']>;
+    const eventBus = { publish: vi.fn() } as unknown as NonNullable<EngineContext['eventContext']>['eventBus'];
+    const eventContext = { eventBus, runId: 'r2', repoId: 'owner/repo', fixId: 'f2' };
+
+    await SpecEngine.run(makeCtx({ runtimeFactory, eventContext }), {
+      userMessage: 'go',
+      pendingPRFiles: [],
+    });
+
+    const call = vi.mocked(dispatchSpawnWave).mock.calls[0]?.[0];
+    expect(call?.runtimeFactory).toBe(runtimeFactory);
+    expect(call?.eventBus).toBe(eventBus);
+    expect(call?.eventContext).toEqual({ runId: 'r2', repoId: 'owner/repo', fixId: 'f2' });
+  });
+
+  it('forwards resolvedMcpServers only when sandbox is set', async () => {
+    const spec: SpecResult = { summary: 's', pieces: [], dependency_order: [], constraints: [] };
+
+    vi.mocked(dispatchSpawnWave).mockResolvedValueOnce(makeSpecHandoff(spec));
+    const resolvedMcpServers = { srvA: { command: 'node', args: ['srv.js'] } } as unknown as NonNullable<
+      EngineContext['resolvedMcpServers']
+    >;
+
+    // Without sandbox — mcpServers should be elided.
+    await SpecEngine.run(makeCtx({ resolvedMcpServers }), { userMessage: 'host', pendingPRFiles: [] });
+    expect(vi.mocked(dispatchSpawnWave).mock.calls[0]?.[0]?.mcpServers).toBeUndefined();
+
+    vi.mocked(dispatchSpawnWave).mockResolvedValueOnce(makeSpecHandoff(spec));
+    const sandbox = { containerName: 'kova', repoPath: '/workspace' } as unknown as NonNullable<
+      EngineContext['sandbox']
+    >;
+    await SpecEngine.run(makeCtx({ resolvedMcpServers, sandbox }), {
+      userMessage: 'sandbox',
+      pendingPRFiles: [],
+    });
+    expect(vi.mocked(dispatchSpawnWave).mock.calls[1]?.[0]?.mcpServers).toBe(resolvedMcpServers);
+  });
 });

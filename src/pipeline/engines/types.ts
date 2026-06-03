@@ -11,12 +11,21 @@
 // the engine's `run` method; anything common belongs in EngineContext.
 
 import type { Skill } from '@earendil-works/pi-coding-agent';
-import type { MCPServerHandle, OutputFormat } from '../../ai/index.js';
+import type { AgentRuntimeFactory, MCPServerHandle, OutputFormat } from '../../ai/index.js';
 import type { FixAIWaveName } from '../../ai/wave-tools.js';
 import type { SandboxContext } from '../../sandbox/dispatch.js';
+import type { EventBus } from '../../services/event-bus/index.js';
 import type { ProjectContext } from '../../services/project-context.js';
 import type { WaveHandoff } from '../../types/handoffs.js';
-import type { Issue, RepoConfig, ReviewFinding, SkillWaveName, WaveName, WaveResult } from '../../types/index.js';
+import type {
+  Issue,
+  MCPServerConfig,
+  RepoConfig,
+  ReviewFinding,
+  SkillWaveName,
+  WaveName,
+  WaveResult,
+} from '../../types/index.js';
 import type { DiffRunner, FileWriter, PrescanRunner, TestRunner } from '../loops.js';
 
 /**
@@ -42,6 +51,19 @@ export interface EngineCacheContext {
  */
 export interface EnginePlaywrightConfig {
   enabled: boolean;
+}
+
+/**
+ * Shared lifecycle/event context (issue #340). Forwarded into wave-executor so
+ * wave-enter / wave-output / cost / aborted events share the orchestrator's
+ * runId/fixId tags. Engines that touch AI waves accept this via EngineContext
+ * so all callers route through the same shape.
+ */
+export interface EngineEventContext {
+  eventBus: EventBus;
+  runId: string;
+  repoId: string;
+  fixId: string;
 }
 
 /**
@@ -76,6 +98,29 @@ export interface EngineContext {
   abTestVariant?: string | undefined;
   /** Playwright wiring for waves that need browser tools. */
   playwright?: EnginePlaywrightConfig | undefined;
+  /**
+   * Issue #407 — pre-resolved `AgentRuntimeFactory`. When undefined,
+   * `dispatchSpawnWave` → `spawnWaveAgent` applies its own default (pi-mono).
+   * The orchestrator resolves precedence (option > config.runtime > 'pi') once
+   * and threads the factory into every engine so the runtime choice stays
+   * consistent across S/T/I/Q/R.
+   */
+  runtimeFactory?: AgentRuntimeFactory | undefined;
+  /**
+   * Issue #306 — host-resolved MCP server config map. Forwarded only when
+   * `sandbox` is set so dispatch.ts can serialize it across the docker-exec
+   * boundary; the in-container runner starts the same servers locally on
+   * `/workspace`. Host-path waves get MCP tools via `mcpHandles` (live
+   * connections) and ignore this field — it would be redundant on the host.
+   */
+  resolvedMcpServers?: Record<string, MCPServerConfig> | undefined;
+  /**
+   * Issue #340 — shared event context. When set, engines forward it into
+   * `dispatchSpawnWave` so wave-executor lifecycle events share the
+   * orchestrator's runId/fixId tags. Subscribers can correlate the full
+   * lifecycle on a single fixId.
+   */
+  eventContext?: EngineEventContext | undefined;
 }
 
 /**
@@ -136,6 +181,10 @@ export interface TIEngineInput {
   diffRunner?: DiffRunner | undefined;
   prContext?: string | undefined;
   codebaseContext?: string | undefined;
+  /** Issue #273 codegraph-derived context (symbol spans, callers/callees). */
+  codegraphContext?: string | undefined;
+  /** Issue #275 framework-resolved call paths (route → handler). */
+  callPathContext?: string | undefined;
   /** Skip the test-writing wave per piece (pipeline-scope IMPL_ONLY/REFACTOR). */
   skipTestPhase?: boolean | undefined;
   /** Skip the impl wave per piece (pipeline-scope TEST_ONLY). */
@@ -172,6 +221,13 @@ export interface ReviewEngineInput {
   fileWriter?: FileWriter | undefined;
   prContext?: string | undefined;
   reviewFeedbackContext?: string | undefined;
+  /**
+   * Issue #276 — regression-surface context (callers/importers of changed files)
+   * built from the codegraph. Routed into the review wave's user message via
+   * `runReviewLoop` so the reviewer can verify behavioral consistency at each
+   * dependent. Optional — falls back to no surface context when undefined.
+   */
+  regressionSurfaceContext?: string | undefined;
   prescanRunner?: PrescanRunner | undefined;
   /** Baseline failing-test names recorded before WAVE I ran. */
   baselineFailures?: string[] | undefined;
