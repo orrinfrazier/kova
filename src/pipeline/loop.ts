@@ -1,4 +1,5 @@
 import { $ } from 'zx';
+import { type EventBus, getDefaultEventBus } from '../services/event-bus/index.js';
 import { fetchIssue, fetchIssues, fetchMilestoneCounts } from '../services/github.js';
 import * as metrics from '../services/metrics.js';
 import { extractPRFromResult, fetchOpenPRsDetailed, type OpenPR } from '../services/pr-context.js';
@@ -36,6 +37,14 @@ export interface LoopOptions {
   budgetUsd?: number | undefined;
   force?: boolean | undefined;
   budgetTracker?: SharedBudgetTracker | undefined;
+  /**
+   * Optional shared `EventBus` so every concurrent fix in this loop publishes
+   * to one event stream (issue #340). When omitted, the loop resolves to the
+   * process-singleton `getDefaultEventBus()` — keeping behavior identical for
+   * existing callers (CLI runs, tests) while enabling future daemon callers
+   * (#291) to inject their own bus per run.
+   */
+  eventBus?: EventBus | undefined;
 }
 
 /**
@@ -130,6 +139,10 @@ function classifyScheduledSkip(error: string | undefined): IssueOutcomeStatus | 
 
 export async function fixLoop(options: LoopOptions): Promise<LoopResult> {
   const { repoPath, repoName, config, filter, milestone, maxIssues, fetchLimit, budgetUsd, budgetTracker } = options;
+  // Issue #340: every concurrent fix in this loop shares one EventBus so an
+  // external SSE/daemon subscriber sees a single event stream. Explicit
+  // caller bus wins; otherwise fall back to the process singleton.
+  const sharedEventBus = options.eventBus ?? getDefaultEventBus();
   const startedAt = new Date().toISOString();
   const limit = maxIssues ?? config.auto?.max_per_run ?? config.rules.max_issues_per_run;
   const effectiveFetchLimit = fetchLimit ?? config.rules.gh_fetch_limit;
@@ -201,7 +214,14 @@ export async function fixLoop(options: LoopOptions): Promise<LoopResult> {
       log.warn(`Failed to fetch origin: ${err instanceof Error ? err.message : String(err)}`);
     }
 
-    const result = await fix({ issue, repoPath, repoName, config, pendingPRs: [...pendingPRs] });
+    const result = await fix({
+      issue,
+      repoPath,
+      repoName,
+      config,
+      pendingPRs: [...pendingPRs],
+      eventBus: sharedEventBus,
+    });
 
     const waveCosts = aggregateWaveCosts(result.state.waveResults);
     accumulator.add(waveCosts.cost);
@@ -378,10 +398,18 @@ export interface FixByNumbersOptions {
   issueNumbers: number[];
   budgetUsd?: number | undefined;
   force?: boolean | undefined;
+  /**
+   * Optional shared `EventBus`. Same contract as `LoopOptions.eventBus`
+   * (issue #340) — defaults to the process-singleton when omitted so existing
+   * callers see no behavior change.
+   */
+  eventBus?: EventBus | undefined;
 }
 
 export async function fixByNumbers(options: FixByNumbersOptions): Promise<LoopResult> {
   const { repoPath, repoName, config, issueNumbers, budgetUsd } = options;
+  // Issue #340: share one EventBus across all fix() calls in this batch.
+  const sharedEventBus = options.eventBus ?? getDefaultEventBus();
   const startedAt = new Date().toISOString();
   const budget = budgetUsd;
   const concurrency = config.rules.concurrency ?? 1;
@@ -466,7 +494,14 @@ export async function fixByNumbers(options: FixByNumbersOptions): Promise<LoopRe
         log.warn(`Failed to fetch origin: ${err instanceof Error ? err.message : String(err)}`);
       }
 
-      const result = await fix({ issue, repoPath, repoName, config, pendingPRs: [...pendingPRs] });
+      const result = await fix({
+        issue,
+        repoPath,
+        repoName,
+        config,
+        pendingPRs: [...pendingPRs],
+        eventBus: sharedEventBus,
+      });
 
       const waveCosts = aggregateWaveCosts(result.state.waveResults);
       accumulator.add(waveCosts.cost);
