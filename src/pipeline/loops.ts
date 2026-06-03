@@ -683,7 +683,17 @@ export async function applyMidLoopDiagnosis(input: MidLoopDiagnosisInput): Promi
 
 // --- Wave result conversion ---
 
-function toWaveResult(
+/**
+ * Convert a dispatch result into a `WaveResult`. Exported for unit testing
+ * the consensus-telemetry propagation contract (#262); internal call sites
+ * use it directly.
+ *
+ * When the dispatch result carries optional `consensus` metadata (only
+ * threaded through when the wave ran via a pool/adjudicator), it's copied
+ * onto the resulting `WaveResult`. Single-model dispatch results leave the
+ * field undefined — existing consumers stay unaffected.
+ */
+export function toWaveResult(
   wave: WaveName,
   execResult: {
     result: string | null;
@@ -694,6 +704,7 @@ function toWaveResult(
     model?: string | undefined;
     provider?: string | undefined;
     structuredOutput?: unknown;
+    consensus?: import('../types/index.js').WaveResultConsensus | undefined;
   },
 ): WaveResult {
   return {
@@ -705,6 +716,7 @@ function toWaveResult(
     turns: execResult.turns,
     ...(execResult.model != null && { model: execResult.model }),
     ...(execResult.provider != null && { provider: execResult.provider }),
+    ...(execResult.consensus != null && { consensus: execResult.consensus }),
   };
 }
 

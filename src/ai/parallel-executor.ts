@@ -29,11 +29,36 @@
 //   - No worker can leak its `Agent` instance — all returns are `WaveHandoff<T>`
 //     per the inter-wave-isolation invariant documented on `spawnWaveAgent`.
 
+import { createHash } from 'node:crypto';
 import type { WaveHandoff } from '../types/index.js';
 import { log } from '../utils/logger.js';
 import { KovaError } from './errors.js';
 import { getModelString, resolveWaveModel } from './models.js';
 import { type OutputFormat, type SpawnWaveAgentConfig, spawnWaveAgent } from './wave-executor.js';
+
+/**
+ * Shape of one disagreement record emitted to the JSONL log when the
+ * adjudicator overrides the pool consensus/majority (#262). Kept here as a
+ * minimal contract so `parallel-executor.ts` can construct records without
+ * importing `services/consensus-disagreements.ts` (which would create a
+ * services → ai dependency edge — we keep ai dependency-free of services).
+ *
+ * The full schema (with `wave` typed against `WaveNameSchema` and the file
+ * path helpers) lives in `services/consensus-disagreements.ts` and re-shares
+ * this type via structural compatibility.
+ */
+export interface ConsensusDisagreementRecord {
+  timestamp: string;
+  wave: string;
+  agreement: ConsensusAgreement;
+  adjudicator_model: string;
+  pool_size: number;
+  rejected_count: number;
+  degraded: boolean;
+  rejected_models: string[];
+  adjudicator_artifact_hash: string;
+  pool_artifact_hashes: Array<string | null>;
+}
 
 /**
  * Per-pool-member metadata in the consensus result. One entry per configured
@@ -124,6 +149,17 @@ export interface SpawnConsensusWaveConfig extends Omit<SpawnWaveAgentConfig, 'mo
    * same factory used by `spawnWaveAgent` (pi-mono today).
    */
   adjudicatorRuntimeFactory?: SpawnWaveAgentConfig['runtimeFactory'];
+  /**
+   * Optional callback invoked once after adjudication whenever the
+   * adjudicator rejected ≥1 surviving pool member's artifact (#262).
+   * Callers wire this to `appendConsensusDisagreement` from
+   * `services/consensus-disagreements.ts` to persist the JSONL log; tests
+   * supply a stub. When omitted, no log is emitted — single-call sites
+   * (e.g. internal `/consensus` runs that don't need the audit trail) keep
+   * the existing zero-side-effect behavior. Callback errors are logged but
+   * never thrown — telemetry must not block the wave result.
+   */
+  appendDisagreement?: (record: ConsensusDisagreementRecord) => void | Promise<void>;
 }
 
 const MIN_POOL_SIZE = 2;
@@ -251,7 +287,7 @@ function buildAdjudicatorMessage(
 export async function spawnConsensusWave<T = unknown>(
   config: SpawnConsensusWaveConfig,
 ): Promise<ConsensusWaveHandoff<T>> {
-  const { poolModels, adjudicatorModel, adjudicatorRuntimeFactory, ...sharedConfig } = config;
+  const { poolModels, adjudicatorModel, adjudicatorRuntimeFactory, appendDisagreement, ...sharedConfig } = config;
 
   if (poolModels.length < MIN_POOL_SIZE) {
     throw new KovaError(
@@ -356,6 +392,51 @@ export async function spawnConsensusWave<T = unknown>(
     `[consensus] adjudication complete: agreement=${agreement} adjudicator_cost=${adjudicatorHandoff.cost.toFixed(4)} total_cost=${totalCost.toFixed(4)}`,
   );
 
+  // Phase 3: detect adjudicator-vs-pool rejection (#262). A pool member is
+  // "rejected" when its surviving artifact differs from the adjudicator's
+  // reconciled artifact. Dropped members are excluded — they had no surviving
+  // artifact to compare. When ≥1 surviving pool member is rejected, append a
+  // record to the disagreement log via the caller-supplied callback. The
+  // callback is fire-and-forget at the call-site level: errors are logged but
+  // never thrown so telemetry can't block the wave result.
+  const adjudicatorArtifactJson = stableStringify(adjudicatorHandoff.artifact);
+  const adjudicatorArtifactHash = hashArtifact(adjudicatorArtifactJson);
+  const poolArtifactHashes: Array<string | null> = members.map((member) => {
+    const result = poolResults.find((r) => r.model === member.model);
+    if (result == null || result.status !== 'success') return null;
+    const survivor = survivors.find((s) => s.model === member.model);
+    return survivor != null ? hashArtifact(stableStringify(survivor.handoff.artifact)) : null;
+  });
+  const rejectedSurvivors = survivors.filter((s) => stableStringify(s.handoff.artifact) !== adjudicatorArtifactJson);
+  const rejectedModels = rejectedSurvivors.map((s) => s.model);
+
+  if (appendDisagreement != null && rejectedModels.length > 0) {
+    const record: ConsensusDisagreementRecord = {
+      timestamp: new Date().toISOString(),
+      wave: sharedConfig.wave,
+      agreement,
+      adjudicator_model: resolvedAdjudicatorModel,
+      pool_size: members.length,
+      rejected_count: rejectedModels.length,
+      degraded,
+      rejected_models: rejectedModels,
+      adjudicator_artifact_hash: adjudicatorArtifactHash,
+      pool_artifact_hashes: poolArtifactHashes,
+    };
+    try {
+      const ret = appendDisagreement(record);
+      if (ret != null && typeof ret === 'object' && 'then' in ret) {
+        // Don't await — the wave should not block on telemetry. Attach a
+        // catch so an unhandled rejection doesn't poison the process.
+        (ret as Promise<void>).catch((err) => {
+          log.warn(`[consensus] appendDisagreement failed: ${err instanceof Error ? err.message : String(err)}`);
+        });
+      }
+    } catch (err) {
+      log.warn(`[consensus] appendDisagreement failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
   return {
     ...adjudicatorHandoff,
     cost: totalCost,
@@ -366,6 +447,31 @@ export async function spawnConsensusWave<T = unknown>(
       agreement,
     },
   };
+}
+
+/**
+ * Stable JSON stringify — sorts object keys recursively so logically equal
+ * artifacts hash to the same value regardless of key insertion order.
+ * Identical to the equality check used by `classifyAgreement` (which uses
+ * raw `JSON.stringify` because both inputs come from the same code path),
+ * but extended with key-sort because the adjudicator artifact may not share
+ * key order with pool members.
+ */
+function stableStringify(value: unknown): string {
+  return JSON.stringify(value, (_key, val) => {
+    if (val != null && typeof val === 'object' && !Array.isArray(val)) {
+      const sorted: Record<string, unknown> = {};
+      for (const k of Object.keys(val as Record<string, unknown>).sort()) {
+        sorted[k] = (val as Record<string, unknown>)[k];
+      }
+      return sorted;
+    }
+    return val;
+  });
+}
+
+function hashArtifact(stableJson: string): string {
+  return `sha256:${createHash('sha256').update(stableJson).digest('hex')}`;
 }
 
 // Type re-export for callers that want to inspect outputFormat shape without
