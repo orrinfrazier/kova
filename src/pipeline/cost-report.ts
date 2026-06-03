@@ -1,6 +1,7 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { isLocalProvider } from '../ai/index.js';
+import { getRouterUpstreamProvider } from '../ai/router.js';
 import type { FixState, SandboxResourceUsage, StructuredOutputMetrics, WaveName } from '../types/index.js';
 import { log } from '../utils/logger.js';
 
@@ -65,8 +66,18 @@ export function buildCostReport(state: FixState): CostReport {
     totalTurns += result.turns;
     totalDuration += result.duration;
 
-    // Per-provider cost aggregation
-    const providerKey = result.provider ?? 'unknown';
+    // Per-provider cost aggregation.
+    //
+    // Router-proxied waves (kova#314) carry `provider: 'router'` but their
+    // real cost should bucket under the upstream provider (e.g. 'anthropic'),
+    // so the user sees `anthropic: $X` not `router: $X` in cost-report.json.
+    // The per-wave row above keeps `provider: 'router'` for transparency.
+    // Falls back to 'router' when the upstream is unknown (better to report
+    // *something* than silently merge into 'unknown').
+    let providerKey = result.provider ?? 'unknown';
+    if (providerKey === 'router' && result.model) {
+      providerKey = getRouterUpstreamProvider(result.model) ?? 'router';
+    }
     providerCosts[providerKey] = (providerCosts[providerKey] ?? 0) + result.cost;
 
     // Classify cost as API or local — undefined provider treated as API (backward compat)
