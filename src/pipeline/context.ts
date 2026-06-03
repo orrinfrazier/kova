@@ -1,6 +1,8 @@
 // Handoff context injection — builds per-wave context from previous wave artifacts.
 // Each wave gets a focused, formatted summary (not raw JSON) of only the handoffs it needs.
 
+import { type ExecFn, findSymbolDefinitions, findSymbolReferences, type SymbolHit } from '../ai/codegraph.js';
+import type { CodeChunk } from '../services/vectordb.js';
 import type {
   AssessResult,
   Issue,
@@ -506,4 +508,241 @@ export function buildPieceContext(wave: 'test' | 'impl', piece: SpecPiece, optio
   }
 
   return truncateToTokenBudget(sections.join('\n\n'), tokenBudget);
+}
+
+// --- Hybrid graph+vector retrieval (Issue #274) ---
+//
+// When an issue names a symbol (e.g. `queryCodeContext`, `findRelevantContext`),
+// the right context is an EXACT definition + 1-hop callers — not random vector
+// neighbors. This section provides the structural channel; the caller in
+// `fix.ts` unions it with vector chunks (vector becomes the fallback tail for
+// concept-only queries).
+//
+// Pipeline:
+//   1. extractCandidateSymbols(text) — pull identifier-shaped tokens out of
+//      the issue body. CamelCase / camelCase / snake_case, with a small
+//      stop-list to drop common English words that happen to start with a
+//      capital ("Issue", "Should", "This"). Cap at 50 to keep CLI fanout
+//      bounded.
+//   2. queryCodeGraphContext(workDir, text) — for each candidate, call
+//      `codegraph find-symbol` then 1-hop `codegraph callers`. Dedupe across
+//      definitions + callers by `file:startLine`. Symbols that resolve to
+//      nothing get pushed into `unresolvedQueries` so the vector fallback
+//      knows what to focus on.
+//   3. mergeGraphAndVectorContext(graphResult, vectorChunks) — render the
+//      combined markdown section. Graph hits come first (they are the answer
+//      for named symbols); vector chunks come second, AFTER dropping any
+//      chunk that overlaps a graph hit's `file:[startLine..endLine]` range.
+//      Vector chunks dedupe against each other by `file:startLine-endLine`.
+
+/** Maximum number of distinct candidate symbols extracted from issue text. */
+const MAX_CANDIDATE_SYMBOLS = 50;
+
+/**
+ * Lowercase stop-list of CamelCase-shaped English words that frequently appear
+ * in issue bodies but are NEVER symbol names. Kept tiny on purpose — the
+ * goal is to drop the most common false positives, not to be a real NER.
+ *
+ * Extend conservatively. Anything ambiguous (might be a real symbol in some
+ * project) should stay OUT of this list — the codegraph CLI returns `[]` for
+ * non-existent symbols anyway, so the worst case for a stray word is one
+ * wasted CLI call.
+ */
+const SYMBOL_STOP_WORDS = new Set([
+  'issue',
+  'should',
+  'this',
+  'that',
+  'these',
+  'those',
+  'when',
+  'where',
+  'while',
+  'add',
+  'fix',
+  'new',
+  'old',
+  'the',
+  'and',
+  'but',
+  'for',
+  'not',
+  'use',
+  'using',
+  'note',
+  'todo',
+  'pr',
+  'kova',
+]);
+
+/**
+ * Regex matching identifier shapes worth probing as symbol candidates:
+ *  - CamelCase  ("UserService")
+ *  - camelCase  ("queryCodeContext")
+ *  - snake_case ("query_code_context", at least one underscore)
+ *
+ * Bare lowercase words ("foo", "bar") are intentionally excluded — too many
+ * false positives in English prose. CamelCase / mixed-case / snake_case is
+ * the heuristic.
+ */
+const SYMBOL_REGEX =
+  /\b(?:[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]*)+|[a-z][a-z0-9]*(?:[A-Z][a-zA-Z0-9]*)+|[a-z][a-z0-9]*(?:_[a-z0-9]+)+)\b/g;
+
+/**
+ * Extract candidate symbol names from free-form text (issue title + body).
+ * De-duplicates, filters the English-stop-word list, and caps at
+ * `MAX_CANDIDATE_SYMBOLS` to keep downstream codegraph fanout bounded.
+ *
+ * Pure function — exported for unit testing in isolation.
+ */
+export function extractCandidateSymbols(text: string): string[] {
+  if (!text || text.trim().length === 0) return [];
+  const seen = new Set<string>();
+  const result: string[] = [];
+  const matches = text.match(SYMBOL_REGEX);
+  if (!matches) return [];
+  for (const m of matches) {
+    if (seen.has(m)) continue;
+    if (SYMBOL_STOP_WORDS.has(m.toLowerCase())) continue;
+    seen.add(m);
+    result.push(m);
+    if (result.length >= MAX_CANDIDATE_SYMBOLS) break;
+  }
+  return result;
+}
+
+export interface GraphContextResult {
+  /** Symbols the codegraph CLI resolved (definitions + 1-hop callers/callees), deduped by file:startLine. */
+  resolvedSymbols: SymbolHit[];
+  /** Candidate symbols extracted from the query that codegraph could NOT resolve.
+   *  Useful signal for the caller to bias the vector-fallback query. */
+  unresolvedQueries: string[];
+}
+
+export interface QueryCodeGraphOptions {
+  /** Injection point for tests — defaults to the real `execFile` wrapper inside codegraph.ts. */
+  exec?: ExecFn;
+}
+
+/**
+ * Hybrid retrieval primary channel: resolve named symbols structurally via
+ * the external codegraph CLI. Returns `{ resolvedSymbols, unresolvedQueries }`.
+ *
+ * If codegraph is not on PATH, every lookup returns `[]` — `unresolvedQueries`
+ * will contain every extracted candidate, and the caller falls back to
+ * pure-vector retrieval (the legacy behavior). This is the "graph absent ->
+ * degrades to pure-vector" acceptance criterion from #274.
+ */
+export async function queryCodeGraphContext(
+  workDir: string,
+  queryText: string,
+  options: QueryCodeGraphOptions = {},
+): Promise<GraphContextResult> {
+  const candidates = extractCandidateSymbols(queryText);
+  if (candidates.length === 0) {
+    return { resolvedSymbols: [], unresolvedQueries: [] };
+  }
+
+  const resolvedSymbols: SymbolHit[] = [];
+  const unresolvedQueries: string[] = [];
+  const dedupe = new Set<string>();
+
+  for (const candidate of candidates) {
+    const defs = options.exec
+      ? await findSymbolDefinitions(workDir, candidate, options.exec)
+      : await findSymbolDefinitions(workDir, candidate);
+    const refs = options.exec
+      ? await findSymbolReferences(workDir, candidate, options.exec)
+      : await findSymbolReferences(workDir, candidate);
+
+    let addedAny = false;
+    for (const hit of [...defs, ...refs]) {
+      const key = `${hit.file}:${hit.startLine}`;
+      if (dedupe.has(key)) continue;
+      dedupe.add(key);
+      resolvedSymbols.push(hit);
+      addedAny = true;
+    }
+    if (!addedAny) {
+      unresolvedQueries.push(candidate);
+    }
+  }
+
+  return { resolvedSymbols, unresolvedQueries };
+}
+
+/** Render a markdown section listing resolved symbol hits, suitable for
+ *  prompt injection. Returns empty string when there are no hits. */
+export function formatGraphContext(hits: SymbolHit[]): string {
+  if (hits.length === 0) return '';
+  const sections = hits.map((h) => {
+    const lineInfo = h.startLine === h.endLine ? `L${h.startLine}` : `L${h.startLine}-${h.endLine}`;
+    return `- **${h.symbol}** (${h.kind}) — \`${h.file}\` ${lineInfo}`;
+  });
+  return `## Graph: resolved symbols (structural)\n\n${sections.join('\n')}`;
+}
+
+/**
+ * Merge graph hits with vector chunks for the final codebase-context prompt
+ * section. Graph hits render first; vector chunks render second AFTER:
+ *
+ *  - Dropping any vector chunk whose `file` matches a resolved graph hit AND
+ *    whose `[startLine..endLine]` overlaps the graph hit's line range. The
+ *    graph already gave us a precise location, so the embedded neighbor is
+ *    redundant noise.
+ *  - Deduplicating remaining vector chunks against each other by
+ *    `file:startLine-endLine`.
+ *
+ * When graph has zero resolved symbols, returns pure-vector formatted output
+ * (the legacy behavior). When both are empty, returns `''`.
+ */
+export function mergeGraphAndVectorContext(graphResult: GraphContextResult, vectorChunks: CodeChunk[]): string {
+  const sections: string[] = [];
+  const graphSection = formatGraphContext(graphResult.resolvedSymbols);
+  if (graphSection.length > 0) {
+    sections.push(graphSection);
+  }
+
+  const filteredChunks = filterAndDedupeVectorChunks(vectorChunks, graphResult.resolvedSymbols);
+  if (filteredChunks.length > 0) {
+    const sorted = [...filteredChunks].sort((a, b) => b.score - a.score);
+    const chunkSections = sorted.map((chunk) => {
+      const lineInfo =
+        chunk.startLine != null && chunk.endLine != null ? ` (L${chunk.startLine}-${chunk.endLine})` : '';
+      return `### ${chunk.file}${lineInfo}\n\n\`\`\`\n${chunk.content}\n\`\`\``;
+    });
+    sections.push(`## Vector neighbors (concept tail)\n\n${chunkSections.join('\n\n')}`);
+  }
+
+  return sections.join('\n\n');
+}
+
+/** Drop vector chunks that overlap a graph hit; dedupe by `file:startLine-endLine`. */
+function filterAndDedupeVectorChunks(chunks: CodeChunk[], graphHits: SymbolHit[]): CodeChunk[] {
+  const seenKeys = new Set<string>();
+  const result: CodeChunk[] = [];
+  for (const chunk of chunks) {
+    if (overlapsAnyGraphHit(chunk, graphHits)) continue;
+    const key = `${chunk.file}:${chunk.startLine ?? '?'}-${chunk.endLine ?? '?'}`;
+    if (seenKeys.has(key)) continue;
+    seenKeys.add(key);
+    result.push(chunk);
+  }
+  return result;
+}
+
+/** True when `chunk` lives in the same file as some graph hit AND its
+ *  `[startLine..endLine]` interval overlaps the hit's range. Missing line
+ *  numbers count as "no overlap" — we keep the chunk in that case rather
+ *  than silently dropping context. */
+function overlapsAnyGraphHit(chunk: CodeChunk, graphHits: SymbolHit[]): boolean {
+  if (chunk.startLine == null || chunk.endLine == null) return false;
+  for (const hit of graphHits) {
+    if (hit.file !== chunk.file) continue;
+    // Standard half-open interval overlap test.
+    if (chunk.startLine <= hit.endLine && hit.startLine <= chunk.endLine) {
+      return true;
+    }
+  }
+  return false;
 }
