@@ -180,13 +180,21 @@ export async function stopMCPServer(handle: MCPServerHandle): Promise<void> {
  *  `cwd = workDir` and `${workspaceFolder}` / `${cwd}` tokens in args/env
  *  resolve to it. This lets per-fix runs point path-sensitive servers
  *  (codegraph, language servers) at the worktree instead of the orchestrator's
- *  cwd. Omit `workDir` to preserve legacy behavior (child inherits parent cwd). */
+ *  cwd. Omit `workDir` to preserve legacy behavior (child inherits parent cwd).
+ *
+ *  `withholdServers` is a list of server names to skip starting entirely (issue
+ *  #271). Used by fix.ts to suppress codegraph when its index is empty or
+ *  uninitialized — better to withhold the tool than to let `codegraph serve
+ *  --mcp` answer empty-but-successfully and silently degrade agent reasoning.
+ *  Unknown names in the list are ignored (no error). */
 export async function startAllMCPServers(
   servers: Record<string, MCPServerConfig>,
   workDir?: string,
+  withholdServers?: string[],
 ): Promise<Map<string, MCPServerHandle>> {
   const handles = new Map<string, MCPServerHandle>();
-  const entries = Object.entries(servers);
+  const withhold = new Set(withholdServers ?? []);
+  const entries = Object.entries(servers).filter(([name]) => !withhold.has(name));
   if (entries.length === 0) return handles;
 
   const results = await Promise.allSettled(
