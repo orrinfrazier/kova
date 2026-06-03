@@ -29,6 +29,7 @@ import { clearCheckpoint, loadCheckpoint, saveCheckpoint } from '../services/che
 import { checkForConflicts } from '../services/conflict-check.js';
 import { resolveConflicts } from '../services/conflict-resolver.js';
 import { type EpisodeFTSRecord, EpisodeFTSStore } from '../services/episode-fts.js';
+import { type EventBus, getDefaultEventBus } from '../services/event-bus/index.js';
 import { collectPRFeedback } from '../services/feedback-collector.js';
 import { commentOnIssue, createPR, listOpenPRs } from '../services/github.js';
 import { appendHistoryEntry, readHistory } from '../services/history.js';
@@ -150,6 +151,17 @@ export interface FixOptions {
    * mode never auto-selected is `explore`, which is opt-in only.
    */
   mode?: PipelineMode | undefined;
+  /**
+   * Optional `EventBus` for run lifecycle + wave observability events
+   * (issue #340). When undefined, fix() falls back to `getDefaultEventBus()`
+   * so loop.ts callers can share one bus across concurrent fixes without
+   * passing it explicitly. The bus is the foundation for #291 (persistent
+   * daemon + run registry) and #293 (kova attach client).
+   *
+   * Pure side-effect: events with no subscribers are no-ops; fix outcome is
+   * never altered by the publish path.
+   */
+  eventBus?: EventBus | undefined;
 }
 
 export interface FixResult {
@@ -251,6 +263,7 @@ async function spawnWave<T>(
   sandbox?: SandboxContext | undefined,
   runSkills?: FixRunSkills | undefined,
   cacheContext?: { repo: string; issue: string | number },
+  eventContext?: { eventBus: EventBus; runId: string; repoId: string; fixId: string },
 ): Promise<{ handoff: WaveHandoff<T>; promptHash: string }> {
   const model = resolveWaveModel(config.model[wave]);
   const mcpTools =
@@ -299,6 +312,16 @@ async function spawnWave<T>(
       ...(outputFormat != null && { outputFormat }),
       ...(timeoutMs != null && { timeoutMs }),
       ...(sessionId != null ? { sessionId } : {}),
+      // Issue #340: forward eventBus + eventContext so wave-executor's
+      // wave-enter / wave-output / cost / aborted events share the same
+      // runId/fixId tags as the fix() lifecycle events. Subscribers can
+      // correlate the full lifecycle on a single fixId.
+      ...(eventContext != null
+        ? {
+            eventBus: eventContext.eventBus,
+            eventContext: { runId: eventContext.runId, repoId: eventContext.repoId, fixId: eventContext.fixId },
+          }
+        : {}),
     },
     sandbox,
   );
@@ -367,6 +390,51 @@ export async function fix(options: FixOptions): Promise<FixResult> {
   const flog: Logger = log.child({ issue: issue.number, repo: repoName });
   initFileLogger(repoPath, runId);
 
+  // Event bus (issue #340): resolve to the caller-provided bus, else the
+  // process-singleton. `fixId` is stable across the lifecycle so subscribers
+  // can correlate `fix-started` → wave events → `fix-done` on the same
+  // identifier. `runId` doubles as the bus-level run id; loop.ts callers
+  // who share a bus across concurrent fixes get one event stream tagged by
+  // `fixId`. `publishedFixDone` guards against the finally block double-
+  // publishing the terminal event when an early return path already emitted.
+  const eventBus = options.eventBus ?? getDefaultEventBus();
+  const fixId = runId;
+  let publishedFixDone = false;
+  const publishFixDone = (
+    outcome: 'done' | 'failed' | 'done_with_known_issues',
+    extras: { totalCostUsd: number; prNumber?: number; reason?: string },
+  ): void => {
+    if (publishedFixDone) return;
+    publishedFixDone = true;
+    try {
+      eventBus.publish({
+        type: 'fix-done',
+        runId,
+        repoId: repoName,
+        fixId,
+        outcome,
+        totalCostUsd: extras.totalCostUsd,
+        ...(extras.prNumber != null ? { prNumber: extras.prNumber } : {}),
+        ...(extras.reason != null ? { reason: extras.reason } : {}),
+      });
+    } catch (err) {
+      // Pure side-effect: a misbehaving bus must never alter fix outcomes.
+      flog.warn(`[event-bus] fix-done publish failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
+  try {
+    eventBus.publish({
+      type: 'fix-started',
+      runId,
+      repoId: repoName,
+      fixId,
+      issueNumber: issue.number,
+    });
+  } catch (err) {
+    flog.warn(`[event-bus] fix-started publish failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
   // Pre-flight: validate isolation mode is available
   const isolationCheck = await validateIsolation(config.isolation);
   if (!isolationCheck.valid) {
@@ -380,6 +448,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
     _activeFixes--;
     metrics.setActiveFixes(_activeFixes);
     closeFileLogger();
+    publishFixDone('failed', { totalCostUsd: 0, reason: errorMsg });
     return { success: false, error: errorMsg, state };
   }
 
@@ -404,6 +473,18 @@ export async function fix(options: FixOptions): Promise<FixResult> {
   // Threaded into every `spawnWave` call below; `buildWaveSessionId` adds the
   // wave suffix internally.
   const cacheContext = { repo: repoName, issue: issue.number };
+
+  // Issue #340: shared eventContext threaded into every spawnWave call so all
+  // wave-level events the wave-executor emits (wave-enter, wave-output, cost,
+  // aborted, steered) share the runId/repoId/fixId tags with the fix-started /
+  // fix-done lifecycle events. Subscribers can correlate every event in this
+  // fix on the same fixId.
+  const eventDispatchContext: { eventBus: EventBus; runId: string; repoId: string; fixId: string } = {
+    eventBus,
+    runId,
+    repoId: repoName,
+    fixId,
+  };
 
   // Issue #298: load SKILL.md skills once per run. Resolved against `repoPath`
   // (not the worktree) so `.kova/skills` is found in the user's repo root, and
@@ -709,6 +790,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         sandboxContext,
         runSkills,
         cacheContext,
+        eventDispatchContext,
       );
       await saveHandoff(workDir, handoff);
       promptHashes.assess = promptHash;
@@ -824,6 +906,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         sandboxContext,
         runSkills,
         cacheContext,
+        eventDispatchContext,
       );
       await saveHandoff(workDir, handoff);
       promptHashes.spec = promptHash;
@@ -914,6 +997,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           sandboxContext,
           runSkills,
           cacheContext,
+          eventDispatchContext,
         );
 
         await saveHandoff(workDir, retryHandoff);
@@ -1015,6 +1099,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           sandboxContext,
           runSkills,
           cacheContext,
+          eventDispatchContext,
         );
 
         await saveHandoff(workDir, emptyRetryHandoff);
@@ -1110,6 +1195,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           sandboxContext,
           runSkills,
           cacheContext,
+          eventDispatchContext,
         );
         await saveHandoff(workDir, specHandoff);
         promptHashes.spec = specPromptHash;
@@ -1175,6 +1261,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         sandboxContext,
         runSkills,
         cacheContext,
+        eventDispatchContext,
       );
       await saveHandoff(workDir, handoff);
       promptHashes.quality = promptHash;
@@ -1468,6 +1555,32 @@ export async function fix(options: FixOptions): Promise<FixResult> {
     metrics.recordFixCost(totalCost);
     _activeFixes--;
     metrics.setActiveFixes(_activeFixes);
+
+    // Lifecycle event: publish fix-done unless an early-return path already
+    // emitted it. Outcome maps to the discriminated-union in event-bus/schema.ts:
+    //   completed + reviewKnownIssues → done_with_known_issues
+    //   completed                     → done
+    //   anything else                 → failed
+    // The PR number (when present) is parsed from the ship-artifact URL — the
+    // same source the history-write path uses below, so the two records can be
+    // cross-referenced by subscribers. Issue #340.
+    if (!publishedFixDone) {
+      const shipArtifactForEvent = state.waveResults.ship?.artifact as { prUrl?: string } | undefined;
+      const prUrlForEvent = shipArtifactForEvent?.prUrl;
+      const prNumberMatch = prUrlForEvent?.match(/\/pull\/(\d+)/);
+      const prNumberForEvent = prNumberMatch?.[1] ? Number.parseInt(prNumberMatch[1], 10) : undefined;
+      const outcome: 'done' | 'failed' | 'done_with_known_issues' =
+        state.status === 'completed'
+          ? state.reviewKnownIssues && state.reviewKnownIssues.length > 0
+            ? 'done_with_known_issues'
+            : 'done'
+          : 'failed';
+      publishFixDone(outcome, {
+        totalCostUsd: totalCost,
+        ...(prNumberForEvent != null ? { prNumber: prNumberForEvent } : {}),
+        ...(state.error != null ? { reason: state.error } : {}),
+      });
+    }
     // Sandbox cleanup: collect stats then stop the backend.
     // Docker path uses the legacy helpers directly to preserve observable behavior;
     // non-docker backends (daytona/modal/etc) route through the SandboxBackend interface.
