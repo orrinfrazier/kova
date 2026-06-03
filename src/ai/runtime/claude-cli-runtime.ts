@@ -53,7 +53,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { log } from '../../utils/logger.js';
-import { priceUsage, type TokenUsage } from '../pricing.js';
+import { cacheRetentionToPricingTtl, priceUsage, type TokenUsage } from '../pricing.js';
 import type {
   AgentMessage,
   AgentRuntime,
@@ -409,6 +409,16 @@ function createClaudeCliRuntime(config: ClaudeCliRuntimeConfig): AgentRuntime {
     return 'claude-sonnet-4-6';
   })();
 
+  // Issue #416: also forward `cacheRetention` to `priceUsage` so cacheWrite
+  // tokens on long-retention waves (impl/test) bill at the 1h rate instead
+  // of silently defaulting to 5m. Mirrors the wave-executor projector path
+  // closed by #390. `wave-executor.ts` already threads the resolved retention
+  // through `runtimeFactory.create({ ...cacheRetention })`, so we just read
+  // it off `config` and map onto the pricing axis via the shared helper from
+  // pricing.ts (the helper lives there to avoid a wave-executor → runtime →
+  // wave-executor import cycle).
+  const pricingCacheRetention = cacheRetentionToPricingTtl(config.cacheRetention);
+
   function priceTurn(usage: z.infer<typeof StreamJsonUsage> | undefined): {
     cost: number;
     input: number;
@@ -423,6 +433,7 @@ function createClaudeCliRuntime(config: ClaudeCliRuntimeConfig): AgentRuntime {
       output: outputTokens,
       cacheRead,
       cacheWrite,
+      ...(pricingCacheRetention != null ? { cacheRetention: pricingCacheRetention } : {}),
     };
     const cost = priceUsage(modelForPricing, tokenUsage);
     return { cost, input: inputTokens, output: outputTokens };

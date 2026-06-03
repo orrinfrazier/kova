@@ -26,6 +26,7 @@
  */
 
 import { isLocalProvider, parseModelSpec } from './models.js';
+import type { CacheRetention } from './runtime/types.js';
 
 /** USD per million tokens (Mtok). */
 export interface ModelPricing {
@@ -47,6 +48,32 @@ export interface TokenUsage {
   cacheRead: number;
   cacheWrite: number;
   cacheRetention?: '5m' | '1h';
+}
+
+/**
+ * Map kova's wave-level `CacheRetention` (the runtime-facing knob) onto
+ * `priceUsage`'s `'5m' | '1h'` axis. Issue #390 introduced this mapping inside
+ * `wave-executor.ts`; issue #416 lifts it into `pricing.ts` so the
+ * claude-cli-runtime can call it without importing from wave-executor (which
+ * would create a cycle: wave-executor → runtime/index → claude-cli-runtime →
+ * wave-executor).
+ *
+ * - `'long'` → `'1h'` (priced at the 1h cacheWrite rate, ~2.0× input on
+ *   Anthropic sonnet/opus).
+ * - `'short'` → `'5m'` (Anthropic's default cacheWrite rate, ~1.25× input).
+ * - `'none'` → `'5m'`. Caching is disabled at the runtime layer, so
+ *   `cacheWrite` tokens are 0 in practice and the retention value is moot;
+ *   `'5m'` keeps the type narrow and matches the explicit mapping called out
+ *   in #390's issue body.
+ * - `undefined` → `undefined`. `priceUsage` then applies its `'5m'` default —
+ *   no behavior change for short-running waves (assess/spec/review/brainstorm)
+ *   that intentionally leave the retention unset.
+ */
+export function cacheRetentionToPricingTtl(
+  retention: CacheRetention | undefined,
+): TokenUsage['cacheRetention'] | undefined {
+  if (retention === undefined) return undefined;
+  return retention === 'long' ? '1h' : '5m';
 }
 
 // --- Pricing table (USD per Mtok) ---

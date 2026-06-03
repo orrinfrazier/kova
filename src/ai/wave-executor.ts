@@ -22,7 +22,7 @@ import { createImportPreservationGuard, type ImportPreservationGuardOptions } fr
 import { getModelString, resolveModelFromString, resolveWaveModel } from './models.js';
 import { isOllamaProvider, resolveOllamaApiKey } from './ollama.js';
 import { composeBeforeToolCallHooks, createPieceScopeGuard } from './piece-scope-guard.js';
-import { priceUsage, type TokenUsage } from './pricing.js';
+import { cacheRetentionToPricingTtl, priceUsage, type TokenUsage } from './pricing.js';
 import { getRouterDefaultModel, isRouterProvider, resolveRouterApiKey } from './router.js';
 import {
   type AgentRuntimeFactory,
@@ -76,26 +76,6 @@ export function isAssistantMessage(msg: unknown): msg is AssistantTurn {
     typeof (msg as { usage: unknown }).usage === 'object' &&
     (msg as { usage: unknown }).usage !== null
   );
-}
-
-/**
- * Map kova's wave-level `CacheRetention` (the runtime-facing knob) onto
- * pricing's `'5m' | '1h'` axis. Issue #390.
- *
- * - `'long'` → `'1h'` (priced at the 1h cacheWrite rate, ~1.6× input on
- *   Anthropic sonnet/opus).
- * - `'short'` → `'5m'` (Anthropic's default cacheWrite rate, ~1.25× input).
- * - `'none'` → `'5m'`. Caching is disabled at the runtime layer, so
- *   `cacheWrite` tokens are 0 in practice and the retention value is moot;
- *   `'5m'` keeps the type narrow and matches the explicit mapping called out
- *   in the issue body.
- * - `undefined` → `undefined`. `priceUsage` then applies its `'5m'` default —
- *   no behavior change for short-running waves (assess/spec/review/brainstorm)
- *   that intentionally leave the retention unset.
- */
-function cacheRetentionToPricingTtl(retention: CacheRetention | undefined): TokenUsage['cacheRetention'] | undefined {
-  if (retention === undefined) return undefined;
-  return retention === 'long' ? '1h' : '5m';
 }
 
 /**
