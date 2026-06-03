@@ -13,7 +13,7 @@ vi.mock('../services/github.js', () => ({
   fetchPRReviewComments: mockFetchPRReviewComments,
 }));
 
-vi.mock('../services/vectordb.js', () => ({
+vi.mock('../services/memory/review-feedback-rest.js', () => ({
   classifyFeedback: mockClassifyFeedback,
   recordReviewFeedback: mockRecordReviewFeedback,
 }));

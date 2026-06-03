@@ -1,18 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { EpisodicMemoryConfig } from '../types/config.js';
-import {
-  classifyFeedback,
-  formatReviewFeedback,
-  insertReviewFeedback,
-  type PoolLike,
-  queryReviewFeedback,
-  recordReviewFeedback,
-  type VectorDBClient,
-} from './vectordb.js';
-
-/* ------------------------------------------------------------------ */
-/*  Mock fetch                                                         */
-/* ------------------------------------------------------------------ */
+import type { EpisodicMemoryConfig } from '../../types/config.js';
+import { classifyFeedback, formatReviewFeedback, recordReviewFeedback } from './review-feedback-rest.js';
 
 const mockFetch = vi.fn<(input: string | URL | Request, init?: RequestInit) => Promise<Response>>();
 
@@ -23,10 +11,6 @@ beforeEach(() => {
 afterEach(() => {
   vi.restoreAllMocks();
 });
-
-/* ------------------------------------------------------------------ */
-/*  Helpers                                                            */
-/* ------------------------------------------------------------------ */
 
 const ENDPOINT = 'http://localhost:8100/query';
 
@@ -47,19 +31,6 @@ function mockJsonResponse(body: unknown, status = 200): Response {
     status,
     headers: { 'Content-Type': 'application/json' },
   });
-}
-
-function makeMockPool(): PoolLike {
-  return {
-    query: vi.fn<(sql: string, params?: unknown[]) => Promise<{ rows: unknown[] }>>().mockResolvedValue({ rows: [] }),
-  };
-}
-
-function makeMockClient(poolOverride?: PoolLike): VectorDBClient {
-  return {
-    pool: poolOverride ?? makeMockPool(),
-    embed: vi.fn<(text: string) => Promise<number[]>>().mockResolvedValue([0.1, 0.2, 0.3]),
-  };
 }
 
 /* ------------------------------------------------------------------ */
@@ -239,81 +210,5 @@ describe('formatReviewFeedback', () => {
 
   it('returns empty string for empty array', () => {
     expect(formatReviewFeedback([])).toBe('');
-  });
-});
-
-/* ------------------------------------------------------------------ */
-/*  insertReviewFeedback                                               */
-/* ------------------------------------------------------------------ */
-
-describe('insertReviewFeedback', () => {
-  it('calls pool.query with correct SQL pattern and parameters', async () => {
-    const pool = makeMockPool();
-    const client = makeMockClient(pool);
-    const feedback = {
-      repo: 'test-repo',
-      pr_number: 42,
-      feedback_type: 'style_issue',
-      comment_text: 'Use const',
-      file_path: 'src/auth.ts',
-      author: 'alice',
-    };
-
-    await insertReviewFeedback(client, feedback);
-
-    expect(client.embed).toHaveBeenCalledOnce();
-    expect(pool.query).toHaveBeenCalledOnce();
-    const [sql, params] = (pool.query as ReturnType<typeof vi.fn>).mock.calls[0] as [string, unknown[]];
-    expect(sql).toContain('INSERT INTO');
-    expect(sql).toContain('review_feedback');
-    expect(params).toContain('test-repo');
-    expect(params).toContain(42);
-    expect(params).toContain('style_issue');
-    expect(params).toContain('Use const');
-    expect(params).toContain('src/auth.ts');
-  });
-});
-
-/* ------------------------------------------------------------------ */
-/*  queryReviewFeedback                                                */
-/* ------------------------------------------------------------------ */
-
-describe('queryReviewFeedback', () => {
-  it('returns rows from pool query', async () => {
-    const expectedRows = [
-      { id: 1, repo: 'test-repo', feedback_type: 'style_issue', comment_text: 'Use const' },
-      { id: 2, repo: 'test-repo', feedback_type: 'logic_error', comment_text: 'Off-by-one' },
-    ];
-    const pool = makeMockPool();
-    (pool.query as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ rows: expectedRows });
-    const client = makeMockClient(pool);
-
-    const rows = await queryReviewFeedback(client, 'test-repo', 'style issues in auth');
-    expect(rows).toEqual(expectedRows);
-    expect(client.embed).toHaveBeenCalledOnce();
-    expect(pool.query).toHaveBeenCalledOnce();
-  });
-
-  it('respects custom limit parameter', async () => {
-    const pool = makeMockPool();
-    const client = makeMockClient(pool);
-
-    await queryReviewFeedback(client, 'test-repo', 'style issues', 3);
-
-    const [_sql, params] = (pool.query as ReturnType<typeof vi.fn>).mock.calls[0] as [string, unknown[]];
-    expect(params).toContain(3);
-  });
-
-  it('uses default limit when not provided', async () => {
-    const pool = makeMockPool();
-    const client = makeMockClient(pool);
-
-    await queryReviewFeedback(client, 'test-repo', 'style issues');
-
-    const [_sql, params] = (pool.query as ReturnType<typeof vi.fn>).mock.calls[0] as [string, unknown[]];
-    // Default limit should be present (e.g. 10 or 5)
-    const lastParam = params?.at(-1);
-    expect(typeof lastParam).toBe('number');
-    expect(lastParam).toBeGreaterThan(0);
   });
 });

@@ -1,10 +1,10 @@
 // Feedback collector — orchestrates PR review comment collection, classification, and recording.
 
 import type { EpisodicMemoryConfig } from '../types/config.js';
+import type { ReviewFeedbackRecord } from '../types/memory.js';
 import { log } from '../utils/logger.js';
 import { fetchPRReviewComments } from './github.js';
-import type { ReviewFeedbackRecord } from './vectordb.js';
-import { classifyFeedback, recordReviewFeedback } from './vectordb.js';
+import { classifyFeedback, recordReviewFeedback } from './memory/review-feedback-rest.js';
 
 const BOT_AUTHORS = new Set(['kova', 'github-actions']);
 

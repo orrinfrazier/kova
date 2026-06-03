@@ -22,8 +22,8 @@
 // crashes because of a stale-index refresh attempt.
 
 import { getChangedFilesSince } from '../services/git-diff.js';
+import { formatCodeChunks, queryCodeContext } from '../services/memory/code-rest.js';
 import { reindexFiles } from '../services/reindex.js';
-import { formatCodeChunks, queryCodeContext } from '../services/vectordb.js';
 import type { RepoConfig } from '../types/config.js';
 import { log } from '../utils/logger.js';
 

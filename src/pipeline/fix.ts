@@ -61,6 +61,8 @@ import { appendHistoryEntry, readHistory } from '../services/history.js';
 import { validateIsolation } from '../services/isolation.js';
 import { detectTooling } from '../services/language-detect.js';
 import { buildLiveHandleSink, defaultLiveFixRegistry, type LiveFixRegistry } from '../services/live-fix-registry.js';
+import { buildEpisodeRecord, recordEpisode } from '../services/memory/episode-rest.js';
+import { formatReviewFeedback, queryReviewFeedbackContext } from '../services/memory/review-feedback-rest.js';
 import * as metrics from '../services/metrics.js';
 import { PatternStore, upsertPatternFromEpisode } from '../services/pattern-store.js';
 import { applyScopeToState, detectScope, formatScopeLogLine } from '../services/pipeline-scope.js';
@@ -72,13 +74,6 @@ import { detectPromptChange, hashPrompt, recordPromptVersion } from '../services
 import { formatRepoStandards, queryRepoStandards } from '../services/repo-intel.js';
 import { registerRun, updateRun } from '../services/run-registry.js';
 import { shutdownRequested } from '../services/shutdown.js';
-import type { EpisodeRecord } from '../services/vectordb.js';
-import {
-  buildEpisodeRecord,
-  formatReviewFeedback,
-  queryReviewFeedbackContext,
-  recordEpisode,
-} from '../services/vectordb.js';
 import {
   createWorktree,
   detectDefaultBranch,
@@ -110,6 +105,7 @@ import {
   SpecResultSchema,
   saveHandoff,
 } from '../types/index.js';
+import type { EpisodeRecord } from '../types/memory.js';
 import { closeFileLogger, initFileLogger, type Logger, log } from '../utils/logger.js';
 import { applyConsensusToConfig, formatConsensusActivationLog } from './consensus-flags.js';
 import {

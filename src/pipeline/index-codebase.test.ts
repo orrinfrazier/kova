@@ -16,7 +16,7 @@ vi.mock('../services/chunker.js', () => ({
   chunkFile: (...args: unknown[]) => mockChunkFile(...args),
 }));
 
-vi.mock('../services/vectordb.js', () => ({
+vi.mock('../services/memory/code-rest.js', () => ({
   upsertChunks: (...args: unknown[]) => mockUpsertChunks(...args),
 }));
 
