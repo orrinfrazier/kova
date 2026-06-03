@@ -43,6 +43,23 @@ export interface SandboxBackendWaveInput {
   thinkingLevel?: string | undefined;
   fallbackModel?: string | undefined;
   outputSchemaName?: string | undefined;
+  /**
+   * Issue #306 — host-resolved MCP server config forwarded into the backend
+   * workspace. The runner that the backend dispatches reconstructs and starts
+   * these servers on `/workspace` so codegraph (and other path-sensitive MCP
+   * servers) operate on the bind-mounted worktree without any host round-trip.
+   * Omit → no MCP startup (current behavior preserved for callers that have
+   * not opted in).
+   */
+  mcpServers?:
+    | Record<string, { command: string; args?: string[] | undefined; env?: Record<string, string> | undefined }>
+    | undefined;
+  /**
+   * Issue #306 — per-wave MCP server allowlist override. Mirrors the
+   * `mcp.waves` block in repos.yaml. Omit → runner falls back to
+   * `WAVE_MCP_DEFAULTS` from `src/ai/mcp.ts`.
+   */
+  mcpWaveOverrides?: Partial<Record<string, string[]>> | undefined;
 }
 
 /** Resource-usage snapshot returned by `getStats()`. */

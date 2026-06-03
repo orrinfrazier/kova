@@ -10,7 +10,7 @@ import type { z } from 'zod';
 import type { SpawnWithFallbackConfig } from '../ai/wave-executor.js';
 import { spawnWaveAgentWithFallback } from '../ai/wave-executor.js';
 import { type AIWaveName, getWaveTools } from '../ai/wave-tools.js';
-import type { WaveName } from '../types/config.js';
+import type { MCPServerConfig, WaveName } from '../types/config.js';
 import {
   AssessResultSchema,
   BrainstormResultSchema,
@@ -18,6 +18,7 @@ import {
   ReviewResultSchema,
   SpecResultSchema,
 } from '../types/waves.js';
+import { bootstrapMCPForWave } from './run-wave-mcp.js';
 
 // Redirect console.log → stderr so stdout is reserved for result JSON only.
 console.log = (...args: unknown[]) => {
@@ -33,6 +34,14 @@ interface SandboxWaveInput {
   thinkingLevel?: string;
   fallbackModel?: string;
   outputSchemaName?: string;
+  /**
+   * Issue #306 — host-forwarded MCP server config. The runner reconstructs and
+   * starts these servers locally on /workspace so codegraph (and other MCP
+   * servers) are available to sandboxed waves. Omit → no MCP startup.
+   */
+  mcpServers?: Record<string, MCPServerConfig>;
+  /** Issue #306 — per-wave MCP server allowlist override. */
+  mcpWaveOverrides?: Partial<Record<AIWaveName, string[]>>;
 }
 
 interface OutputFormat {
@@ -69,37 +78,56 @@ async function main(): Promise<void> {
   const input: SandboxWaveInput = JSON.parse(raw);
 
   const wave = input.wave as AIWaveName;
-  const tools = getWaveTools(wave, input.cwd);
 
-  let outputFormat: OutputFormat | undefined;
-  if (input.outputSchemaName && input.outputSchemaName in WAVE_SCHEMAS) {
-    // biome-ignore lint/style/noNonNullAssertion: key checked above
-    const zodSchema = WAVE_SCHEMAS[input.outputSchemaName]!;
-    const { z } = await import('zod');
-    outputFormat = {
-      type: 'json_schema',
-      schema: z.toJSONSchema(zodSchema, { target: 'draft-07' }) as Record<string, unknown>,
-      zodSchema,
-    };
-  }
-
-  const config: SpawnWithFallbackConfig = {
-    wave: wave as WaveName,
-    model: input.model,
-    tools,
-    systemPrompt: input.systemPrompt,
-    handoffContext: '',
-    userMessage: input.userMessage,
+  // Issue #306 — start MCP servers (codegraph + others) inside the sandbox so
+  // structured navigation / context tools are available to sandboxed waves.
+  // When the host did not forward `mcpServers` this is a noop and behavior is
+  // identical to the pre-#306 runner.
+  const mcp = await bootstrapMCPForWave({
+    wave,
     cwd: input.cwd,
-    ...(input.thinkingLevel != null && { thinkingLevel: input.thinkingLevel as ThinkingLevel }),
-    ...(input.fallbackModel != null && { fallbackModel: input.fallbackModel }),
-    ...(outputFormat != null && { outputFormat }),
-  };
+    ...(input.mcpServers != null && { mcpServers: input.mcpServers }),
+    ...(input.mcpWaveOverrides != null && { mcpWaveOverrides: input.mcpWaveOverrides }),
+  });
 
-  const handoff = await spawnWaveAgentWithFallback(config);
+  try {
+    const tools = getWaveTools(wave, input.cwd, {
+      ...(mcp.tools.length > 0 && { mcpTools: mcp.tools }),
+    });
 
-  // Write result to stdout — the only stdout output in this process.
-  process.stdout.write(`${JSON.stringify(handoff)}\n`);
+    let outputFormat: OutputFormat | undefined;
+    if (input.outputSchemaName && input.outputSchemaName in WAVE_SCHEMAS) {
+      // biome-ignore lint/style/noNonNullAssertion: key checked above
+      const zodSchema = WAVE_SCHEMAS[input.outputSchemaName]!;
+      const { z } = await import('zod');
+      outputFormat = {
+        type: 'json_schema',
+        schema: z.toJSONSchema(zodSchema, { target: 'draft-07' }) as Record<string, unknown>,
+        zodSchema,
+      };
+    }
+
+    const config: SpawnWithFallbackConfig = {
+      wave: wave as WaveName,
+      model: input.model,
+      tools,
+      systemPrompt: input.systemPrompt,
+      handoffContext: '',
+      userMessage: input.userMessage,
+      cwd: input.cwd,
+      ...(input.thinkingLevel != null && { thinkingLevel: input.thinkingLevel as ThinkingLevel }),
+      ...(input.fallbackModel != null && { fallbackModel: input.fallbackModel }),
+      ...(outputFormat != null && { outputFormat }),
+    };
+
+    const handoff = await spawnWaveAgentWithFallback(config);
+
+    // Write result to stdout — the only stdout output in this process.
+    process.stdout.write(`${JSON.stringify(handoff)}\n`);
+  } finally {
+    // Always tear down MCP servers — even when wave execution throws.
+    await mcp.stop();
+  }
 }
 
 main().catch((err: unknown) => {

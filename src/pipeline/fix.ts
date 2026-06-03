@@ -298,6 +298,14 @@ async function spawnWave<T>(
    * factory into every wave so the runtime choice is consistent across S/T/I/Q/R.
    */
   runtimeFactory?: AgentRuntimeFactory | undefined,
+  /**
+   * Issue #306 — host-resolved MCP server config map. Forwarded only when
+   * `sandbox` is set so dispatch.ts can serialize it across the docker-exec
+   * boundary; the runner inside the sandbox starts the same servers locally
+   * on `/workspace`. Host-path waves get MCP tools via `mcpHandles` (live
+   * connections) and ignore this field — it would be redundant on the host.
+   */
+  resolvedMcpServers?: Record<string, import('../types/index.js').MCPServerConfig> | undefined,
 ): Promise<{ handoff: WaveHandoff<T>; promptHash: string }> {
   const model = resolveWaveModel(config.model[wave]);
   const mcpTools =
@@ -332,6 +340,18 @@ async function spawnWave<T>(
   // cache-affinity key. Cache retention defaults (long for impl/test) are
   // applied inside spawnWaveAgent and do not need to be set here.
   const sessionId = cacheContext != null ? buildWaveSessionId({ ...cacheContext, wave }) : undefined;
+  // Issue #306 — when dispatching into a sandbox, the host-side `mcpHandles`
+  // live connections cannot cross the container boundary. Instead we forward
+  // the resolved MCP server CONFIG map (commands + args + env) so the
+  // in-container runner can call `startAllMCPServers` on /workspace itself.
+  // Host-path waves use `mcpTools` (already in `tools`) and don't need this.
+  const sandboxMcpServers =
+    sandbox != null && resolvedMcpServers != null && Object.keys(resolvedMcpServers).length > 0
+      ? resolvedMcpServers
+      : undefined;
+  const sandboxMcpWaveOverrides =
+    sandbox != null ? (config.mcp?.waves as Partial<Record<FixAIWaveName, string[]>> | undefined) : undefined;
+
   const handoff = await dispatchSpawnWave<T>(
     {
       wave,
@@ -357,6 +377,9 @@ async function spawnWave<T>(
           }
         : {}),
       ...(runtimeFactory != null ? { runtimeFactory } : {}),
+      // Issue #306 — sandbox-only MCP plumbing; host path ignores these fields.
+      ...(sandboxMcpServers != null ? { mcpServers: sandboxMcpServers } : {}),
+      ...(sandboxMcpWaveOverrides != null ? { mcpWaveOverrides: sandboxMcpWaveOverrides } : {}),
     },
     sandbox,
   );
@@ -931,6 +954,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         cacheContext,
         eventDispatchContext,
         resolvedRuntimeFactory,
+        resolvedMcpServers,
       );
       await saveHandoff(workDir, handoff);
       promptHashes.assess = promptHash;
@@ -1078,6 +1102,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         cacheContext,
         eventDispatchContext,
         resolvedRuntimeFactory,
+        resolvedMcpServers,
       );
       await saveHandoff(workDir, handoff);
       promptHashes.spec = promptHash;
@@ -1171,6 +1196,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           cacheContext,
           eventDispatchContext,
           resolvedRuntimeFactory,
+          resolvedMcpServers,
         );
 
         await saveHandoff(workDir, retryHandoff);
@@ -1275,6 +1301,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           cacheContext,
           eventDispatchContext,
           resolvedRuntimeFactory,
+          resolvedMcpServers,
         );
 
         await saveHandoff(workDir, emptyRetryHandoff);
@@ -1402,6 +1429,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           cacheContext,
           eventDispatchContext,
           resolvedRuntimeFactory,
+          resolvedMcpServers,
         );
         await saveHandoff(workDir, specHandoff);
         promptHashes.spec = specPromptHash;
@@ -1470,6 +1498,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         cacheContext,
         eventDispatchContext,
         resolvedRuntimeFactory,
+        resolvedMcpServers,
       );
       await saveHandoff(workDir, handoff);
       promptHashes.quality = promptHash;

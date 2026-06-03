@@ -572,3 +572,145 @@ describe('dispatchExecuteWave — backend routing (issue #379)', () => {
     expect(result.result).toBe('docker output');
   });
 });
+
+// ----------------------------------------------------------------------------
+// Issue #306: MCP server config must be plumbed from the host orchestrator
+// through dispatch into the in-container runner so codegraph (and other
+// MCP servers) are available to sandboxed waves. With `restrict_network:true`
+// the container has `--network none`, so the runner must reconstruct/start
+// MCP servers locally on /workspace rather than proxying to the host.
+// ----------------------------------------------------------------------------
+
+describe('dispatchSpawnWave — MCP plumbing (issue #306)', () => {
+  it('forwards mcpServers and mcpWaveOverrides into the docker-exec wire input', async () => {
+    mockExecWaveInContainer.mockResolvedValue({
+      wave: 'assess',
+      timestamp: '2026-06-03T00:00:00Z',
+      model: 'anthropic:claude-opus',
+      cost: 0.1,
+      turns: 1,
+      confidence: 'high',
+      artifact: {},
+      approach_notes: '',
+    });
+
+    const mcpServers = {
+      codegraph: { command: 'codegraph', args: ['serve', '--mcp'] },
+      'repo-intel': { command: 'repo-intel', args: ['mcp'] },
+    };
+    const mcpWaveOverrides: Partial<Record<'assess' | 'spec', string[]>> = {
+      assess: ['codegraph'],
+      spec: ['codegraph', 'repo-intel'],
+    };
+
+    await dispatchSpawnWave(
+      {
+        ...baseSpawnConfig,
+        mcpServers,
+        mcpWaveOverrides,
+      },
+      sandbox,
+    );
+
+    const [, input] = mockExecWaveInContainer.mock.calls[0] ?? [];
+    const cast = input as {
+      mcpServers?: Record<string, unknown>;
+      mcpWaveOverrides?: Record<string, string[]>;
+    };
+    expect(cast.mcpServers).toEqual(mcpServers);
+    expect(cast.mcpWaveOverrides).toEqual(mcpWaveOverrides);
+  });
+
+  it('omits mcpServers when none are supplied (backward compat)', async () => {
+    mockExecWaveInContainer.mockResolvedValue({
+      wave: 'assess',
+      timestamp: '2026-06-03T00:00:00Z',
+      model: 'anthropic:claude-opus',
+      cost: 0.1,
+      turns: 1,
+      confidence: 'high',
+      artifact: {},
+      approach_notes: '',
+    });
+
+    await dispatchSpawnWave(baseSpawnConfig, sandbox);
+
+    const [, input] = mockExecWaveInContainer.mock.calls[0] ?? [];
+    const cast = input as { mcpServers?: unknown; mcpWaveOverrides?: unknown };
+    expect(cast.mcpServers).toBeUndefined();
+    expect(cast.mcpWaveOverrides).toBeUndefined();
+  });
+
+  it('forwards mcpServers and mcpWaveOverrides into backend.execWave input', async () => {
+    const backend = makeFakeBackend();
+    backend.execWave.mockResolvedValue({
+      wave: 'review',
+      timestamp: '2026-06-03T00:00:00Z',
+      model: 'anthropic:claude-opus',
+      cost: 0.1,
+      turns: 1,
+      confidence: 'high',
+      artifact: {},
+      approach_notes: '',
+    });
+
+    const mcpServers = {
+      codegraph: { command: 'codegraph', args: ['serve', '--mcp', '--path', '/workspace'] },
+    };
+    const mcpWaveOverrides: Partial<Record<'review', string[]>> = { review: ['codegraph'] };
+
+    await dispatchSpawnWave(
+      {
+        ...baseSpawnConfig,
+        wave: 'review',
+        mcpServers,
+        mcpWaveOverrides,
+      },
+      { ...sandbox, backend },
+    );
+
+    const input = backend.execWave.mock.calls[0]?.[0] as {
+      mcpServers?: Record<string, unknown>;
+      mcpWaveOverrides?: Record<string, string[]>;
+    };
+    expect(input.mcpServers).toEqual(mcpServers);
+    expect(input.mcpWaveOverrides).toEqual(mcpWaveOverrides);
+  });
+});
+
+describe('dispatchExecuteWave — MCP plumbing (issue #306)', () => {
+  it('forwards mcpServers and mcpWaveOverrides into the docker-exec wire input', async () => {
+    mockExecWaveInContainer.mockResolvedValue({
+      wave: 'test',
+      timestamp: '2026-06-03T00:00:00Z',
+      model: 'anthropic:claude-sonnet',
+      cost: 0.01,
+      turns: 1,
+      confidence: 'high',
+      artifact: 'ok',
+      approach_notes: '',
+    });
+
+    const mcpServers = {
+      codegraph: { command: 'codegraph', args: ['serve', '--mcp'] },
+    };
+    const mcpWaveOverrides: Partial<Record<'test', string[]>> = { test: ['codegraph'] };
+
+    await dispatchExecuteWave(
+      {
+        ...baseWaveOptions,
+        mcpServers,
+        mcpWaveOverrides,
+      },
+      sandbox,
+    );
+
+    const [, input] = mockExecWaveInContainer.mock.calls[0] ?? [];
+    const cast = input as {
+      mcpServers?: Record<string, unknown>;
+      mcpWaveOverrides?: Record<string, string[]>;
+    };
+    expect(cast.mcpServers).toEqual(mcpServers);
+    expect(cast.mcpWaveOverrides).toEqual(mcpWaveOverrides);
+  });
+});

@@ -250,6 +250,31 @@ export interface SpawnWaveAgentConfig {
    */
   runtimeFactory?: AgentRuntimeFactory;
   /**
+   * Issue #306 — host-resolved MCP server config to forward into a sandboxed
+   * runner when the dispatcher routes this wave into a Docker container or a
+   * `SandboxBackend` workspace. The host path (in-process `spawnWaveAgent`)
+   * IGNORES this field — host MCP servers are already started by the
+   * orchestrator and threaded through the `tools` array. This field is the
+   * carrier that lets dispatch.ts serialize the config across the docker-exec
+   * boundary so the runner inside the sandbox can call `startAllMCPServers`
+   * on `/workspace`. Optional — callers that don't go through the sandbox
+   * path omit it entirely.
+   *
+   * Note: the value type is structurally identical to `MCPServerConfig` in
+   * `types/config.ts` but spelled inline here to avoid a circular import
+   * (`wave-executor` ← `mcp.ts` ← `types/config.ts`).
+   */
+  mcpServers?:
+    | Record<string, { command: string; args?: string[] | undefined; env?: Record<string, string> | undefined }>
+    | undefined;
+  /**
+   * Issue #306 — per-wave MCP server allowlist override, forwarded through the
+   * sandbox boundary so the runner-side `getMCPToolsForWave` call sees the
+   * same wave-routing rules the host orchestrator would have applied.
+   * Optional — omit to fall back to `WAVE_MCP_DEFAULTS`.
+   */
+  mcpWaveOverrides?: Partial<Record<AIWaveName, string[]>> | undefined;
+  /**
    * Destructive-edit guard options. Set to configure thresholds, or `false` to disable.
    * Default: enabled with built-in thresholds (60% write ratio, 20 lines for trivial edit replacement).
    * The guard rejects Write/Edit tool calls that would delete large portions of files unless
@@ -966,6 +991,20 @@ export interface WaveOptions {
    * Unset → no session header sent (provider default behavior).
    */
   sessionId?: string;
+  /**
+   * Issue #306 — host-resolved MCP server config to forward into a sandboxed
+   * runner when this wave is routed through Docker / `SandboxBackend`. The
+   * host retry path (in-process `executeWaveWithRetry`) IGNORES this field.
+   * Optional.
+   */
+  mcpServers?:
+    | Record<string, { command: string; args?: string[] | undefined; env?: Record<string, string> | undefined }>
+    | undefined;
+  /**
+   * Issue #306 — per-wave MCP server allowlist override forwarded through the
+   * sandbox boundary. Optional — omit to fall back to `WAVE_MCP_DEFAULTS`.
+   */
+  mcpWaveOverrides?: Partial<Record<AIWaveName, string[]>> | undefined;
 }
 
 export interface WaveExecutionResult {
