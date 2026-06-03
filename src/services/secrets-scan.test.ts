@@ -319,4 +319,154 @@ describe('scanForSecrets', () => {
 
     expect(result.clean).toBe(true);
   });
+
+  // --- Issue #368: Slack + Stripe token patterns ---
+
+  it('detects Slack bot token (xoxb-)', async () => {
+    await writeFile(
+      join(workDir, 'slack.ts'),
+      'const token = "xoxb-1234567890-1234567890123-AbCdEfGhIjKlMnOpQrStUvWx";\n',
+    );
+
+    const result = await scanForSecrets(workDir, ['slack.ts']);
+
+    expect(result.clean).toBe(false);
+    expect(result.findings).toHaveLength(1);
+    expect(result.findings[0]).toMatchObject({
+      file: 'slack.ts',
+      type: 'Slack token',
+    });
+  });
+
+  it('detects Slack user token (xoxp-)', async () => {
+    await writeFile(
+      join(workDir, 'slack.ts'),
+      'const token = "xoxp-1234567890-1234567890-1234567890-abcdef0123456789abcdef0123456789";\n',
+    );
+
+    const result = await scanForSecrets(workDir, ['slack.ts']);
+
+    expect(result.clean).toBe(false);
+    expect(result.findings).toHaveLength(1);
+    expect(result.findings[0]?.type).toBe('Slack token');
+  });
+
+  it('detects Slack app token (xoxa-)', async () => {
+    await writeFile(join(workDir, 'slack.ts'), 'const token = "xoxa-2-1234567890-1234567890-abcdefg";\n');
+
+    const result = await scanForSecrets(workDir, ['slack.ts']);
+
+    expect(result.clean).toBe(false);
+    expect(result.findings[0]?.type).toBe('Slack token');
+  });
+
+  it('detects Slack refresh token (xoxr-)', async () => {
+    await writeFile(join(workDir, 'slack.ts'), 'const token = "xoxr-1234567890-abcdefghijklmn";\n');
+
+    const result = await scanForSecrets(workDir, ['slack.ts']);
+
+    expect(result.clean).toBe(false);
+    expect(result.findings[0]?.type).toBe('Slack token');
+  });
+
+  it('detects Slack workspace token (xoxs-)', async () => {
+    await writeFile(join(workDir, 'slack.ts'), 'const token = "xoxs-1234567890-abcdefghijklmn";\n');
+
+    const result = await scanForSecrets(workDir, ['slack.ts']);
+
+    expect(result.clean).toBe(false);
+    expect(result.findings[0]?.type).toBe('Slack token');
+  });
+
+  it('does NOT flag short xox- prefixes (under 10 chars after prefix)', async () => {
+    await writeFile(join(workDir, 'short.ts'), 'const s = "xoxb-short";\n');
+
+    const result = await scanForSecrets(workDir, ['short.ts']);
+
+    expect(result.clean).toBe(true);
+  });
+
+  it('does NOT flag unknown xox- variants (not abprs)', async () => {
+    // xoxc- is not one of the supported variants
+    await writeFile(join(workDir, 'unknown.ts'), 'const s = "xoxc-1234567890-abcdefghij";\n');
+
+    const result = await scanForSecrets(workDir, ['unknown.ts']);
+
+    expect(result.clean).toBe(true);
+  });
+
+  it('detects Stripe secret live key (sk_live_)', async () => {
+    await writeFile(join(workDir, 'stripe.ts'), 'const key = "sk_live_AbCdEfGhIjKlMnOpQrStUvWx";\n');
+
+    const result = await scanForSecrets(workDir, ['stripe.ts']);
+
+    expect(result.clean).toBe(false);
+    expect(result.findings).toHaveLength(1);
+    expect(result.findings[0]).toMatchObject({
+      file: 'stripe.ts',
+      type: 'Stripe live key',
+    });
+  });
+
+  it('detects Stripe restricted live key (rk_live_)', async () => {
+    await writeFile(join(workDir, 'stripe.ts'), 'const key = "rk_live_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789";\n');
+
+    const result = await scanForSecrets(workDir, ['stripe.ts']);
+
+    expect(result.clean).toBe(false);
+    expect(result.findings).toHaveLength(1);
+    expect(result.findings[0]?.type).toBe('Stripe live key');
+  });
+
+  it('does NOT flag short sk_live_ prefixes (under 24 chars)', async () => {
+    await writeFile(join(workDir, 'short.ts'), 'const s = "sk_live_short";\n');
+
+    const result = await scanForSecrets(workDir, ['short.ts']);
+
+    expect(result.clean).toBe(true);
+  });
+
+  it('does NOT flag stripe test keys (sk_test_)', async () => {
+    // Test keys are not secret per the issue spec — only live keys
+    await writeFile(join(workDir, 'test.ts'), 'const key = "sk_test_AbCdEfGhIjKlMnOpQrStUvWx";\n');
+
+    const result = await scanForSecrets(workDir, ['test.ts']);
+
+    expect(result.clean).toBe(true);
+  });
+
+  it('does NOT flag regex literals that define the Slack/Stripe patterns', async () => {
+    await writeFile(
+      join(workDir, 'scan.ts'),
+      [
+        '// Slack token: xox[abprs]-[A-Za-z0-9-]{10,}',
+        'const slackPattern = /xox[abprs]-[A-Za-z0-9-]{10,}/;',
+        '// Stripe live key: (sk|rk)_live_[A-Za-z0-9]{24,}',
+        'const stripePattern = /(sk|rk)_live_[A-Za-z0-9]{24,}/;',
+        '',
+      ].join('\n'),
+    );
+
+    const result = await scanForSecrets(workDir, ['scan.ts']);
+
+    expect(result.clean).toBe(true);
+  });
+
+  it('detects mixed Slack + Stripe tokens in same file', async () => {
+    await writeFile(
+      join(workDir, 'creds.ts'),
+      [
+        'const slack = "xoxb-1234567890-1234567890123-AbCdEfGhIjKlMnOpQrStUvWx";',
+        'const stripe = "sk_live_AbCdEfGhIjKlMnOpQrStUvWx";',
+        '',
+      ].join('\n'),
+    );
+
+    const result = await scanForSecrets(workDir, ['creds.ts']);
+
+    expect(result.clean).toBe(false);
+    expect(result.findings).toHaveLength(2);
+    const types = result.findings.map((f) => f.type).sort();
+    expect(types).toEqual(['Slack token', 'Stripe live key']);
+  });
 });

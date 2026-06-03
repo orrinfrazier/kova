@@ -59,6 +59,8 @@ AKIA[0-9A-Z]{16}
 sk-ant-[a-zA-Z0-9_-]{48,}
 sk-[a-zA-Z0-9]{48,}
 password\s*=\s*["'][^"']{8,}
+xox[abprs]-[A-Za-z0-9-]{10,}
+(sk|rk)_live_[A-Za-z0-9]{24,}
 ```
 
 ### Post-Fix Revalidation
