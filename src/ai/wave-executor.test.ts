@@ -3096,3 +3096,137 @@ describe('spawnWaveAgent cacheRetention → priceUsage (issue #390)', () => {
     expect(longResult.cost / shortResult.cost).toBeCloseTo(1.6, 5);
   });
 });
+
+// Issue #294: per-wave live agent handle exposed for `kova send` / `kova kill`.
+describe('spawnWaveAgent liveHandleSink', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env.ANTHROPIC_API_KEY = 'test-key';
+    mockPrompt.mockResolvedValue(undefined);
+    mockSubscribe.mockImplementation(() => vi.fn());
+    setAgentResponse('done');
+  });
+
+  afterEach(() => {
+    delete process.env.ANTHROPIC_API_KEY;
+  });
+
+  it('invokes liveHandleSink exactly once before prompt resolves, exposing steer + abort', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+    const sink = vi.fn();
+    let sinkCallOrder: number | undefined;
+    let promptCallOrder: number | undefined;
+    let order = 0;
+    sink.mockImplementation(() => {
+      sinkCallOrder = ++order;
+    });
+    mockPrompt.mockImplementation(async () => {
+      promptCallOrder = ++order;
+    });
+
+    await spawnWaveAgent({
+      wave: 'impl',
+      model: 'claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Message.',
+      cwd: '/tmp/test',
+      liveHandleSink: sink,
+    });
+
+    expect(sink).toHaveBeenCalledTimes(1);
+    expect(sinkCallOrder).toBeDefined();
+    expect(promptCallOrder).toBeDefined();
+    expect(sinkCallOrder).toBeLessThan(promptCallOrder as number);
+
+    const handle = sink.mock.calls[0]?.[0] as { steer: (h: string) => void; abort: () => void };
+    expect(typeof handle.steer).toBe('function');
+    expect(typeof handle.abort).toBe('function');
+  });
+
+  it('handle.steer routes to underlying agent.steer with user-role message (during wave)', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+    // The sink fires BEFORE agent.prompt() resolves, so invoke steer
+    // synchronously from the sink itself — that simulates a daemon RPC
+    // arriving while the wave is still running.
+    const sink = vi.fn().mockImplementation((h: { steer: (h: string) => void; abort: () => void }) => {
+      h.steer('focus on the failing test');
+    });
+
+    await spawnWaveAgent({
+      wave: 'impl',
+      model: 'claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Message.',
+      cwd: '/tmp/test',
+      liveHandleSink: sink,
+    });
+
+    expect(mockSteer).toHaveBeenCalledTimes(1);
+    const arg = mockSteer.mock.calls[0]?.[0] as { role: string; content: string };
+    expect(arg.role).toBe('user');
+    expect(arg.content).toBe('focus on the failing test');
+  });
+
+  it('handle.abort routes to underlying agent.abort (during wave)', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+    const sink = vi.fn().mockImplementation((h: { steer: (h: string) => void; abort: () => void }) => {
+      h.abort();
+    });
+
+    await spawnWaveAgent({
+      wave: 'impl',
+      model: 'claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Message.',
+      cwd: '/tmp/test',
+      liveHandleSink: sink,
+    });
+
+    expect(mockAbort).toHaveBeenCalledTimes(1);
+  });
+
+  it('handle.steer + abort become no-ops after the wave completes (guarded)', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+    let captured: { steer: (h: string) => void; abort: () => void } | undefined;
+    const sink = vi.fn().mockImplementation((h: typeof captured) => {
+      captured = h;
+    });
+
+    await spawnWaveAgent({
+      wave: 'impl',
+      model: 'claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Message.',
+      cwd: '/tmp/test',
+      liveHandleSink: sink,
+    });
+
+    // After the wave finishes, calling steer/abort on the captured handle is a no-op.
+    captured?.steer('post-hoc');
+    captured?.abort();
+    expect(mockSteer).not.toHaveBeenCalled();
+    expect(mockAbort).not.toHaveBeenCalled();
+  });
+
+  it('omitting liveHandleSink leaves wave behavior unchanged (backward-compat)', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+    await spawnWaveAgent({
+      wave: 'impl',
+      model: 'claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Message.',
+      cwd: '/tmp/test',
+    });
+    expect(mockPrompt).toHaveBeenCalledOnce();
+  });
+});

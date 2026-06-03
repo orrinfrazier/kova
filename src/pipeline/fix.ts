@@ -55,6 +55,7 @@ import { commentOnIssue } from '../services/github.js';
 import { appendHistoryEntry, readHistory } from '../services/history.js';
 import { validateIsolation } from '../services/isolation.js';
 import { detectTooling } from '../services/language-detect.js';
+import { buildLiveHandleSink, defaultLiveFixRegistry, type LiveFixRegistry } from '../services/live-fix-registry.js';
 import * as metrics from '../services/metrics.js';
 import { formatPatterns, PatternStore, upsertPatternFromEpisode } from '../services/pattern-store.js';
 import { applyScopeToState, detectScope, formatScopeLogLine } from '../services/pipeline-scope.js';
@@ -314,6 +315,14 @@ async function spawnWave<T>(
    * connections) and ignore this field — it would be redundant on the host.
    */
   resolvedMcpServers?: Record<string, import('../types/index.js').MCPServerConfig> | undefined,
+  /**
+   * Issue #294 — optional LiveFixRegistry to register the wave's live agent
+   * handle in (keyed by `eventContext.fixId`). When set, `kova send <fixId>`
+   * and `kova kill <fixId>` route into the running wave via the daemon's
+   * steer/abort RPCs. When unset, the wave runs unchanged — backward-compat.
+   * Sandbox path skips registration (agent runs in a remote container).
+   */
+  liveFixRegistry?: LiveFixRegistry | undefined,
 ): Promise<{ handoff: WaveHandoff<T>; promptHash: string }> {
   const model = resolveWaveModel(config.model[wave]);
   const mcpTools =
@@ -360,38 +369,69 @@ async function spawnWave<T>(
   const sandboxMcpWaveOverrides =
     sandbox != null ? (config.mcp?.waves as Partial<Record<FixAIWaveName, string[]>> | undefined) : undefined;
 
-  const handoff = await dispatchSpawnWave<T>(
-    {
-      wave,
-      model: modelString,
-      tools,
-      systemPrompt,
-      handoffContext: '',
-      userMessage,
-      cwd: workDir,
-      thinkingLevel,
-      fallbackModel,
-      ...(outputFormat != null && { outputFormat }),
-      ...(timeoutMs != null && { timeoutMs }),
-      ...(sessionId != null ? { sessionId } : {}),
-      // Issue #340: forward eventBus + eventContext so wave-executor's
-      // wave-enter / wave-output / cost / aborted events share the same
-      // runId/fixId tags as the fix() lifecycle events. Subscribers can
-      // correlate the full lifecycle on a single fixId.
-      ...(eventContext != null
-        ? {
-            eventBus: eventContext.eventBus,
-            eventContext: { runId: eventContext.runId, repoId: eventContext.repoId, fixId: eventContext.fixId },
-          }
-        : {}),
-      ...(runtimeFactory != null ? { runtimeFactory } : {}),
-      // Issue #306 — sandbox-only MCP plumbing; host path ignores these fields.
-      ...(sandboxMcpServers != null ? { mcpServers: sandboxMcpServers } : {}),
-      ...(sandboxMcpWaveOverrides != null ? { mcpWaveOverrides: sandboxMcpWaveOverrides } : {}),
-    },
-    sandbox,
-  );
-  return { handoff, promptHash };
+  // Issue #294: when a registry + fixId are present AND we're on the host path
+  // (no sandbox), build a sink that registers the live handle under the fixId
+  // for the duration of this wave. The wrapped handle also publishes
+  // `steered` / `aborted` events on the shared bus with `reason: 'manual_*'`
+  // so subscribers (kova capture, event ledger) can observe send-keys actions
+  // distinct from automatic Tier-1/Tier-3 degradation. We clear the entry
+  // from the same closure that registered it so concurrent waves on other
+  // fixIds are unaffected. Sandbox path skips registration (the agent runs
+  // in a remote container — there is no in-process handle to expose).
+  const fixIdForRegistry = eventContext?.fixId;
+  const liveHandleSink = buildLiveHandleSink({
+    registry: liveFixRegistry,
+    fixId: fixIdForRegistry,
+    sandboxActive: sandbox != null,
+    ...(eventContext != null
+      ? { eventBus: eventContext.eventBus, eventContext: { runId: eventContext.runId, repoId: eventContext.repoId } }
+      : {}),
+    wave,
+  });
+
+  try {
+    const handoff = await dispatchSpawnWave<T>(
+      {
+        wave,
+        model: modelString,
+        tools,
+        systemPrompt,
+        handoffContext: '',
+        userMessage,
+        cwd: workDir,
+        thinkingLevel,
+        fallbackModel,
+        ...(outputFormat != null && { outputFormat }),
+        ...(timeoutMs != null && { timeoutMs }),
+        ...(sessionId != null ? { sessionId } : {}),
+        // Issue #340: forward eventBus + eventContext so wave-executor's
+        // wave-enter / wave-output / cost / aborted events share the same
+        // runId/fixId tags as the fix() lifecycle events. Subscribers can
+        // correlate the full lifecycle on a single fixId.
+        ...(eventContext != null
+          ? {
+              eventBus: eventContext.eventBus,
+              eventContext: { runId: eventContext.runId, repoId: eventContext.repoId, fixId: eventContext.fixId },
+            }
+          : {}),
+        ...(runtimeFactory != null ? { runtimeFactory } : {}),
+        // Issue #306 — sandbox-only MCP plumbing; host path ignores these fields.
+        ...(sandboxMcpServers != null ? { mcpServers: sandboxMcpServers } : {}),
+        ...(sandboxMcpWaveOverrides != null ? { mcpWaveOverrides: sandboxMcpWaveOverrides } : {}),
+        // Issue #294 — host-path only; sandbox is excluded above.
+        ...(liveHandleSink != null ? { liveHandleSink } : {}),
+      },
+      sandbox,
+    );
+    return { handoff, promptHash };
+  } finally {
+    // Issue #294: clear the live handle for this fixId so a subsequent
+    // `kova send <fixId>` between waves (or after the fix completes) returns
+    // a clear "not running" error instead of routing into a stale agent.
+    if (liveFixRegistry != null && fixIdForRegistry != null) {
+      liveFixRegistry.clear(fixIdForRegistry);
+    }
+  }
 }
 
 /** Convert a WaveHandoff to WaveResult for checkpoint/cost-report compatibility.
@@ -925,6 +965,10 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       ...(resolvedRuntimeFactory != null && { runtimeFactory: resolvedRuntimeFactory }),
       ...(Object.keys(resolvedMcpServers).length > 0 && { resolvedMcpServers }),
       eventContext: eventDispatchContext,
+      // Issue #294: thread the process-level LiveFixRegistry into every engine
+      // so each wave registers its live agent handle and `kova send <fixId>` /
+      // `kova kill <fixId>` route to the currently-running wave.
+      liveFixRegistry: defaultLiveFixRegistry,
       ...overrides,
     });
     if (playwrightEnabled) {
@@ -1492,6 +1536,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         eventDispatchContext,
         resolvedRuntimeFactory,
         resolvedMcpServers,
+        defaultLiveFixRegistry,
       );
       await saveHandoff(workDir, handoff);
       promptHashes.quality = promptHash;

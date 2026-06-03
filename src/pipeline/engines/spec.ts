@@ -37,6 +37,7 @@ import {
 } from '../../ai/index.js';
 import type { FixAIWaveName } from '../../ai/wave-tools.js';
 import { dispatchSpawnWave } from '../../sandbox/dispatch.js';
+import { buildLiveHandleSink } from '../../services/live-fix-registry.js';
 import { detectPromptChange, hashPrompt, recordPromptVersion } from '../../services/prompt-versions.js';
 import type { SpecResult } from '../../types/index.js';
 import { log } from '../../utils/logger.js';
@@ -245,6 +246,7 @@ async function spawnSpec(
     runtimeFactory,
     resolvedMcpServers,
     eventContext,
+    liveFixRegistry,
   } = ctx;
   const { outputFormat } = input;
 
@@ -289,32 +291,52 @@ async function spawnSpec(
   const sandboxMcpWaveOverrides =
     sandbox != null ? (config.mcp?.waves as Partial<Record<FixAIWaveName, string[]>> | undefined) : undefined;
 
-  const handoff = await dispatchSpawnWave<SpecResult>(
-    {
-      wave: WAVE,
-      model: modelString,
-      tools,
-      systemPrompt,
-      handoffContext: '',
-      userMessage,
-      cwd: workDir,
-      thinkingLevel,
-      fallbackModel,
-      ...(outputFormat != null && { outputFormat }),
-      ...(timeoutMs != null && { timeoutMs }),
-      ...(sessionId != null ? { sessionId } : {}),
-      ...(eventContext != null
-        ? {
-            eventBus: eventContext.eventBus,
-            eventContext: { runId: eventContext.runId, repoId: eventContext.repoId, fixId: eventContext.fixId },
-          }
-        : {}),
-      ...(runtimeFactory != null ? { runtimeFactory } : {}),
-      ...(sandboxMcpServers != null ? { mcpServers: sandboxMcpServers } : {}),
-      ...(sandboxMcpWaveOverrides != null ? { mcpWaveOverrides: sandboxMcpWaveOverrides } : {}),
-    },
-    sandbox,
-  );
+  // Issue #294: live agent handle sink for `kova send` / `kova kill`. Host
+  // path only — sandbox runs the agent in a remote container.
+  const fixIdForRegistry = eventContext?.fixId;
+  const liveHandleSink = buildLiveHandleSink({
+    registry: liveFixRegistry,
+    fixId: fixIdForRegistry,
+    sandboxActive: sandbox != null,
+    ...(eventContext != null
+      ? { eventBus: eventContext.eventBus, eventContext: { runId: eventContext.runId, repoId: eventContext.repoId } }
+      : {}),
+    wave: WAVE,
+  });
 
-  return { handoff, promptHash };
+  try {
+    const handoff = await dispatchSpawnWave<SpecResult>(
+      {
+        wave: WAVE,
+        model: modelString,
+        tools,
+        systemPrompt,
+        handoffContext: '',
+        userMessage,
+        cwd: workDir,
+        thinkingLevel,
+        fallbackModel,
+        ...(outputFormat != null && { outputFormat }),
+        ...(timeoutMs != null && { timeoutMs }),
+        ...(sessionId != null ? { sessionId } : {}),
+        ...(eventContext != null
+          ? {
+              eventBus: eventContext.eventBus,
+              eventContext: { runId: eventContext.runId, repoId: eventContext.repoId, fixId: eventContext.fixId },
+            }
+          : {}),
+        ...(runtimeFactory != null ? { runtimeFactory } : {}),
+        ...(sandboxMcpServers != null ? { mcpServers: sandboxMcpServers } : {}),
+        ...(sandboxMcpWaveOverrides != null ? { mcpWaveOverrides: sandboxMcpWaveOverrides } : {}),
+        ...(liveHandleSink != null ? { liveHandleSink } : {}),
+      },
+      sandbox,
+    );
+
+    return { handoff, promptHash };
+  } finally {
+    if (liveFixRegistry != null && fixIdForRegistry != null) {
+      liveFixRegistry.clear(fixIdForRegistry);
+    }
+  }
 }

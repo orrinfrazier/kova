@@ -347,6 +347,27 @@ export interface SpawnWaveAgentConfig {
    * omit the name pass `undefined` per `RuntimeEvent`.
    */
   onToolCall?: (toolName: string | undefined) => void;
+  /**
+   * Issue #294 — per-wave live agent handle exposed for `kova send` / `kova kill`.
+   *
+   * When set, the wave invokes this callback exactly once with a small
+   * `{steer, abort}` handle BEFORE `agent.prompt()` resolves. The handle is
+   * the only externally-visible surface for the running pi-mono `Agent` —
+   * callers (`fix.ts`) register it in a `LiveFixRegistry` keyed by `fixId`
+   * so the daemon's `steer` / `abort` RPC commands can route into the
+   * correct in-flight wave.
+   *
+   * Lifetime: the handle becomes a no-op after the wave finishes (the
+   * underlying agent reference is released to a sentinel that ignores
+   * steer/abort calls). This matches the issue's "guard steering a completed
+   * fix" requirement — calling `steer()` on a stale handle quietly succeeds
+   * with no effect, and the caller's `LiveFixRegistry.clear()` ensures
+   * lookups by fixId fail-cleanly with "not running" after wave end.
+   *
+   * Unset → no handle is exposed, wave behavior is identical to pre-#294
+   * (backward-compat).
+   */
+  liveHandleSink?: (handle: { steer(hint: string): void; abort(): void }) => void;
 }
 
 /**
@@ -413,6 +434,7 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
     sessionId,
     cacheRetention: explicitCacheRetention,
     onToolCall,
+    liveHandleSink,
   } = config;
 
   const timeoutMs = explicitTimeout ?? DEFAULT_WAVE_TIMEOUTS[wave];
@@ -642,6 +664,35 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
   });
 
   let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
+  // Issue #294: publish a live agent handle to the optional sink BEFORE
+  // `agent.prompt()` so external controllers (`kova send` / `kova kill` via
+  // the daemon's LiveFixRegistry) can route into this wave the moment it
+  // starts. `waveActive` guards against post-wave calls — after the finally
+  // block clears it, the handle's steer/abort become no-ops so a stale
+  // caller cannot inject into the next wave's freshly-constructed agent.
+  let waveActive = true;
+  if (liveHandleSink) {
+    try {
+      liveHandleSink({
+        steer(hint: string): void {
+          if (!waveActive) return;
+          // Runtimes without steer() (e.g. claude-cli adapter) silently
+          // ignore — matches the wave-executor's Tier-1 steer policy.
+          agent.steer?.({ role: 'user', content: hint, timestamp: Date.now() });
+        },
+        abort(): void {
+          if (!waveActive) return;
+          agent.abort();
+        },
+      });
+    } catch (sinkErr) {
+      // The sink is a side-effect channel — a misbehaving sink must never
+      // alter wave outcomes. Log + continue with the wave as if no sink
+      // was provided.
+      log.warn(`[${wave}] liveHandleSink threw: ${sinkErr instanceof Error ? sinkErr.message : String(sinkErr)}`);
+    }
+  }
 
   try {
     if (timeoutMs != null) {
@@ -886,6 +937,9 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
     log.error(`[${wave}] Failed — ${err.message}`);
     throw new KovaError(`Wave ${wave} failed: ${err.message}`, 'agent', false);
   } finally {
+    // Issue #294: flip waveActive BEFORE unsubscribing — any concurrent
+    // steer/abort from a stale handle becomes a no-op immediately.
+    waveActive = false;
     if (timeoutId != null) clearTimeout(timeoutId);
     unsubscribe();
   }
