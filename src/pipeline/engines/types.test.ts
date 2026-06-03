@@ -4,7 +4,16 @@
 
 import { describe, expect, it } from 'vitest';
 import type { WaveHandoff } from '../../types/handoffs.js';
-import type { EngineContext, EngineResult, WaveEngine } from './types.js';
+import type { ReviewFinding } from '../../types/index.js';
+import type {
+  EngineContext,
+  EngineResult,
+  ReviewEngineInput,
+  ShipEngine,
+  ShipEngineInput,
+  ShipEngineResult,
+  WaveEngine,
+} from './types.js';
 
 // A minimal RepoConfig stub — only the fields the engine surface reads.
 // Cast through unknown to keep the test self-contained without dragging in
@@ -112,5 +121,104 @@ describe('WaveEngine interface', () => {
     expect(ctx.promptsDir).toBe('/tmp/prompts');
     expect(ctx.abTestVariant).toBe('variant-a');
     expect(ctx.cacheContext?.issue).toBe(42);
+  });
+});
+
+describe('ReviewEngineInput (issue #356)', () => {
+  it('accepts the minimal required fields (issue + waveResults)', () => {
+    const input: ReviewEngineInput = {
+      issue: {
+        number: 1,
+        title: 't',
+        body: 'b',
+        labels: [],
+        url: 'https://github.com/owner/repo/issues/1',
+      },
+      waveResults: {},
+    };
+    expect(input.issue.number).toBe(1);
+    expect(input.waveResults).toBeDefined();
+  });
+
+  it('allows the engine-only overrides (maxIterations, prContext, baselines)', () => {
+    const input: ReviewEngineInput = {
+      issue: {
+        number: 1,
+        title: 't',
+        body: 'b',
+        labels: [],
+        url: 'https://github.com/owner/repo/issues/1',
+      },
+      waveResults: {},
+      maxIterations: 3,
+      prContext: 'pr-ctx',
+      reviewFeedbackContext: 'past feedback',
+      baselineFailures: ['t1'],
+      currentFailures: ['t2'],
+      playwright: { enabled: false },
+    };
+    expect(input.maxIterations).toBe(3);
+    expect(input.baselineFailures).toEqual(['t1']);
+  });
+});
+
+describe('ShipEngine (issue #356)', () => {
+  it('declares name === "ship"', () => {
+    const stub: ShipEngine = {
+      name: 'ship',
+      async run() {
+        return { status: 'no_changes' };
+      },
+    };
+    expect(stub.name).toBe('ship');
+  });
+
+  it('ShipEngineInput accepts conflict + retry hooks', () => {
+    const known: ReviewFinding[] = [
+      { category: 'mechanical_fix', file: 'src/a.ts', description: 'x', severity: 'medium' },
+    ];
+    const input: ShipEngineInput = {
+      issue: {
+        number: 1,
+        title: 't',
+        body: 'b',
+        labels: [],
+        url: 'https://github.com/owner/repo/issues/1',
+      },
+      branch: 'fix/1',
+      specFiles: ['src/a.ts'],
+      openPRs: ['#42 some other pr'],
+      mergeDependencies: [10],
+      reviewKnownIssues: known,
+    };
+    expect(input.branch).toBe('fix/1');
+    expect(input.specFiles).toEqual(['src/a.ts']);
+    expect(input.openPRs).toEqual(['#42 some other pr']);
+    expect(input.reviewKnownIssues).toHaveLength(1);
+  });
+
+  it('ShipEngineResult is a discriminated union (shipped | no_changes | failed)', () => {
+    const shipped: ShipEngineResult = {
+      status: 'shipped',
+      prUrl: 'https://github.com/owner/repo/pull/1',
+      commitMessage: 'fix: ...',
+      filesStaged: ['src/a.ts'],
+    };
+    const none: ShipEngineResult = { status: 'no_changes' };
+    const failed: ShipEngineResult = {
+      status: 'failed',
+      reason: 'secrets',
+      error: 'AKIA...',
+    };
+    expect(shipped.status).toBe('shipped');
+    expect(none.status).toBe('no_changes');
+    expect(failed.status).toBe('failed');
+    // Narrowing works:
+    if (shipped.status === 'shipped') {
+      expect(shipped.prUrl).toBeDefined();
+    }
+    if (failed.status === 'failed') {
+      expect(failed.reason).toBe('secrets');
+    }
   });
 });
