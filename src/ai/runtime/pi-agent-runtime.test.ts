@@ -208,3 +208,361 @@ describe('defaultAgentRuntimeFactory (PiAgentRuntime stub)', () => {
     expect(cfg.streamFn).toBe(piAi.streamSimple);
   });
 });
+
+// ────────────────────────────────────────────────────────────────────────────
+// Issue #310 — Full PiAgentRuntime extraction: event + message translation
+// ────────────────────────────────────────────────────────────────────────────
+
+describe('PiAgentRuntime — event translation (issue #310)', () => {
+  let capturedListener: ((event: unknown) => void) | undefined;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    capturedListener = undefined;
+    // Capture the listener pi-agent-runtime registers so we can drive pi-mono
+    // events through it and observe the translated kova RuntimeEvents.
+    mockSubscribe.mockImplementation((cb: (event: unknown) => void) => {
+      capturedListener = cb;
+      return vi.fn();
+    });
+  });
+
+  afterEach(() => {
+    mockAgentState.messages = [];
+    mockAgentState.errorMessage = undefined;
+  });
+
+  it('translates pi-mono stopReason "stop" → kova "end_turn"', async () => {
+    const { defaultAgentRuntimeFactory } = await import('./index.js');
+    const rt = defaultAgentRuntimeFactory.create({
+      systemPrompt: 's',
+      model: { id: 'm' } as never,
+      tools: [],
+      getApiKey: () => undefined,
+    });
+    const received: unknown[] = [];
+    rt.subscribe((ev) => received.push(ev));
+    // Pi-mono uses `stopReason: 'stop'`; kova-runtime exposes `'end_turn'`.
+    capturedListener?.({
+      type: 'turn_end',
+      message: {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'hi' }],
+        usage: { input: 1, output: 1, cost: { total: 0 } },
+        stopReason: 'stop',
+      },
+      toolResults: [],
+    });
+    expect(received).toHaveLength(1);
+    const ev = received[0] as { type: string; message: { stopReason: string } };
+    expect(ev.type).toBe('turn_end');
+    expect(ev.message.stopReason).toBe('end_turn');
+  });
+
+  it('translates pi-mono stopReason "length" → kova "max_turns"', async () => {
+    const { defaultAgentRuntimeFactory } = await import('./index.js');
+    const rt = defaultAgentRuntimeFactory.create({
+      systemPrompt: 's',
+      model: { id: 'm' } as never,
+      tools: [],
+      getApiKey: () => undefined,
+    });
+    const received: unknown[] = [];
+    rt.subscribe((ev) => received.push(ev));
+    capturedListener?.({
+      type: 'turn_end',
+      message: {
+        role: 'assistant',
+        content: [],
+        usage: { input: 1, output: 1, cost: { total: 0 } },
+        stopReason: 'length',
+      },
+      toolResults: [],
+    });
+    const ev = received[0] as { message: { stopReason: string } };
+    expect(ev.message.stopReason).toBe('max_turns');
+  });
+
+  it('translates pi-mono stopReason "toolUse" → kova "tool_use"', async () => {
+    const { defaultAgentRuntimeFactory } = await import('./index.js');
+    const rt = defaultAgentRuntimeFactory.create({
+      systemPrompt: 's',
+      model: { id: 'm' } as never,
+      tools: [],
+      getApiKey: () => undefined,
+    });
+    const received: unknown[] = [];
+    rt.subscribe((ev) => received.push(ev));
+    capturedListener?.({
+      type: 'turn_end',
+      message: {
+        role: 'assistant',
+        content: [],
+        usage: { input: 1, output: 1, cost: { total: 0 } },
+        stopReason: 'toolUse',
+      },
+      toolResults: [],
+    });
+    const ev = received[0] as { message: { stopReason: string } };
+    expect(ev.message.stopReason).toBe('tool_use');
+  });
+
+  it('preserves pi-mono stopReason "error" verbatim (kova-shared literal)', async () => {
+    const { defaultAgentRuntimeFactory } = await import('./index.js');
+    const rt = defaultAgentRuntimeFactory.create({
+      systemPrompt: 's',
+      model: { id: 'm' } as never,
+      tools: [],
+      getApiKey: () => undefined,
+    });
+    const received: unknown[] = [];
+    rt.subscribe((ev) => received.push(ev));
+    capturedListener?.({
+      type: 'turn_end',
+      message: {
+        role: 'assistant',
+        content: [],
+        usage: { input: 1, output: 1, cost: { total: 0 } },
+        stopReason: 'error',
+        errorMessage: 'boom',
+      },
+      toolResults: [],
+    });
+    const ev = received[0] as { message: { stopReason: string; errorMessage: string } };
+    expect(ev.message.stopReason).toBe('error');
+    expect(ev.message.errorMessage).toBe('boom');
+  });
+
+  it('passes through turn_end events when message is absent (back-compat for non-assistant turns)', async () => {
+    const { defaultAgentRuntimeFactory } = await import('./index.js');
+    const rt = defaultAgentRuntimeFactory.create({
+      systemPrompt: 's',
+      model: { id: 'm' } as never,
+      tools: [],
+      getApiKey: () => undefined,
+    });
+    const received: unknown[] = [];
+    rt.subscribe((ev) => received.push(ev));
+    // Some pi-mono turn_end events fire without an assistant message (e.g. tool-only turns).
+    // Wave-executor reads `event.message` defensively, so passing through is the safe behavior.
+    capturedListener?.({ type: 'turn_end', toolResults: [] });
+    expect(received).toHaveLength(1);
+    const ev = received[0] as { type: string; message?: unknown };
+    expect(ev.type).toBe('turn_end');
+    expect(ev.message).toBeUndefined();
+  });
+
+  it('translates pi-mono content "toolCall" blocks → kova "tool_use" blocks', async () => {
+    const { defaultAgentRuntimeFactory } = await import('./index.js');
+    const rt = defaultAgentRuntimeFactory.create({
+      systemPrompt: 's',
+      model: { id: 'm' } as never,
+      tools: [],
+      getApiKey: () => undefined,
+    });
+    const received: unknown[] = [];
+    rt.subscribe((ev) => received.push(ev));
+    capturedListener?.({
+      type: 'turn_end',
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'calling' },
+          { type: 'toolCall', id: 'tc_1', name: 'Read', arguments: { path: '/x' } },
+        ],
+        usage: { input: 1, output: 1, cost: { total: 0 } },
+        stopReason: 'toolUse',
+      },
+      toolResults: [],
+    });
+    const ev = received[0] as {
+      message: { content: Array<{ type: string; id?: string; name?: string; input?: unknown }> };
+    };
+    expect(ev.message.content).toHaveLength(2);
+    expect(ev.message.content[0]?.type).toBe('text');
+    expect(ev.message.content[1]?.type).toBe('tool_use');
+    expect(ev.message.content[1]?.id).toBe('tc_1');
+    expect(ev.message.content[1]?.name).toBe('Read');
+    expect(ev.message.content[1]?.input).toEqual({ path: '/x' });
+  });
+
+  it('forwards tool_execution_start events with toolName', async () => {
+    const { defaultAgentRuntimeFactory } = await import('./index.js');
+    const rt = defaultAgentRuntimeFactory.create({
+      systemPrompt: 's',
+      model: { id: 'm' } as never,
+      tools: [],
+      getApiKey: () => undefined,
+    });
+    const received: unknown[] = [];
+    rt.subscribe((ev) => received.push(ev));
+    // Pi-mono `tool_execution_start` carries toolCallId, toolName, args; kova
+    // RuntimeEvent only declares toolName.
+    capturedListener?.({
+      type: 'tool_execution_start',
+      toolCallId: 'tc_99',
+      toolName: 'Bash',
+      args: { command: 'ls' },
+    });
+    expect(received).toHaveLength(1);
+    const ev = received[0] as { type: string; toolName: string };
+    expect(ev.type).toBe('tool_execution_start');
+    expect(ev.toolName).toBe('Bash');
+  });
+
+  it('drops pi-mono events not in the kova RuntimeEvent union (agent_start, message_update, etc.)', async () => {
+    const { defaultAgentRuntimeFactory } = await import('./index.js');
+    const rt = defaultAgentRuntimeFactory.create({
+      systemPrompt: 's',
+      model: { id: 'm' } as never,
+      tools: [],
+      getApiKey: () => undefined,
+    });
+    const received: unknown[] = [];
+    rt.subscribe((ev) => received.push(ev));
+    // None of these are part of the kova RuntimeEvent surface — the adapter
+    // must not surface them (they are debug-only and would just noise the
+    // wave-executor's subscriber).
+    capturedListener?.({ type: 'agent_start' });
+    capturedListener?.({ type: 'agent_end', messages: [] });
+    capturedListener?.({ type: 'turn_start' });
+    capturedListener?.({ type: 'message_update', message: {}, assistantMessageEvent: {} });
+    capturedListener?.({ type: 'message_end', message: {} });
+    capturedListener?.({ type: 'tool_execution_end', toolCallId: 'x', toolName: 'Read', result: {}, isError: false });
+    expect(received).toHaveLength(0);
+  });
+
+  it('subscribe() returns an unsubscribe function that detaches the wrapped listener', async () => {
+    const piMonoUnsubscribe = vi.fn();
+    mockSubscribe.mockImplementation((cb: (event: unknown) => void) => {
+      capturedListener = cb;
+      return piMonoUnsubscribe;
+    });
+    const { defaultAgentRuntimeFactory } = await import('./index.js');
+    const rt = defaultAgentRuntimeFactory.create({
+      systemPrompt: 's',
+      model: { id: 'm' } as never,
+      tools: [],
+      getApiKey: () => undefined,
+    });
+    const received: unknown[] = [];
+    const off = rt.subscribe((ev) => received.push(ev));
+    off();
+    expect(piMonoUnsubscribe).toHaveBeenCalledOnce();
+    // After unsubscribe, the wrapped listener should not propagate events.
+    // (Strictly speaking pi-mono won't deliver them after unsubscribe, but if
+    // a stale call somehow arrived, the wrapper should noop.)
+  });
+});
+
+describe('PiAgentRuntime — state.messages translation (issue #310)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    mockAgentState.messages = [];
+    mockAgentState.errorMessage = undefined;
+  });
+
+  it('translates assistant messages in state.messages — stopReason normalized', async () => {
+    const { defaultAgentRuntimeFactory } = await import('./index.js');
+    mockAgentState.messages = [
+      { role: 'user', content: 'hi' },
+      {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'hello' }],
+        usage: { input: 5, output: 3, cost: { total: 0.001 } },
+        stopReason: 'stop',
+      },
+    ];
+    const rt = defaultAgentRuntimeFactory.create({
+      systemPrompt: 's',
+      model: { id: 'm' } as never,
+      tools: [],
+      getApiKey: () => undefined,
+    });
+    const msgs = rt.state.messages;
+    expect(msgs).toHaveLength(2);
+    const assistant = msgs[1] as { role: string; stopReason: string };
+    expect(assistant.role).toBe('assistant');
+    expect(assistant.stopReason).toBe('end_turn');
+  });
+
+  it('translates "toolCall" content blocks in state.messages → "tool_use"', async () => {
+    const { defaultAgentRuntimeFactory } = await import('./index.js');
+    mockAgentState.messages = [
+      {
+        role: 'assistant',
+        content: [{ type: 'toolCall', id: 't1', name: 'Read', arguments: { path: '/y' } }],
+        usage: { input: 1, output: 1, cost: { total: 0 } },
+        stopReason: 'toolUse',
+      },
+    ];
+    const rt = defaultAgentRuntimeFactory.create({
+      systemPrompt: 's',
+      model: { id: 'm' } as never,
+      tools: [],
+      getApiKey: () => undefined,
+    });
+    const msgs = rt.state.messages;
+    const content = (
+      msgs[0] as unknown as { content: Array<{ type: string; id?: string; name?: string; input?: unknown }> }
+    ).content;
+    expect(content).toHaveLength(1);
+    expect(content[0]?.type).toBe('tool_use');
+    expect(content[0]?.id).toBe('t1');
+    expect(content[0]?.name).toBe('Read');
+    expect(content[0]?.input).toEqual({ path: '/y' });
+  });
+
+  it('passes through tool-result messages (role: "toolResult" is accepted by the kova union)', async () => {
+    const { defaultAgentRuntimeFactory } = await import('./index.js');
+    mockAgentState.messages = [
+      {
+        role: 'toolResult',
+        toolCallId: 't1',
+        toolName: 'Read',
+        content: [{ type: 'text', text: 'file contents' }],
+        isError: false,
+      },
+    ];
+    const rt = defaultAgentRuntimeFactory.create({
+      systemPrompt: 's',
+      model: { id: 'm' } as never,
+      tools: [],
+      getApiKey: () => undefined,
+    });
+    const msgs = rt.state.messages;
+    expect(msgs).toHaveLength(1);
+    const tr = msgs[0] as { role: string; toolCallId: string; toolName: string };
+    expect(tr.role).toBe('toolResult');
+    expect(tr.toolCallId).toBe('t1');
+    expect(tr.toolName).toBe('Read');
+  });
+
+  it('proxies state.errorMessage from the underlying Agent', async () => {
+    const { defaultAgentRuntimeFactory } = await import('./index.js');
+    mockAgentState.errorMessage = 'rate-limit';
+    const rt = defaultAgentRuntimeFactory.create({
+      systemPrompt: 's',
+      model: { id: 'm' } as never,
+      tools: [],
+      getApiKey: () => undefined,
+    });
+    expect(rt.state.errorMessage).toBe('rate-limit');
+  });
+
+  it('state.messages is a live view (re-reads the underlying Agent on every access)', async () => {
+    const { defaultAgentRuntimeFactory } = await import('./index.js');
+    const rt = defaultAgentRuntimeFactory.create({
+      systemPrompt: 's',
+      model: { id: 'm' } as never,
+      tools: [],
+      getApiKey: () => undefined,
+    });
+    expect(rt.state.messages).toHaveLength(0);
+    mockAgentState.messages = [{ role: 'user', content: 'late' }];
+    expect(rt.state.messages).toHaveLength(1);
+  });
+});

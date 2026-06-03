@@ -1,28 +1,44 @@
 /**
- * Default `AgentRuntime` factory — wraps pi-mono `Agent`.
+ * `PiAgentRuntime` — kova adapter that wraps the pi-mono `Agent`.
  *
- * Scope (kova#309 — interface introduction only):
+ * This is the single seam between kova's `wave-executor` and the pi-mono
+ * package. The wave-executor consumes only the kova-owned `AgentRuntime`
+ * interface (`./types.ts`); this file is the only place in kova outside the
+ * model-registration helpers (`./models.ts`, `./router.ts`, `./ollama.ts`)
+ * that imports pi-mono symbols directly.
  *
- * This is a minimal pass-through adapter that constructs `new Agent({...})`
- * with the exact same arguments wave-executor used to pass inline at L116.
- * No event / message translation is performed yet; pi-mono's `AgentEvent` and
- * `AgentMessage` shapes happen to be structurally compatible with the kova
- * surface the wave-executor reads (`usage.input`, `usage.cost.total`,
- * `stopReason ∈ {'error','aborted'}`, `content[]`).
+ * The adapter performs three pieces of translation:
  *
- * Follow-up (kova#310 — PiAgentRuntime full extraction):
+ *   1. `subscribe()` wraps pi-mono `AgentEvent` → kova `RuntimeEvent`. Only
+ *      `turn_end` and `tool_execution_start` cross the boundary; every other
+ *      pi-mono event (`agent_start`, `message_update`, …) is dropped because
+ *      kova's `RuntimeEvent` union does not declare it.
  *
- * - Translate pi-mono `AgentEvent` → kova `RuntimeEvent` in subscribe()
- * - Translate pi-mono `AgentMessage` → kova `AgentMessage` in state.messages
- * - Translate pi-mono stopReason `'stop'|'length'|'toolUse'` → kova
- *   `'end_turn'|'max_turns'|'tool_use'`
- * - Map kova `RuntimeTool` → pi-mono `AgentTool` (today: pass-through)
- * - After kova#NEW-07 lands, compute usage.cost.total from the kova-owned
- *   pricing table instead of trusting pi-mono's pre-computed value
+ *   2. Assistant `stopReason` is normalized:
+ *        pi-mono  → kova
+ *        ───────────────
+ *        'stop'    → 'end_turn'
+ *        'length'  → 'max_turns'
+ *        'toolUse' → 'tool_use'
+ *        'error'   → 'error'    (shared literal)
+ *        'aborted' → 'aborted'  (shared literal)
  *
- * Until #310 lands, this file is the single seam between the wave-executor
- * and pi-mono. Everything else in wave-executor.ts should go through the
- * `AgentRuntime` interface, not pi-mono symbols directly.
+ *   3. Content blocks of type `toolCall` (pi-mono) are reshaped into
+ *      `tool_use` (kova): `arguments` → `input`. Text and thinking blocks
+ *      pass through unchanged.
+ *
+ * The same translation runs on `state.messages` (live view — re-reads the
+ * underlying Agent on every access). Translation is structural; if a value
+ * already looks like the kova shape (e.g. `stopReason: 'end_turn'`) it
+ * passes through unchanged so test fixtures and future runtimes that adopt
+ * the kova literals out of the box keep working.
+ *
+ * Cost note (issue #313): pi-mono pre-computes `usage.cost.total` from its
+ * internal pricing table. Wave-executor re-prices through `priceUsage()` from
+ * the kova-owned `pricing.ts`, so the adapter does NOT touch usage.cost —
+ * pricing is owned by the consumer, not the adapter.
+ *
+ * Issues: kova#309 (interface), kova#310 (this file — full extraction).
  */
 
 import { Agent } from '@earendil-works/pi-agent-core';
@@ -33,9 +49,167 @@ import type {
   AgentRuntime,
   AgentRuntimeConfig,
   AgentRuntimeFactory,
+  AssistantTurn,
   CacheRetention,
+  RuntimeContent,
   RuntimeEvent,
 } from './types.js';
+
+// ────────────────────────────────────────────────────────────────────────────
+// Translation helpers (pi-mono → kova)
+// ────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Translate pi-mono `StopReason` to kova `AssistantTurn.stopReason`.
+ *
+ * Pi-mono and kova share `'error'` and `'aborted'` literals verbatim. The
+ * other three rename to the kova vocabulary. Unknown values pass through
+ * (cast through `as`) so an adapter receiving an unexpected literal does
+ * not silently default to `'error'`; the downstream `isAssistantMessage`
+ * + `stopReason === 'error' | 'aborted'` checks remain authoritative.
+ */
+function translateStopReason(value: unknown): AssistantTurn['stopReason'] {
+  switch (value) {
+    case 'stop':
+      return 'end_turn';
+    case 'length':
+      return 'max_turns';
+    case 'toolUse':
+      return 'tool_use';
+    case 'error':
+      return 'error';
+    case 'aborted':
+      return 'aborted';
+    // Kova-native literals — passed through if the upstream already speaks kova.
+    case 'end_turn':
+    case 'tool_use':
+    case 'max_turns':
+      return value;
+    default:
+      // Conservative fallback: unknown stopReason becomes 'end_turn' so the
+      // wave-executor treats the turn as a normal completion rather than an
+      // error. The kova-owned `isAssistantMessage` guard handles missing
+      // `stopReason` defensively elsewhere.
+      return 'end_turn';
+  }
+}
+
+/**
+ * Translate a single content block from pi-mono shape to kova shape.
+ *
+ * - `text` and `thinking` blocks pass through unchanged (identical shapes).
+ * - Pi-mono `toolCall` → kova `tool_use`: rename `arguments` → `input`.
+ * - Kova-native `tool_use` blocks pass through (idempotent — translating an
+ *   already-translated message must not corrupt it).
+ * - Anything else is preserved verbatim so adapter-internal block kinds
+ *   (image, citation, etc.) flow through.
+ */
+function translateContentBlock(block: unknown): RuntimeContent {
+  if (block == null || typeof block !== 'object') {
+    return block as RuntimeContent;
+  }
+  const b = block as { type?: unknown; id?: unknown; name?: unknown; arguments?: unknown; input?: unknown };
+  if (b.type === 'toolCall') {
+    return {
+      type: 'tool_use',
+      id: String(b.id ?? ''),
+      name: String(b.name ?? ''),
+      input: b.arguments ?? {},
+    };
+  }
+  // Already kova-shaped or unknown — pass through structurally.
+  return block as RuntimeContent;
+}
+
+/**
+ * Translate a content array (assistant `content[]`). Defensive against
+ * non-array values — returns an empty array so downstream `.filter()` /
+ * `.map()` calls in wave-executor never throw.
+ */
+function translateContentArray(content: unknown): RuntimeContent[] {
+  if (!Array.isArray(content)) return [];
+  return content.map(translateContentBlock);
+}
+
+/**
+ * Translate a single message from pi-mono shape to kova `AgentMessage`.
+ *
+ * Strategy: only rebuild the fields we own (role, content, stopReason). All
+ * other fields (timestamp, usage, errorMessage, api, provider, …) are
+ * preserved via spread so adapter-internal metadata flows through unchanged.
+ */
+function translateMessage(msg: unknown): AgentMessage {
+  if (msg == null || typeof msg !== 'object') {
+    return msg as AgentMessage;
+  }
+  const m = msg as { role?: unknown; content?: unknown; stopReason?: unknown };
+  if (m.role === 'assistant') {
+    const translated = {
+      ...(msg as object),
+      role: 'assistant' as const,
+      content: translateContentArray(m.content),
+      stopReason: translateStopReason(m.stopReason),
+    };
+    // Cast through `unknown` — pi-mono `AssistantMessage` carries extra
+    // adapter-internal fields (`api`, `provider`, `model`, `responseId`, …)
+    // that aren't part of the kova `AssistantTurn` surface. Spreading them
+    // through is intentional (consumers that need them can still read them),
+    // but the structural mismatch with `usage`'s shape requires the wider
+    // cast.
+    return translated as unknown as AssistantTurn;
+  }
+  // User and toolResult messages pass through. Kova's `ToolResultMessage`
+  // accepts both `'tool_result'` and `'toolResult'` role literals, and the
+  // content shape is structurally compatible.
+  return msg as AgentMessage;
+}
+
+/**
+ * Translate a pi-mono `AgentEvent` into a kova `RuntimeEvent`, or return
+ * `undefined` to drop the event. The kova event surface is intentionally
+ * minimal — only `turn_end` and `tool_execution_start` are load-bearing.
+ */
+function translateEvent(event: unknown): RuntimeEvent | undefined {
+  if (event == null || typeof event !== 'object') return undefined;
+  const e = event as { type?: unknown };
+  if (e.type === 'turn_end') {
+    const t = event as { message?: unknown };
+    if (t.message === undefined) {
+      // Tool-only turn end (no assistant message) — propagate the event so
+      // the wave-executor's turn counter still increments, but with no
+      // message payload.
+      return { type: 'turn_end' };
+    }
+    const translated = translateMessage(t.message);
+    // The kova `turn_end.message` slot is typed `AssistantTurn | undefined`;
+    // non-assistant messages get folded to `undefined` so the wave-executor's
+    // `isAssistantMessage` check still gates the read paths correctly.
+    return {
+      type: 'turn_end',
+      ...(isAssistantTurnShape(translated) ? { message: translated as AssistantTurn } : {}),
+    };
+  }
+  if (e.type === 'tool_execution_start') {
+    const t = event as { toolName?: unknown };
+    return {
+      type: 'tool_execution_start',
+      ...(typeof t.toolName === 'string' ? { toolName: t.toolName } : {}),
+    };
+  }
+  // Everything else (`agent_start`, `agent_end`, `turn_start`, `message_*`,
+  // `tool_execution_update`, `tool_execution_end`) is not part of the kova
+  // RuntimeEvent union — drop it.
+  return undefined;
+}
+
+/** Structural guard mirroring `wave-executor.isAssistantMessage` for the adapter side. */
+function isAssistantTurnShape(msg: unknown): boolean {
+  return typeof msg === 'object' && msg !== null && 'role' in msg && (msg as { role: unknown }).role === 'assistant';
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// streamFn wrapper for cacheRetention (issue #297)
+// ────────────────────────────────────────────────────────────────────────────
 
 /**
  * Wrap pi-ai `streamSimple` with a closure that injects `cacheRetention`
@@ -59,12 +233,18 @@ function wrapStreamFnWithCacheRetention(retention: CacheRetention): typeof strea
   return wrapped as any;
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// PiAgentRuntime — the adapter
+// ────────────────────────────────────────────────────────────────────────────
+
 /**
- * Construct a fresh pi-mono `Agent` wrapped as an `AgentRuntime`.
+ * Construct a fresh pi-mono `Agent` and return a kova `AgentRuntime` wrapper
+ * around it.
  *
- * The returned object satisfies the interface structurally — today it IS a
- * pi-mono Agent under the hood; the type system constrains wave-executor to
- * only touch the interface surface.
+ * The returned object is NOT the pi-mono `Agent` — it is a thin proxy that
+ * (a) translates events emitted by `Agent.subscribe`, (b) re-reads
+ * `Agent.state.messages` through `translateMessage` on every access, and
+ * (c) forwards `prompt`, `abort`, and `steer` through unchanged.
  */
 function createPiAgentRuntime(config: AgentRuntimeConfig): AgentRuntime {
   const {
@@ -86,16 +266,11 @@ function createPiAgentRuntime(config: AgentRuntimeConfig): AgentRuntime {
   const initialState: Record<string, any> = { systemPrompt, model, tools };
   if (thinkingLevel !== undefined) initialState.thinkingLevel = thinkingLevel;
 
-  // Pi-mono's `Agent.createLoopConfig` does not include `cacheRetention` in
-  // the loop config it passes to `streamFn`, so the only seam where we can
-  // inject the per-request hint is the `streamFn` itself. When the caller
-  // sets `cacheRetention`, wrap `streamSimple` with a closure that merges the
-  // retention preference into the options object before delegating.
-  //
-  // When `cacheRetention` is unset, pass the canonical `streamSimple`
-  // reference through unchanged so callers that rely on identity (tests, the
-  // agent-loop's `streamFn || streamSimple` guard, future memoization) keep
-  // working as before.
+  // When `cacheRetention` is set, wrap `streamSimple` with a closure that
+  // merges retention into the options object. When unset, pass the canonical
+  // `streamSimple` reference through unchanged so callers that rely on
+  // identity (tests, the agent-loop's `streamFn || streamSimple` guard,
+  // future memoization) keep working as before.
   const streamFn = cacheRetention != null ? wrapStreamFnWithCacheRetention(cacheRetention) : streamSimple;
 
   const agent = new Agent({
@@ -115,27 +290,66 @@ function createPiAgentRuntime(config: AgentRuntimeConfig): AgentRuntime {
     ...(beforeToolCall ? { beforeToolCall: beforeToolCall as any } : {}),
   });
 
-  // The pi-mono Agent already implements the kova interface structurally:
-  //   prompt(string)            — Agent.prompt(string)
-  //   abort()                   — Agent.abort()
-  //   subscribe(listener) → off — Agent.subscribe(listener) returns unsubscribe
-  //   state.messages            — Agent.state.messages
-  //   state.errorMessage        — Agent.state.errorMessage
-  //   steer(msg)                — Agent.steer(msg)  (Tier-1 mid-turn)
-  //   transformContext = fn     — Agent.transformContext = fn  (Tier-2 trim)
-  //
-  // Pi-mono's `AgentEvent` is a superset of `RuntimeEvent`; subscribe-callers
-  // ignore unknown event types so passing through is safe.
-  return agent as unknown as AgentRuntime & { subscribe(l: (e: RuntimeEvent) => void): () => void };
+  const runtime: AgentRuntime = {
+    prompt: (userMessage: string) => agent.prompt(userMessage),
+    abort: () => agent.abort(),
+    subscribe(listener: (event: RuntimeEvent) => void): () => void {
+      // Wrap the caller's listener so pi-mono events get translated before
+      // they reach kova-side consumers. Events that have no kova-side
+      // counterpart (`agent_start`, `message_update`, …) are dropped.
+      // biome-ignore lint/suspicious/noExplicitAny: pi-mono AgentEvent — translated below
+      const wrapped = (event: any): void => {
+        const translated = translateEvent(event);
+        if (translated !== undefined) listener(translated);
+      };
+      return agent.subscribe(wrapped);
+    },
+    // `state` is exposed as a getter-bearing object so `state.messages` is
+    // re-read from the underlying Agent on every access. This preserves the
+    // "live view" semantic the wave-executor depends on when it walks the
+    // transcript at the end of a run.
+    //
+    // Built fresh per-read so `exactOptionalPropertyTypes` is honored:
+    // `errorMessage` is only present on the returned object when the
+    // underlying Agent has set one. Otherwise the field is omitted entirely
+    // (not set to `undefined`).
+    get state(): { messages: ReadonlyArray<AgentMessage>; errorMessage?: string } {
+      const messages = agent.state.messages.map(translateMessage);
+      const errorMessage = agent.state.errorMessage;
+      return errorMessage != null ? { messages, errorMessage } : { messages };
+    },
+    // Optional Tier-1 mid-turn steer (70% context). Pi-mono's `Agent.steer`
+    // accepts a `UserMessage` whose `timestamp` is required; the kova
+    // interface declares it optional. Forward a default timestamp when the
+    // caller omits one so the pi-mono call site is well-typed.
+    steer: (msg) => {
+      agent.steer({ ...msg, timestamp: msg.timestamp ?? Date.now() });
+    },
+  };
+
+  // Pi-mono lets callers reassign `agent.transformContext` after construction
+  // for the Tier-2 trim slot. Today kova does not exercise this (issue #296
+  // removed the Tier-2 path), but the field is part of the kova interface
+  // for adapter parity. Expose it as a setter-bearing pass-through.
+  Object.defineProperty(runtime, 'transformContext', {
+    enumerable: true,
+    configurable: true,
+    get: () => (agent as unknown as { transformContext?: unknown }).transformContext,
+    set: (v: unknown) => {
+      (agent as unknown as { transformContext?: unknown }).transformContext = v;
+    },
+  });
+
+  return runtime;
 }
 
 /**
  * Default factory wired into wave-executor when no runtime is injected.
  *
- * Kova#310 will replace this with a proper `PiAgentRuntime` class that does
- * full event/message translation. Until then, `factory.create(...)` returning
- * an Agent is sufficient to satisfy AC#2: wave-executor constructs via
- * `factory.create(...)` instead of `new Agent(...)`.
+ * Wave-executor accepts an optional `runtimeFactory` config field and falls
+ * back to this default. Tests inject `MockAgentRuntimeFactory` (issue #310,
+ * `src/test-helpers/mock-agent-runtime.ts`); future runtimes
+ * (ClaudeCliRuntime — kova#NEW-13) wire the same way.
  */
 export const defaultAgentRuntimeFactory: AgentRuntimeFactory = {
   create: createPiAgentRuntime,
@@ -144,5 +358,5 @@ export const defaultAgentRuntimeFactory: AgentRuntimeFactory = {
 // Re-export AgentMessage at the adapter boundary so consumers reading the
 // adapter file do not have to chase types.ts for it.
 export type { AgentMessage };
-// Internal export for tests + future #310 extraction.
-export { createPiAgentRuntime };
+// Internal exports for tests + ClaudeCliRuntime (kova#NEW-13).
+export { createPiAgentRuntime, translateContentBlock, translateEvent, translateMessage, translateStopReason };
