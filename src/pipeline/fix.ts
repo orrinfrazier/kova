@@ -136,6 +136,8 @@ import { buildCostReport, printRunSummary, writeCostReport } from './cost-report
 import {
   AssessEngine,
   type AssessEngineInput,
+  applyEngineStateDelta,
+  buildAssessConfigDelta,
   createQualityEngine,
   createReviewEngine,
   createShipEngine,
@@ -145,8 +147,7 @@ import {
   type SpecEngineInput,
   type SpecEnginePendingPR,
 } from './engines/index.js';
-import { detectThrashing, type TestRunner } from './loops.js';
-import { applyPipelineMode, autoSelectMode, describeAutoSelection, MODE_EXTRA_IMPL_ATTEMPTS } from './mode.js';
+import type { TestRunner } from './loops.js';
 import { loadProjectContext, type ProjectContext } from './project-context.js';
 import { loadPrompt, resolvePromptsDir } from './prompts.js';
 import { formatRegressionSurface } from './regression-surface.js';
@@ -932,8 +933,15 @@ export async function fix(options: FixOptions): Promise<FixResult> {
     return { success: false, error: 'Interrupted by signal', state };
   };
 
-  // Track prompt hashes across waves for history correlation
+  // Track prompt hashes across waves for history correlation (issue #432).
+  // Derived from each `EngineResult.promptHash` via `setPromptHash`; the
+  // helper drops empty strings so engines that don't emit a per-call hash
+  // (TIEngine, QualityEngine, ReviewEngine wrap multi-call loops) don't
+  // clobber the slot.
   const promptHashes: Record<string, string> = {};
+  const setPromptHash = (wave: string, hash: string | undefined): void => {
+    if (hash != null && hash !== '') promptHashes[wave] = hash;
+  };
 
   // A/B test: select variants for configured waves. Consult historical
   // variant stats so we exploit known winners (epsilon-greedy), falling back
@@ -1091,14 +1099,33 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           },
         ),
         outputFormat: toOutputFormat(AssessResultSchema),
+        // Issue #432 — surface options.mode to the engine so it can pre-resolve
+        // the pipeline mode and return a configDelta. When undefined the engine
+        // auto-selects from the assess artifact's grade + surface area.
+        ...(options.mode != null && { explicitMode: options.mode }),
       };
       const assessCtx = buildEngineContext({
         ...(abTestVariants?.assess != null && { abTestVariant: abTestVariants.assess }),
       });
-      const { handoff, promptHash } = await AssessEngine.run(assessCtx, assessInput);
+      const assessResult = await AssessEngine.run(assessCtx, assessInput);
+      const { handoff, promptHash, configDelta, stateDelta: assessStateDelta } = assessResult;
       await saveHandoff(workDir, handoff);
-      promptHashes.assess = promptHash;
+      setPromptHash('assess', promptHash);
       state.waveResults.assess = handoffToResult(handoff, waveProvider(config, 'assess'), promptHash);
+      // Issue #432 — apply stateDelta + configDelta in the single application
+      // point. configDelta carries the pipeline-mode-applied RepoConfig so
+      // `config` is rebound exactly once here (replaces the inline
+      // applyPipelineMode call that used to live at fix.ts:1146).
+      state = applyEngineStateDelta(state, assessStateDelta);
+      if (configDelta?.config != null) {
+        config = configDelta.config;
+      }
+      if (configDelta?.resolvedMode != null) {
+        resolvedMode = configDelta.resolvedMode;
+      }
+      if (configDelta?.extraImplAttempts != null) {
+        extraImplAttempts = configDelta.extraImplAttempts;
+      }
       state.completedWaves.push('assess');
       await saveCheckpoint(workDir, state);
       await progress?.waveCompleted('assess', state);
@@ -1122,33 +1149,24 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       if (interrupted) return interrupted;
     }
 
-    // Pipeline mode resolution (issue #282). Runs after WAVE A so auto-select
-    // can read the feasibility grade + surface area. Explicit `options.mode`
-    // overrides — auto-select only when no `--mode` was passed. Applies the
-    // mode's per-wave tier overrides to `config` so every downstream wave
-    // (test, impl, quality) routes through the mode-selected tiers without
-    // editing repos.yaml.
-    const assessArtifact = state.waveResults.assess?.artifact as AssessResult | undefined;
-    if (resolvedMode != null) {
-      flog.info(`Pipeline mode: ${resolvedMode} (explicit via --mode).`);
-    } else if (assessArtifact != null) {
-      const fileCount = assessArtifact.surface_area.files.length;
-      resolvedMode = autoSelectMode(assessArtifact.grade, fileCount);
-      flog.info(
-        `Pipeline mode: ${resolvedMode} (auto-selected). ${describeAutoSelection(assessArtifact.grade, fileCount, resolvedMode)}`,
-      );
-    } else {
-      // Assess artifact missing (e.g. confidence too low for structured output).
-      // Fall back to standard — never economize when we can't see surface area.
-      resolvedMode = 'standard';
-      flog.info(`Pipeline mode: ${resolvedMode} (default — no assess artifact available).`);
-    }
-    config = applyPipelineMode(config, resolvedMode);
-    extraImplAttempts = MODE_EXTRA_IMPL_ATTEMPTS[resolvedMode];
-    if (extraImplAttempts > 0) {
-      flog.info(
-        `[mode] ${resolvedMode} — running up to ${3 + extraImplAttempts} impl attempts per piece (review selects winner).`,
-      );
+    // Pipeline mode fallback (issue #432). The AssessEngine handles the normal
+    // resolution path via `configDelta` (applied above when WAVE A runs); this
+    // branch only fires when WAVE A is skipped (REVIEW_ONLY pipeline scope or
+    // a checkpoint resume past assess) AND no explicit `--mode` was passed.
+    // Falls back to `standard` for the same reason as the engine's "no
+    // artifact" branch: never economize when we can't see surface area.
+    if (resolvedMode == null) {
+      const assessArtifact = state.waveResults.assess?.artifact as AssessResult | undefined;
+      const fallback = buildAssessConfigDelta(config, assessArtifact, undefined);
+      if (fallback?.config != null) {
+        config = fallback.config;
+      }
+      if (fallback?.resolvedMode != null) {
+        resolvedMode = fallback.resolvedMode;
+      }
+      if (fallback?.extraImplAttempts != null) {
+        extraImplAttempts = fallback.extraImplAttempts;
+      }
     }
 
     // Vector DB: query for relevant codebase context (before spec/impl waves)
@@ -1288,14 +1306,14 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       const specResult = await SpecEngine.run(specCtxBase, specInput);
 
       await saveHandoff(workDir, specResult.handoff);
-      promptHashes.spec = specResult.promptHash;
+      setPromptHash('spec', specResult.promptHash);
       state.waveResults.spec = handoffToResult(specResult.handoff, waveProvider(config, 'spec'), specResult.promptHash);
       state.completedWaves.push('spec');
-      // Engine surfaces serialFallback / mergeDependencies — orchestrator records them on state.
+      // Engine surfaces serialFallback as a control-flow flag (not FixState).
+      // mergeDependencies flows through stateDelta — applied by the loop's
+      // single application point (issue #432).
       if (specResult.serialFallback) serialFallback = true;
-      if (specResult.mergeDependencies && specResult.mergeDependencies.length > 0) {
-        state.mergeDependencies = [...specResult.mergeDependencies];
-      }
+      state = applyEngineStateDelta(state, specResult.stateDelta);
       await saveCheckpoint(workDir, state);
       await progress?.waveCompleted('spec', state);
       metrics.recordWaveCompleted('spec');
@@ -1384,12 +1402,13 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         });
 
         await saveHandoff(workDir, emptyRetryResult.handoff);
-        promptHashes.spec = emptyRetryResult.promptHash;
+        setPromptHash('spec', emptyRetryResult.promptHash);
         state.waveResults.spec = handoffToResult(
           emptyRetryResult.handoff,
           waveProvider(config, 'spec'),
           emptyRetryResult.promptHash,
         );
+        state = applyEngineStateDelta(state, emptyRetryResult.stateDelta);
         await saveCheckpoint(workDir, state);
 
         const specAfterRetry = state.waveResults.spec?.artifact as SpecResult | undefined;
@@ -1456,10 +1475,9 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       };
       await saveHandoff(workDir, implHandoff);
       state.waveResults.impl = tiResult.implWaveResult;
-      state.diagnosis = tiResult.diagnosis;
-      state.thrashingSignal =
-        tiResult.modifiedFilesPerAttempt.length >= 2 ? detectThrashing(tiResult.modifiedFilesPerAttempt) : undefined;
-      state.retryAttempts = tiResult.attempts;
+      // Issue #432 — apply TIEngine stateDelta (diagnosis/thrashingSignal/
+      // retryAttempts) through the single application point.
+      state = applyEngineStateDelta(state, tiEngineResult.stateDelta);
 
       if (!state.completedWaves.includes('test')) state.completedWaves.push('test');
       if (!state.completedWaves.includes('impl')) state.completedWaves.push('impl');
@@ -1504,12 +1522,13 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           pendingPRFiles: pendingPRFileList,
         });
         await saveHandoff(workDir, respecResult.handoff);
-        promptHashes.spec = respecResult.promptHash;
+        setPromptHash('spec', respecResult.promptHash);
         state.waveResults.spec = handoffToResult(
           respecResult.handoff,
           waveProvider(config, 'spec'),
           respecResult.promptHash,
         );
+        state = applyEngineStateDelta(state, respecResult.stateDelta);
 
         const respecTI = await tiEngine.run(tiCtx, {
           issue,
@@ -1526,13 +1545,14 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         const retryTI = respecTI.handoff.artifact;
         state.waveResults.test = retryTI.testWaveResult;
         state.waveResults.impl = retryTI.implWaveResult;
+        // Issue #432 — apply respec TI's stateDelta (the retry's diagnosis +
+        // thrashing + attempt counts replace the first attempt's values).
+        state = applyEngineStateDelta(state, respecTI.stateDelta);
+        appendFailedPiece(state, respecTI.newFailedPiece);
         await saveCheckpoint(workDir, state);
-
-        if (!retryTI.testsPassing) {
-          trackFailedPiece(state, retryTI.diagnosis);
-        }
-      } else if (!tiResult.testsPassing) {
-        trackFailedPiece(state, tiResult.diagnosis);
+      } else {
+        // First TI attempt was the final one — append failed piece if present.
+        appendFailedPiece(state, tiEngineResult.newFailedPiece);
       }
 
       const interrupted = await interruptIfShutdown();
@@ -1576,7 +1596,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         defaultLiveFixRegistry,
       );
       await saveHandoff(workDir, handoff);
-      promptHashes.quality = promptHash;
+      setPromptHash('quality', promptHash);
       state.waveResults.quality = handoffToResult(handoff, waveProvider(config, 'quality'), promptHash);
       state.completedWaves.push('quality');
       await saveCheckpoint(workDir, state);
@@ -1687,6 +1707,10 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       if (reviewLoopResult.qualityWaveResult) {
         state.waveResults.quality = reviewLoopResult.qualityWaveResult;
       }
+      // Issue #432 — apply reviewKnownIssues through the single application
+      // point. The engine surfaces them via stateDelta when knownIssues are
+      // non-empty; empty list → no delta → state.reviewKnownIssues untouched.
+      state = applyEngineStateDelta(state, reviewEngineResult.stateDelta);
       state.completedWaves.push('review');
       await saveCheckpoint(workDir, state);
       await progress?.waveCompleted('review', state);
@@ -1695,16 +1719,6 @@ export async function fix(options: FixOptions): Promise<FixResult> {
 
       const interrupted = await interruptIfShutdown();
       if (interrupted) return interrupted;
-
-      // Thread known issues to PR body
-      if (reviewLoopResult.knownIssues.length > 0) {
-        state.reviewKnownIssues = reviewLoopResult.knownIssues.map((f) => ({
-          category: f.category,
-          file: f.file,
-          description: f.description,
-          severity: f.severity,
-        }));
-      }
     }
 
     // Ship — no AI wave, just git operations. Delegated to ShipEngine (#357).
@@ -2131,15 +2145,16 @@ export async function fix(options: FixOptions): Promise<FixResult> {
   }
 }
 
-function trackFailedPiece(state: FixState, diagnosis?: string): void {
-  const piece: FailedPiece = {
-    pieceName: 'impl',
-    diagnosis: {
-      category: diagnosis ?? 'STUCK',
-      theory: 'TI loop exhausted all retries',
-      tests_still_failing: [],
-    },
-  };
+/**
+ * Append a TIEngine-emitted `FailedPiece` to `state.failedPieces`. Issue #432:
+ * replaces the previous `trackFailedPiece` helper that knew how to construct a
+ * piece from a diagnosis string. The construction lives in
+ * `engines/ti.ts:buildFailedPiece` now; this helper is the orchestrator's
+ * single application point for the APPEND-style accumulator (the only FixState
+ * field that cannot use the REPLACE-style `EngineStateDelta`).
+ */
+function appendFailedPiece(state: FixState, piece: FailedPiece | undefined): void {
+  if (piece == null) return;
   state.failedPieces = [...(state.failedPieces ?? []), piece];
 }
 

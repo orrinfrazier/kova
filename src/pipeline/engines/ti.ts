@@ -15,9 +15,10 @@
 //   Review Enforcement" — a small, separate seam is cheaper to evolve than a
 //   module-level free function.
 
+import type { FailedPiece } from '../../types/index.js';
 import type { ParallelPieceTILoopConfig, ParallelPieceTILoopResult } from '../loops.js';
-import { runParallelPieceTILoop } from '../loops.js';
-import type { EngineContext, EngineResult, TIEngineInput, WaveEngine } from './types.js';
+import { detectThrashing, runParallelPieceTILoop } from '../loops.js';
+import type { EngineContext, EngineResult, EngineStateDelta, TIEngineInput, WaveEngine } from './types.js';
 
 /**
  * Build the `runParallelPieceTILoop` config from the engine ctx + input.
@@ -51,14 +52,62 @@ export function buildTILoopConfig(ctx: EngineContext, input: TIEngineInput): Par
 }
 
 /**
- * Map a `ParallelPieceTILoopResult` to an `EngineResult` carrying a typed
- * `WaveHandoff`. Confidence collapses the loop's testsPassing flag the same
- * way `fix.ts` does today — high when green, low when red — so this engine is
- * a drop-in for the existing call sites.
+ * Build the `EngineStateDelta` that captures TI's contribution to FixState
+ * (issue #432). Mirrors the inline assignments at fix.ts:1459-1462 — the
+ * orchestrator's loop applies these via `applyEngineStateDelta` instead of
+ * writing through `state.*` directly. Exported for unit testing.
  */
-function toEngineResult(result: ParallelPieceTILoopResult): EngineResult<ParallelPieceTILoopResult> {
+export function buildTIStateDelta(result: ParallelPieceTILoopResult): EngineStateDelta {
+  return {
+    diagnosis: result.diagnosis,
+    thrashingSignal:
+      result.modifiedFilesPerAttempt.length >= 2 ? detectThrashing(result.modifiedFilesPerAttempt) : undefined,
+    retryAttempts: result.attempts,
+  };
+}
+
+/**
+ * Build a `FailedPiece` for the orchestrator to append to `state.failedPieces`
+ * (issue #432). Returns `undefined` when the run succeeded — the orchestrator
+ * uses absence to mean "no append". Mirrors the inline helper from
+ * fix.ts:2134-2143.
+ */
+export function buildFailedPiece(result: ParallelPieceTILoopResult): FailedPiece | undefined {
+  if (result.testsPassing) return undefined;
+  return {
+    pieceName: 'impl',
+    diagnosis: {
+      category: result.diagnosis ?? 'STUCK',
+      theory: 'TI loop exhausted all retries',
+      tests_still_failing: [],
+    },
+  };
+}
+
+/**
+ * Result type for `TIEngine.run()` (issue #432).
+ *
+ * Extends `EngineResult` with the optional `newFailedPiece` field. We keep
+ * `newFailedPiece` OUTSIDE `stateDelta` because `failedPieces` is APPEND-style
+ * (the orchestrator may call TIEngine twice — once initially, once after a
+ * respec — and both failures must accumulate). The orchestrator's loop reads
+ * `newFailedPiece` and appends to `state.failedPieces` in one place.
+ */
+export interface TIEngineResult extends EngineResult<ParallelPieceTILoopResult> {
+  /** When tests still fail, the FailedPiece the orchestrator should append. */
+  newFailedPiece?: FailedPiece | undefined;
+}
+
+/**
+ * Map a `ParallelPieceTILoopResult` to a `TIEngineResult` carrying a typed
+ * `WaveHandoff` + `stateDelta` (issue #432). Confidence collapses the loop's
+ * testsPassing flag the same way `fix.ts` does today — high when green, low
+ * when red — so this engine is a drop-in for the existing call sites.
+ */
+function toEngineResult(result: ParallelPieceTILoopResult): TIEngineResult {
   const model = result.implWaveResult.model ?? 'unknown';
   const approachNotes = result.diagnosis ? `diagnosis: ${result.diagnosis}` : '';
+  const newFailedPiece = buildFailedPiece(result);
   return {
     handoff: {
       wave: 'impl',
@@ -75,14 +124,27 @@ function toEngineResult(result: ParallelPieceTILoopResult): EngineResult<Paralle
     // intentionally elides it. Once the loop migrates to per-piece sub-engines
     // we can surface a deterministic aggregate.
     promptHash: '',
+    stateDelta: buildTIStateDelta(result),
+    ...(newFailedPiece != null && { newFailedPiece }),
   };
+}
+
+/**
+ * The TIEngine narrows the engine contract to its richer `TIEngineResult`
+ * return type (which extends `EngineResult<ParallelPieceTILoopResult>` with
+ * `newFailedPiece`). A deliberate covariant narrowing — base `WaveEngine`
+ * consumers still see the standard shape, while callers that need the failed-
+ * piece accumulator (orchestrator's loop) see it too.
+ */
+export interface TIEngineType extends WaveEngine<TIEngineInput, ParallelPieceTILoopResult> {
+  run(ctx: EngineContext, input: TIEngineInput): Promise<TIEngineResult>;
 }
 
 /**
  * Create a TIEngine instance. Stateless — the returned object can be reused
  * across runs; engines are not meant to hold state between invocations.
  */
-export function createTIEngine(): WaveEngine<TIEngineInput, ParallelPieceTILoopResult> {
+export function createTIEngine(): TIEngineType {
   return {
     name: 'impl',
     async run(ctx, input) {
