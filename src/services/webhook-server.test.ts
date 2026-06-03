@@ -752,6 +752,143 @@ describe('GET /events — event bus disabled', () => {
   });
 });
 
+/* ------------------------------------------------------------------ */
+/*  GET /capture — per-fix scrollback ring buffer (kova#295)            */
+/* ------------------------------------------------------------------ */
+
+describe('GET /capture — event bus disabled', () => {
+  let server: WebhookServer;
+  let port: number;
+
+  beforeEach(async () => {
+    server = createWebhookServer({
+      secret: TEST_SECRET,
+      port: 0,
+      enqueue: makeEnqueueMock(),
+    });
+    await server.start();
+    port = server.port;
+  });
+
+  afterEach(async () => {
+    await server.stop();
+  });
+
+  it('returns 404 when eventBus is not configured', async () => {
+    const res = await request(port, { method: 'GET', path: '/capture?fixId=A' });
+    expect(res.status).toBe(404);
+  });
+});
+
+describe('GET /capture — event bus enabled', () => {
+  it('returns the JSON snapshot for the given fixId', async () => {
+    const { EventBus } = await import('./event-bus/bus.js');
+    const bus = new EventBus();
+    // Seed a few events.
+    bus.publish({ runId: 'r', repoId: 'o/r', fixId: 'A', type: 'fix-started', issueNumber: 295 });
+    bus.publish({ runId: 'r', repoId: 'o/r', fixId: 'A', type: 'wave-enter', wave: 'assess' });
+    bus.publish({
+      runId: 'r',
+      repoId: 'o/r',
+      fixId: 'A',
+      type: 'wave-output',
+      wave: 'impl',
+      turn: 0,
+      text: 'x',
+    });
+    const server = createWebhookServer({
+      secret: TEST_SECRET,
+      port: 0,
+      enqueue: makeEnqueueMock(),
+      eventBus: bus,
+    });
+    await server.start();
+    try {
+      const res = await request(server.port, { method: 'GET', path: '/capture?fixId=A' });
+      expect(res.status).toBe(200);
+      expect(res.headers['content-type']).toContain('application/json');
+      const parsed = JSON.parse(res.body) as Array<Record<string, unknown>>;
+      expect(parsed.length).toBe(3);
+      expect(parsed.map((e) => e.type)).toEqual(['fix-started', 'wave-enter', 'wave-output']);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it('supports ?wave= filter and ?lines= limit', async () => {
+    const { EventBus } = await import('./event-bus/bus.js');
+    const bus = new EventBus();
+    for (let i = 0; i < 5; i++) {
+      bus.publish({
+        runId: 'r',
+        repoId: 'o/r',
+        fixId: 'A',
+        type: 'wave-output',
+        wave: 'impl',
+        turn: i,
+      });
+    }
+    bus.publish({ runId: 'r', repoId: 'o/r', fixId: 'A', type: 'wave-enter', wave: 'spec' });
+    const server = createWebhookServer({
+      secret: TEST_SECRET,
+      port: 0,
+      enqueue: makeEnqueueMock(),
+      eventBus: bus,
+    });
+    await server.start();
+    try {
+      const filteredRes = await request(server.port, { method: 'GET', path: '/capture?fixId=A&wave=impl' });
+      const filtered = JSON.parse(filteredRes.body) as Array<Record<string, unknown>>;
+      expect(filtered.length).toBe(5);
+      expect(filtered.every((e) => e.wave === 'impl')).toBe(true);
+
+      const limitedRes = await request(server.port, { method: 'GET', path: '/capture?fixId=A&wave=impl&lines=2' });
+      const limited = JSON.parse(limitedRes.body) as Array<Record<string, unknown>>;
+      expect(limited.length).toBe(2);
+      expect(limited.map((e) => e.turn)).toEqual([3, 4]);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it('returns 400 when fixId is missing', async () => {
+    const { EventBus } = await import('./event-bus/bus.js');
+    const bus = new EventBus();
+    const server = createWebhookServer({
+      secret: TEST_SECRET,
+      port: 0,
+      enqueue: makeEnqueueMock(),
+      eventBus: bus,
+    });
+    await server.start();
+    try {
+      const res = await request(server.port, { method: 'GET', path: '/capture' });
+      expect(res.status).toBe(400);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it('returns empty array when no events buffered for fixId', async () => {
+    const { EventBus } = await import('./event-bus/bus.js');
+    const bus = new EventBus();
+    const server = createWebhookServer({
+      secret: TEST_SECRET,
+      port: 0,
+      enqueue: makeEnqueueMock(),
+      eventBus: bus,
+    });
+    await server.start();
+    try {
+      const res = await request(server.port, { method: 'GET', path: '/capture?fixId=missing' });
+      expect(res.status).toBe(200);
+      expect(JSON.parse(res.body)).toEqual([]);
+    } finally {
+      await server.stop();
+    }
+  });
+});
+
 describe('GET /events — event bus enabled', () => {
   it('returns 200 with text/event-stream content-type', async () => {
     const { EventBus } = await import('./event-bus/bus.js');
