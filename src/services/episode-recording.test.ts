@@ -1,4 +1,7 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   type EpisodicMemoryConfig,
   EpisodicMemoryConfigSchema,
@@ -6,45 +9,33 @@ import {
   type WaveName,
   type WaveResult,
 } from '../types/config.js';
-import { buildEpisodeRecord, type EpisodeRecord, recordEpisode } from './memory/episode-rest.js';
+import { buildEpisodeRecord, type EpisodeRecord, queryEpisodeContext, recordEpisode } from './memory/episode-rest.js';
 
-/* ------------------------------------------------------------------ */
-/*  Mock fetch                                                         */
-/* ------------------------------------------------------------------ */
-
-const mockFetch = vi.fn<(input: string | URL | Request, init?: RequestInit) => Promise<Response>>();
+let tmpRoot: string | null = null;
 
 beforeEach(() => {
-  vi.stubGlobal('fetch', mockFetch);
+  tmpRoot = mkdtempSync(join(tmpdir(), 'kova-episode-recording-'));
 });
 
 afterEach(() => {
-  vi.restoreAllMocks();
+  if (tmpRoot && existsSync(tmpRoot)) rmSync(tmpRoot, { recursive: true, force: true });
+  tmpRoot = null;
 });
 
-/* ------------------------------------------------------------------ */
-/*  Helpers                                                            */
-/* ------------------------------------------------------------------ */
-
-const ENDPOINT = 'http://localhost:8100/query';
+function getTmp(): string {
+  if (!tmpRoot) throw new Error('tmpRoot not initialised');
+  return tmpRoot;
+}
 
 function makeEpisodeConfig(overrides?: Partial<EpisodicMemoryConfig>): EpisodicMemoryConfig {
   return {
     enabled: true,
-    endpoint: ENDPOINT,
     max_episodes: 3,
     cross_repo: true,
     same_repo_weight: 1.5,
     language_filter: true,
     ...overrides,
   };
-}
-
-function mockJsonResponse(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { 'Content-Type': 'application/json' },
-  });
 }
 
 function makeWaveResult(wave: string, artifact: unknown, overrides?: Partial<WaveResult>): WaveResult {
@@ -369,10 +360,10 @@ describe('buildEpisodeRecord', () => {
 /*  recordEpisode                                                      */
 /* ------------------------------------------------------------------ */
 
-describe('recordEpisode', () => {
+describe('recordEpisode (sqlite-vec)', () => {
   const sampleRecord: EpisodeRecord = {
     issue_number: 42,
-    issue_title: 'Fix login bug',
+    issue_title: 'Fix login bug auth middleware',
     labels: ['bug'],
     repo: 'test-repo',
     approach: 'Add TTL check',
@@ -387,39 +378,28 @@ describe('recordEpisode', () => {
     timestamp: '2026-04-07T10:05:00.000Z',
   };
 
-  it('sends PUT request with episode record', async () => {
-    mockFetch.mockResolvedValueOnce(mockJsonResponse({ ok: true }));
-    const result = await recordEpisode(makeEpisodeConfig(), sampleRecord);
+  it('persists record to local sqlite-vec store', async () => {
+    const result = await recordEpisode(makeEpisodeConfig(), sampleRecord, getTmp());
     expect(result).toBe(true);
-    expect(mockFetch).toHaveBeenCalledOnce();
-    const [url, init] = mockFetch.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe(ENDPOINT);
-    expect(init.method).toBe('PUT');
-    const body = JSON.parse(init.body as string) as EpisodeRecord;
-    expect(body.issue_number).toBe(42);
-    expect(body.outcome).toBe('pr_created');
+
+    // Roundtrip verification — querying the same workDir surfaces the record.
+    const results = await queryEpisodeContext(
+      makeEpisodeConfig(),
+      'login bug auth middleware',
+      { repo: 'test-repo' },
+      getTmp(),
+    );
+    expect(results.some((r) => r.issue_number === 42)).toBe(true);
   });
 
   it('returns false when disabled', async () => {
-    const result = await recordEpisode(makeEpisodeConfig({ enabled: false }), sampleRecord);
+    const result = await recordEpisode(makeEpisodeConfig({ enabled: false }), sampleRecord, getTmp());
     expect(result).toBe(false);
-    expect(mockFetch).not.toHaveBeenCalled();
   });
 
-  it('returns false when endpoint is missing', async () => {
-    const result = await recordEpisode(makeEpisodeConfig({ endpoint: undefined }), sampleRecord);
+  it('returns false when workDir is missing', async () => {
+    const result = await recordEpisode(makeEpisodeConfig(), sampleRecord);
     expect(result).toBe(false);
-    expect(mockFetch).not.toHaveBeenCalled();
-  });
-
-  it('returns false on network error (graceful degradation)', async () => {
-    mockFetch.mockRejectedValueOnce(new Error('ECONNREFUSED'));
-    expect(await recordEpisode(makeEpisodeConfig(), sampleRecord)).toBe(false);
-  });
-
-  it('returns false on non-200 response', async () => {
-    mockFetch.mockResolvedValueOnce(mockJsonResponse({ error: 'fail' }, 500));
-    expect(await recordEpisode(makeEpisodeConfig(), sampleRecord)).toBe(false);
   });
 });
 

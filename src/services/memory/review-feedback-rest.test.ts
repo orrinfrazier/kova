@@ -1,36 +1,40 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { EpisodicMemoryConfig } from '../../types/config.js';
-import { classifyFeedback, formatReviewFeedback, recordReviewFeedback } from './review-feedback-rest.js';
+import {
+  classifyFeedback,
+  formatReviewFeedback,
+  queryReviewFeedbackContext,
+  recordReviewFeedback,
+} from './review-feedback-rest.js';
 
-const mockFetch = vi.fn<(input: string | URL | Request, init?: RequestInit) => Promise<Response>>();
+let tmpRoot: string | null = null;
 
 beforeEach(() => {
-  vi.stubGlobal('fetch', mockFetch);
+  tmpRoot = mkdtempSync(join(tmpdir(), 'kova-feedback-rest-'));
 });
 
 afterEach(() => {
-  vi.restoreAllMocks();
+  if (tmpRoot && existsSync(tmpRoot)) rmSync(tmpRoot, { recursive: true, force: true });
+  tmpRoot = null;
 });
 
-const ENDPOINT = 'http://localhost:8100/query';
+function getTmp(): string {
+  if (!tmpRoot) throw new Error('tmpRoot not initialised');
+  return tmpRoot;
+}
 
 function makeEpisodeConfig(overrides?: Partial<EpisodicMemoryConfig>): EpisodicMemoryConfig {
   return {
     enabled: true,
-    endpoint: ENDPOINT,
     max_episodes: 3,
     cross_repo: true,
     same_repo_weight: 1.5,
     language_filter: true,
     ...overrides,
   };
-}
-
-function mockJsonResponse(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { 'Content-Type': 'application/json' },
-  });
 }
 
 /* ------------------------------------------------------------------ */
@@ -131,48 +135,70 @@ describe('classifyFeedback', () => {
 /*  recordReviewFeedback                                               */
 /* ------------------------------------------------------------------ */
 
-describe('recordReviewFeedback', () => {
+describe('recordReviewFeedback / queryReviewFeedbackContext (sqlite-vec)', () => {
   const sampleFeedback = [
     {
       repo: 'test-repo',
       pr_number: 42,
       feedback_type: 'style_issue' as const,
-      comment_text: 'Use const',
+      comment_text: 'always use const here for readability',
       file_path: 'src/auth.ts',
       author: 'alice',
     },
   ];
 
-  it('sends PUT request with feedback records', async () => {
-    mockFetch.mockResolvedValueOnce(mockJsonResponse({ ok: true }));
+  it('persists records and surfaces them on query', async () => {
+    const ok = await recordReviewFeedback(makeEpisodeConfig(), sampleFeedback, getTmp());
+    expect(ok).toBe(true);
+    const results = await queryReviewFeedbackContext(
+      makeEpisodeConfig(),
+      'always use const here for readability',
+      'test-repo',
+      getTmp(),
+    );
+    expect(results.length).toBe(1);
+    expect(results[0]?.comment_text).toContain('const');
+    expect(results[0]?.file_path).toBe('src/auth.ts');
+  });
+
+  it('record returns false when disabled', async () => {
+    const result = await recordReviewFeedback(makeEpisodeConfig({ enabled: false }), sampleFeedback, getTmp());
+    expect(result).toBe(false);
+  });
+
+  it('record returns false when workDir missing', async () => {
     const result = await recordReviewFeedback(makeEpisodeConfig(), sampleFeedback);
-    expect(result).toBe(true);
-    expect(mockFetch).toHaveBeenCalledOnce();
-    const [url, init] = mockFetch.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe(ENDPOINT);
-    expect(init.method).toBe('PUT');
-  });
-
-  it('returns false when disabled', async () => {
-    const result = await recordReviewFeedback(makeEpisodeConfig({ enabled: false }), sampleFeedback);
     expect(result).toBe(false);
-    expect(mockFetch).not.toHaveBeenCalled();
   });
 
-  it('returns false when endpoint is missing', async () => {
-    const result = await recordReviewFeedback(makeEpisodeConfig({ endpoint: undefined }), sampleFeedback);
-    expect(result).toBe(false);
-    expect(mockFetch).not.toHaveBeenCalled();
+  it('query returns [] when disabled', async () => {
+    const result = await queryReviewFeedbackContext(makeEpisodeConfig({ enabled: false }), 'q', undefined, getTmp());
+    expect(result).toEqual([]);
   });
 
-  it('returns false on network error (graceful degradation)', async () => {
-    mockFetch.mockRejectedValueOnce(new Error('ECONNREFUSED'));
-    expect(await recordReviewFeedback(makeEpisodeConfig(), sampleFeedback)).toBe(false);
+  it('query returns [] when workDir missing', async () => {
+    const result = await queryReviewFeedbackContext(makeEpisodeConfig(), 'q', undefined);
+    expect(result).toEqual([]);
   });
 
-  it('returns false on non-200 response', async () => {
-    mockFetch.mockResolvedValueOnce(mockJsonResponse({ error: 'fail' }, 500));
-    expect(await recordReviewFeedback(makeEpisodeConfig(), sampleFeedback)).toBe(false);
+  it('query filters by repo when provided', async () => {
+    const base = sampleFeedback[0];
+    if (!base) throw new Error('sample fixture missing');
+    await recordReviewFeedback(
+      makeEpisodeConfig(),
+      [
+        { ...base, repo: 'org/a', pr_number: 1 },
+        { ...base, repo: 'org/b', pr_number: 2 },
+      ],
+      getTmp(),
+    );
+    const results = await queryReviewFeedbackContext(
+      makeEpisodeConfig(),
+      'always use const here for readability',
+      'org/a',
+      getTmp(),
+    );
+    expect(results.every((r) => r.pr_number === 1)).toBe(true);
   });
 });
 
