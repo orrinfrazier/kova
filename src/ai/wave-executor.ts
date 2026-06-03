@@ -30,12 +30,11 @@ import {
   type AssistantTurn,
   type CacheRetention,
   defaultAgentRuntimeFactory,
-  type RuntimeAfterToolCallHook,
   type RuntimeBeforeToolCallHook,
   type RuntimeTransformContext,
   type ThinkingLevel,
 } from './runtime/index.js';
-import { createAfterToolCallHook, type ToolHookOptions } from './tool-hooks.js';
+import type { TruncationOptions } from './tool-result-truncate.js';
 import { type AIWaveName, DEFAULT_THINKING_LEVELS, getWaveTools, PIECE_SCOPE_WAVES } from './wave-tools.js';
 
 export interface OutputFormat {
@@ -214,8 +213,23 @@ export interface SpawnWaveAgentConfig {
   thinkingLevel?: ThinkingLevel;
   /** Context usage threshold (0-1) — abort if input tokens exceed this fraction of contextWindow. Default: 0.9. Steer warning at 70%, aggressive trim at 80%. */
   contextThreshold?: number;
-  /** Tool result truncation options. Set to configure or `false` to disable. Default: enabled with 8k token budget. */
-  toolResultTruncation?: ToolHookOptions | false;
+  /**
+   * Tool-result truncation options. Set to configure or `false` to disable.
+   * Default: enabled with 8k token budget.
+   *
+   * Issue #315 — truncation now runs at the tool-execute layer via
+   * `withTruncatedResult` (see `./tool-result-truncate.ts`). This field is
+   * accepted for backward compatibility; callers should configure truncation
+   * by passing options to `getWaveTools(..., { toolResultTruncation })` and
+   * `getMCPToolsForWave(..., truncation)` so the wrap happens before the
+   * tools enter the runtime — that path survives a swap to claude-agent-sdk,
+   * whose hook model has no output-side content-rewrite surface.
+   *
+   * Setting this field on `spawnWaveAgent` itself no longer attaches an
+   * `afterToolCall` hook; runtime-level rewriting is incompatible with the
+   * runtime-agnostic story.
+   */
+  toolResultTruncation?: TruncationOptions | false;
   /**
    * Optional `AgentRuntimeFactory` override (kova#309). Defaults to
    * `defaultAgentRuntimeFactory`, which wraps pi-mono `Agent`. Tests may
@@ -349,7 +363,10 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
     maxCostUsd,
     thinkingLevel: explicitThinking,
     contextThreshold: rawThreshold = 0.9,
-    toolResultTruncation,
+    // Issue #315 — truncation moved to the tool-execute layer
+    // (`withTruncatedResult`). Accepted for backward compatibility but no
+    // longer wired into the runtime here. Destructured-and-ignored on purpose.
+    toolResultTruncation: _toolResultTruncation,
     runtimeFactory = defaultAgentRuntimeFactory,
     destructiveEditGuard,
     importPreservationGuard,
@@ -386,8 +403,10 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
 
   const effectiveUserMessage = handoffContext ? `${handoffContext}\n\n---\n\n${userMessage}` : userMessage;
 
-  const afterToolCallHook =
-    toolResultTruncation === false ? undefined : createAfterToolCallHook(toolResultTruncation ?? undefined);
+  // Issue #315 — truncation runs at the tool-execute layer (`withTruncatedResult`
+  // wraps every tool in `getWaveTools` / `mcpToolToAgentTool`), not via a
+  // runtime hook. claude-agent-sdk has no output-side content-rewrite surface,
+  // so wrapping at execute-time is the only portable place to enforce a budget.
 
   // beforeToolCall guards: a composition of three hooks, all running in order with
   // short-circuit on first block:
@@ -426,11 +445,16 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
   // Construct via the AgentRuntime factory (kova#309). The default factory
   // wraps pi-mono Agent; kova#310 will extract a full PiAgentRuntime adapter.
   //
-  // `createTransformContext`, `createAfterToolCallHook`, and `createDestructiveEditGuard`
-  // return pi-mono-typed functions today. They are structurally compatible with the
-  // kova hooks, but cross the package boundary, so we widen at the call site (the
-  // adapter narrows back to pi-mono types). Cleaned up in kova#310 when the adapter
-  // owns the translation in one place.
+  // `createTransformContext` and `createDestructiveEditGuard` return
+  // pi-mono-typed functions today. They are structurally compatible with the
+  // kova hooks, but cross the package boundary, so we widen at the call site
+  // (the adapter narrows back to pi-mono types). Cleaned up in kova#310 when
+  // the adapter owns the translation in one place.
+  //
+  // Issue #315 — no `afterToolCall` here. Tool-result truncation is applied at
+  // tool-execute time via `withTruncatedResult` (see `./tool-result-truncate.ts`).
+  // This is the only runtime-agnostic place to enforce a budget; claude-agent-sdk's
+  // `PostToolUse` is informational and offers no output-side rewrite hook.
   const agent = runtimeFactory.create({
     systemPrompt: effectiveSystemPrompt,
     model,
@@ -443,9 +467,6 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
     // unaffected.
     ...(sessionId != null ? { sessionId } : {}),
     ...(cacheRetention != null ? { cacheRetention } : {}),
-    ...(afterToolCallHook && {
-      afterToolCall: afterToolCallHook as unknown as RuntimeAfterToolCallHook,
-    }),
     ...(beforeToolCallHook && {
       beforeToolCall: beforeToolCallHook as unknown as RuntimeBeforeToolCallHook,
     }),

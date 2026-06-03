@@ -291,6 +291,73 @@ describe('mcpToolToAgentTool', () => {
 
     expect(result.content).toEqual([{ type: 'text', text: '(no output)' }]);
   });
+
+  // Issue #315 — MCP results go through the runtime-agnostic truncation
+  // primitive (`withTruncatedResult`) so MCP truncation is symmetric with
+  // built-in tools and survives a swap away from pi-agent-core's
+  // `afterToolCall` hook.
+  it('execute() truncates large MCP results to the configured token budget', async () => {
+    const mcpTool = {
+      name: 'big-grep',
+      description: 'Returns a large blob',
+      inputSchema: { type: 'object' as const },
+    };
+
+    const largeText = 'x'.repeat(200_000); // ≈ 50k tokens, well over the 8k default
+    mockClient.callTool.mockResolvedValue({
+      content: [{ type: 'text', text: largeText }],
+    });
+
+    const agentTool = mcpToolToAgentTool('server', mcpTool, mockClient as never);
+    const result = await agentTool.execute('call-big', {});
+
+    expect(result.content).toHaveLength(1);
+    const block = result.content[0] as { type: 'text'; text: string };
+    expect(block.text.length).toBeLessThan(largeText.length);
+    expect(block.text).toContain('[middle truncated');
+  });
+
+  it('execute() honors a custom truncation budget when passed', async () => {
+    const mcpTool = {
+      name: 'big-grep',
+      description: 'Returns a large blob',
+      inputSchema: { type: 'object' as const },
+    };
+
+    mockClient.callTool.mockResolvedValue({
+      content: [{ type: 'text', text: 'x'.repeat(800) }],
+    });
+
+    const agentTool = mcpToolToAgentTool('server', mcpTool, mockClient as never, {
+      tokenBudget: 50,
+      headTokens: 10,
+      tailTokens: 10,
+    });
+    const result = await agentTool.execute('call-budget', {});
+
+    const block = result.content[0] as { type: 'text'; text: string };
+    expect(block.text.length).toBeLessThan(800);
+    expect(block.text).toContain('[middle truncated');
+  });
+
+  it('execute() passes results through unchanged when truncation is disabled', async () => {
+    const mcpTool = {
+      name: 'big-grep',
+      description: 'Returns a large blob',
+      inputSchema: { type: 'object' as const },
+    };
+
+    const largeText = 'x'.repeat(200_000);
+    mockClient.callTool.mockResolvedValue({
+      content: [{ type: 'text', text: largeText }],
+    });
+
+    const agentTool = mcpToolToAgentTool('server', mcpTool, mockClient as never, false);
+    const result = await agentTool.execute('call-untruncated', {});
+
+    const block = result.content[0] as { type: 'text'; text: string };
+    expect(block.text).toBe(largeText);
+  });
 });
 
 /* ------------------------------------------------------------------ */

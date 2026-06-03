@@ -89,13 +89,17 @@ export {
 export type { RuntimeError, RuntimeErrorAdapter } from './runtime-error.js';
 export {
   createAfterToolCallHook,
+  type ToolHookOptions,
+} from './tool-hooks.js';
+export {
   DEFAULT_HEAD_TOKENS,
   DEFAULT_TAIL_TOKENS,
   DEFAULT_TOKEN_BUDGET,
   estimateTokens,
-  type ToolHookOptions,
+  type TruncationOptions,
   truncateContent,
-} from './tool-hooks.js';
+  withTruncatedResult,
+} from './tool-result-truncate.js';
 export {
   buildWaveSessionId,
   DEFAULT_WAVE_CACHE_RETENTION,
