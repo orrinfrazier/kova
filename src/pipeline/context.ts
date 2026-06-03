@@ -34,6 +34,14 @@ export interface ContextOptions {
   escalationHint?: string;
   /** Pre-formatted codebase context from vector DB (only for spec/impl waves). */
   codebaseContext?: string;
+  /**
+   * Pre-formatted code graph context (#273) — exact definition spans + direct
+   * callers/callees + multi-hop call paths for symbols named in the issue.
+   * Injected into spec/impl waves ABOVE the fuzzy {@link codebaseContext} so
+   * the exact span beats fuzzy vector chunks when both are present.
+   * Source: {@link formatCodegraphContext} in `src/ai/codegraph.ts`.
+   */
+  codegraphContext?: string;
   /** Pre-formatted episodic memory context (only for assess/spec waves). */
   episodicContext?: string;
   /**
@@ -254,6 +262,12 @@ function buildSpecContext(issue: Issue, handoffs: Handoffs, options: ContextOpti
     sections.push(options.repoSearchText);
   }
 
+  // Issue #273 — exact graph spans + callers/callees BEAT fuzzy vector chunks.
+  // Order matters: codegraphContext must precede codebaseContext.
+  if (options.codegraphContext) {
+    sections.push(options.codegraphContext);
+  }
+
   if (options.codebaseContext) {
     sections.push(options.codebaseContext);
   }
@@ -299,6 +313,11 @@ function buildImplContext(handoffs: Handoffs, options: ContextOptions): string {
   if (test?.test_files_created && test.test_files_created.length > 0) {
     const fileList = test.test_files_created.map((f) => `- ${f}`).join('\n');
     sections.push(`## Test Files (${test.test_count ?? test.test_files_created.length} tests)\n\n${fileList}`);
+  }
+
+  // Issue #273 — see buildSpecContext for the ordering rationale.
+  if (options.codegraphContext) {
+    sections.push(options.codegraphContext);
   }
 
   if (options.codebaseContext) {
