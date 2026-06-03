@@ -1,7 +1,16 @@
-// Barrel export for the per-wave engine module (issue #353, extended in #355).
+// Barrel export for the per-wave engine module (issue #353, #354, #355).
 
+export { AssessEngine, type AssessEngineInput } from './assess.js';
 export { resolveWaveModelProvider, runWaveEngine } from './base.js';
+export { type FallbackHelpers, waveFallbackModel } from './fallback.js';
 export { buildQualityRetryConfig, createQualityEngine } from './quality.js';
+export {
+  SpecEngine,
+  type SpecEngineInput,
+  type SpecEnginePendingPR,
+  type SpecEngineResult,
+  type SpecEngineType,
+} from './spec.js';
 export { buildTILoopConfig, createTIEngine } from './ti.js';
 export type {
   EngineCacheContext,
