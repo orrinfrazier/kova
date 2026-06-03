@@ -1504,6 +1504,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           config.episodes,
           `${issue.title}\n\n${issue.body}`,
           repoName,
+          workDir,
         );
         if (feedbackItems.length > 0) {
           reviewFeedbackContext = formatReviewFeedback(feedbackItems);
@@ -1963,7 +1964,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       if (recordTooling.language !== 'unknown') {
         episode.language = recordTooling.language;
       }
-      await recordEpisode(config.episodes, episode).catch((err) => {
+      await recordEpisode(config.episodes, episode, workDir).catch((err) => {
         flog.warn(`Failed to record episode: ${err instanceof Error ? err.message : String(err)}`);
       });
 
@@ -1985,9 +1986,11 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       const prNumberMatch = shipPrUrl.match(/\/pull\/(\d+)/);
       const prNumber = prNumberMatch?.[1] ? Number.parseInt(prNumberMatch[1], 10) : undefined;
       if (prNumber) {
-        collectPRFeedback({ episodesConfig: config.episodes, repoName, prNumber, repoPath: workDir }).catch((err) => {
-          flog.warn(`Failed to collect PR feedback: ${err instanceof Error ? err.message : String(err)}`);
-        });
+        collectPRFeedback({ episodesConfig: config.episodes, repoName, prNumber, repoPath: workDir, workDir }).catch(
+          (err) => {
+            flog.warn(`Failed to collect PR feedback: ${err instanceof Error ? err.message : String(err)}`);
+          },
+        );
       }
     }
 

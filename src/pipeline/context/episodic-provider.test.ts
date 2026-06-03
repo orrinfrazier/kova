@@ -64,6 +64,7 @@ describe('episodicProvider', () => {
       expect.anything(),
       expect.any(String),
       expect.objectContaining({ language: 'rust' }),
+      expect.any(String),
     );
   });
 
@@ -74,6 +75,7 @@ describe('episodicProvider', () => {
       expect.anything(),
       expect.any(String),
       expect.objectContaining({ language: undefined }),
+      expect.any(String),
     );
   });
 

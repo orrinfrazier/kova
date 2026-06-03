@@ -1,75 +1,97 @@
-// Episodic memory REST client — queries past-issue learnings, formats them
-// for prompt injection, builds an EpisodeRecord from completed fix state,
-// and persists it back to the episodic memory endpoint.
+// Episodic memory client — local sqlite-vec backend (#433).
+//
+// Previously this module talked to a remote REST endpoint via `fetch`. Per
+// ADR 002 (local-first vector search) and issue #433, the embedding endpoints
+// are removed; this file now wraps the local sqlite-vec-backed `EpisodeStore`
+// while keeping the same public surface (`queryEpisodeContext`, `recordEpisode`,
+// `formatEpisodes`, `formatFailedEpisodes`, `buildEpisodeRecord`) so callers
+// upstream do not change shape — only the local-DB `workDir` parameter is new.
+//
+// Filename retained as `*-rest.ts` for the duration of #433 → #434 to keep
+// the patch minimal; #434's mass rename of `src/services/` will fold this in.
 
+import { join as joinPath } from 'node:path';
 import type { EpisodicMemoryConfig, FixState } from '../../types/config.js';
 import type { CrossRepoQueryOptions, EpisodeContext, EpisodeRecord } from '../../types/memory.js';
 import type { AssessResult, QualityResult, ReviewFinding, ReviewResult, SpecResult } from '../../types/waves.js';
 import { log } from '../../utils/logger.js';
+import { EpisodeStore } from './episode-store.js';
 
 export type { CrossRepoQueryOptions, EpisodeContext, EpisodeRecord } from '../../types/memory.js';
 
-interface EpisodeContextResponse {
-  episodes?: EpisodeContext[];
+/**
+ * Resolve the on-disk path of the local episodes DB. Default location is
+ * `{workDir}/.kova/episodes-vec.db`.
+ */
+function resolveEpisodeDbPath(workDir: string): string {
+  return joinPath(workDir, '.kova', 'episodes-vec.db');
 }
 
 /**
- * Query the episodic memory REST endpoint for past issue learnings similar to the given query.
- * When cross_repo is enabled, searches across all repos with same-repo weighting.
- * When language_filter is enabled, filters by language to avoid irrelevant episodes.
- * Returns an empty array if disabled, on error, or if the response is malformed.
+ * Resolve any legacy FTS sidecar that lives alongside the vec DB. The
+ * sqlite-vec store consumes it as a one-shot migration source on first
+ * construction.
+ */
+function resolveFTSMigrationPath(workDir: string): string {
+  return joinPath(workDir, '.kova', 'episode-fts.db');
+}
+
+/**
+ * Open the local episode store. Caller is responsible for `close()`.
+ */
+function openStore(workDir: string): EpisodeStore | null {
+  try {
+    return new EpisodeStore(resolveEpisodeDbPath(workDir), {
+      ftsMigrationPath: resolveFTSMigrationPath(workDir),
+    });
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    log.warn(`[episodes] Failed to open local sqlite-vec store: ${msg}`);
+    return null;
+  }
+}
+
+/**
+ * Query the local episode store for past-issue learnings similar to `query`.
+ * Returns an empty array when disabled or on any failure mode.
  */
 export async function queryEpisodeContext(
   config: EpisodicMemoryConfig,
   query: string,
   options?: CrossRepoQueryOptions,
+  workDir?: string,
 ): Promise<EpisodeContext[]> {
   if (!config.enabled) {
     return [];
   }
-
-  if (!config.endpoint) {
-    log.warn('[episodes] Enabled but no endpoint configured — skipping');
+  if (!workDir) {
+    log.warn('[episodes] Enabled but no workDir provided — skipping episodic context');
     return [];
   }
 
+  const store = openStore(workDir);
+  if (!store) return [];
+
   try {
-    const body: Record<string, unknown> = { query, top_k: config.max_episodes };
-
-    if (options?.repo) {
-      body.repo = options.repo;
-      body.cross_repo = config.cross_repo;
-    }
-
-    if (config.language_filter && options?.language) {
-      body.language = options.language;
-    }
-
-    const response = await fetch(config.endpoint, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
+    const repo = options?.repo ?? '';
+    const results = store.queryEpisodes(query, {
+      repo,
+      top_k: config.max_episodes,
+      cross_repo: config.cross_repo,
+      language: options?.language,
+      language_filter: config.language_filter,
+      same_repo_weight: config.same_repo_weight,
     });
-
-    if (!response.ok) {
-      log.warn(`[episodes] Endpoint returned ${response.status} — skipping episodic context`);
-      return [];
+    if (results.length > 0) {
+      log.info(`[episodes] Retrieved ${results.length} past episodes (sqlite-vec)`);
     }
-
-    const data = (await response.json()) as EpisodeContextResponse;
-
-    if (!data.episodes || !Array.isArray(data.episodes)) {
-      log.warn('[episodes] Malformed response (missing episodes array) — skipping');
-      return [];
-    }
-
-    const capped = data.episodes.slice(0, config.max_episodes);
-    log.info(`[episodes] Retrieved ${capped.length} past episodes`);
-    return capped;
+    return results;
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
-    log.warn(`[episodes] Failed to query endpoint: ${msg} — skipping episodic context`);
+    log.warn(`[episodes] Failed to query local store: ${msg} — skipping episodic context`);
     return [];
+  } finally {
+    store.close();
   }
 }
 
@@ -134,7 +156,7 @@ export function formatFailedEpisodes(episodes: EpisodeContext[], currentRepo?: s
 }
 
 /* ------------------------------------------------------------------ */
-/*  Episode recording — REST endpoint (post-fix persistence)           */
+/*  Episode recording — local sqlite-vec store                          */
 /* ------------------------------------------------------------------ */
 
 /**
@@ -274,36 +296,33 @@ function synthesizeLearnings(state: FixState): string | undefined {
 }
 
 /**
- * Record a fix episode to the episodic memory endpoint.
- * Graceful degradation: logs a warning on failure, never throws.
+ * Record a fix episode to the local sqlite-vec store. Graceful: returns false
+ * and logs a warning on failure (never throws).
  */
-export async function recordEpisode(config: EpisodicMemoryConfig, record: EpisodeRecord): Promise<boolean> {
+export async function recordEpisode(
+  config: EpisodicMemoryConfig,
+  record: EpisodeRecord,
+  workDir?: string,
+): Promise<boolean> {
   if (!config.enabled) {
     return false;
   }
-
-  if (!config.endpoint) {
-    log.warn('[episodes] Enabled but no endpoint configured — skipping recording');
+  if (!workDir) {
+    log.warn('[episodes] Enabled but no workDir provided — skipping recording');
     return false;
   }
 
+  const store = openStore(workDir);
+  if (!store) return false;
   try {
-    const response = await fetch(config.endpoint, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(record),
-    });
-
-    if (!response.ok) {
-      log.warn(`[episodes] Recording endpoint returned ${response.status} — episode not saved`);
-      return false;
-    }
-
+    store.upsertEpisode(record);
     log.info(`[episodes] Recorded episode for #${record.issue_number} (${record.outcome})`);
     return true;
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     log.warn(`[episodes] Failed to record episode: ${msg}`);
     return false;
+  } finally {
+    store.close();
   }
 }

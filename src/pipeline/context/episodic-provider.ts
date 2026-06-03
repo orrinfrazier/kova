@@ -20,10 +20,15 @@ export const episodicProvider: ContextProvider = {
     if (!ctx.config.episodes?.enabled) return undefined;
     const episodesConfig = ctx.config.episodes;
     const query = `${ctx.issue.title}\n\n${ctx.issue.body}`;
-    const vectorEpisodes = await queryEpisodeContext(episodesConfig, query, {
-      repo: ctx.repoName,
-      language: ctx.language !== 'unknown' ? ctx.language : undefined,
-    });
+    const vectorEpisodes = await queryEpisodeContext(
+      episodesConfig,
+      query,
+      {
+        repo: ctx.repoName,
+        language: ctx.language !== 'unknown' ? ctx.language : undefined,
+      },
+      ctx.workDir,
+    );
 
     // FTS5 keyword recall (#302): complements vector neighbors with exact
     // matches on error strings, symbols, paths. Local + optional — absent

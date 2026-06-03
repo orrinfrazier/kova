@@ -13,6 +13,8 @@ interface CollectPRFeedbackOptions {
   repoName: string;
   prNumber: number;
   episodesConfig: EpisodicMemoryConfig;
+  /** Worktree path — where the local sqlite-vec feedback DB lives. */
+  workDir?: string | undefined;
 }
 
 interface CollectPRFeedbackResult {
@@ -25,7 +27,7 @@ interface CollectPRFeedbackResult {
  * Graceful degradation: catches all errors, returns empty result on failure.
  */
 export async function collectPRFeedback(options: CollectPRFeedbackOptions): Promise<CollectPRFeedbackResult> {
-  const { repoPath, repoName, prNumber, episodesConfig } = options;
+  const { repoPath, repoName, prNumber, episodesConfig, workDir } = options;
   const empty: CollectPRFeedbackResult = { feedbackCount: 0, patternsDetected: [] };
 
   try {
@@ -60,7 +62,7 @@ export async function collectPRFeedback(options: CollectPRFeedbackOptions): Prom
     }
 
     // Record classified feedback
-    await recordReviewFeedback(episodesConfig, records);
+    await recordReviewFeedback(episodesConfig, records, workDir);
 
     return {
       feedbackCount: records.length,
