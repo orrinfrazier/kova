@@ -11,12 +11,15 @@ import {
   resolveWaveModel,
   spawnWaveAgent,
 } from '../ai/index.js';
+import type { BrainstormIssue, BrainstormResult, CoverageEntry, RepoConfig } from '../types/index.js';
+import { BrainstormResultSchema } from '../types/index.js';
+import { log } from '../utils/logger.js';
 import {
   appendCycle,
   type DiminishingReturnsReport,
   detectDiminishingReturns,
   loadHistory,
-} from '../services/brainstorm-history.js';
+} from './brainstorm-history.js';
 import {
   type CrossRepoConfig,
   classifyProposalsAgainstOpenIssues,
@@ -25,10 +28,7 @@ import {
   formatCrossRepoContext,
   formatSameRepoContext,
   type ProposalSkipEntry,
-} from '../services/cross-repo-issues.js';
-import type { BrainstormIssue, BrainstormResult, CoverageEntry, RepoConfig } from '../types/index.js';
-import { BrainstormResultSchema } from '../types/index.js';
-import { log } from '../utils/logger.js';
+} from './cross-repo-issues.js';
 import { loadProjectContext } from './project-context.js';
 import { loadPrompt, resolvePromptsDir } from './prompts.js';
 import { buildRuntimeFactory, resolveRuntimeKind } from './runtime-select.js';

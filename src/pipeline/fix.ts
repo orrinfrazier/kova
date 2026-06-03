@@ -27,37 +27,22 @@ import {
   startAllMCPServers,
   stopAllMCPServers,
 } from '../ai/index.js';
-// Sandbox lifecycle (start + cleanup) moved to ./sandbox-lifecycle.ts (#435).
-import { selectVariants, type VariantSelection } from '../services/ab-test.js';
-import { clearCheckpoint, loadCheckpoint, saveCheckpoint } from '../services/checkpoint.js';
-// codegraph + conflict-check helpers moved to ./codegraph-checks.ts (#435)
-import { type EventBus, getDefaultEventBus } from '../services/event-bus/index.js';
-import { collectPRFeedback } from '../services/feedback-collector.js';
-// getCurrentHeadSha moved into ./wave-runners.ts (#435)
-import { commentOnIssue } from '../services/github.js';
-import { readHistory } from '../services/history.js';
-import { validateIsolation } from '../services/isolation.js';
-import { detectTooling } from '../services/language-detect.js';
-import { defaultLiveFixRegistry } from '../services/live-fix-registry.js';
-import { buildEpisodeRecord, recordEpisode } from '../services/memory/episode-rest.js';
-// review-feedback-rest imports moved to ./wave-runners.ts (#435)
-import * as metrics from '../services/metrics.js';
-// pattern-store helpers moved to ./episodic-mirror.ts (#435)
-import { applyScopeToState, detectScope, formatScopeLogLine } from '../services/pipeline-scope.js';
-import { ensureScreenshotsDir, isPlaywrightEnabled, resolvePlaywrightEnv } from '../services/playwright.js';
-import { formatPRContext, type OpenPR } from '../services/pr-context.js';
-import { ProgressTracker } from '../services/progress.js';
-import { type ABTestVariantStats, correlateByABTestVariant } from '../services/prompt-correlation.js';
+import { validateIsolation } from '../core/isolation.js';
+import { detectTooling } from '../core/language-detect.js';
 // prompt-versions imports moved into ./context-builder.ts (#435)
 // repo-intel imports moved to ./wave-runners.ts (#435)
 // run-registry imports moved into ./lifecycle.ts (#435)
-import { shutdownRequested } from '../services/shutdown.js';
-import {
-  createWorktree,
-  worktreePath as getWorktreePath,
-  removeWorktree,
-  worktreeExists,
-} from '../services/worktree.js';
+import { shutdownRequested } from '../core/shutdown.js';
+import { buildEpisodeRecord, recordEpisode } from '../memory/episode-rest.js';
+// Sandbox lifecycle (start + cleanup) moved to ./sandbox-lifecycle.ts (#435).
+import { selectVariants, type VariantSelection } from '../telemetry/ab-test.js';
+// codegraph + conflict-check helpers moved to ./codegraph-checks.ts (#435)
+import { type EventBus, getDefaultEventBus } from '../telemetry/event-bus/index.js';
+import { readHistory } from '../telemetry/history.js';
+import { defaultLiveFixRegistry } from '../telemetry/live-fix-registry.js';
+// review-feedback-rest imports moved to ./wave-runners.ts (#435)
+import * as metrics from '../telemetry/metrics.js';
+import { type ABTestVariantStats, correlateByABTestVariant } from '../telemetry/prompt-correlation.js';
 import type {
   FixState,
   Issue,
@@ -76,12 +61,22 @@ import {
   saveHandoff,
 } from '../types/index.js';
 import { closeFileLogger, initFileLogger, type Logger, log } from '../utils/logger.js';
+// getCurrentHeadSha moved into ./wave-runners.ts (#435)
+import { commentOnIssue } from '../vcs/github.js';
+import { formatPRContext, type OpenPR } from '../vcs/pr-context.js';
+import { createWorktree, worktreePath as getWorktreePath, removeWorktree, worktreeExists } from '../vcs/worktree.js';
+import { clearCheckpoint, loadCheckpoint, saveCheckpoint } from './checkpoint.js';
 import { probeDependencyOverlap } from './codegraph-checks.js';
 import { applyConsensusToConfig, formatConsensusActivationLog } from './consensus-flags.js';
 import type { FixRunSkills } from './context-builder.js';
 import { upsertEpisodeFTS, upsertEpisodePattern } from './episodic-mirror.js';
+import { collectPRFeedback } from './feedback-collector.js';
 import { emitHistoryEntry } from './history-emit.js';
 import { setupFixLifecycle } from './lifecycle.js';
+// pattern-store helpers moved to ./episodic-mirror.ts (#435)
+import { applyScopeToState, detectScope, formatScopeLogLine } from './pipeline-scope.js';
+import { ensureScreenshotsDir, isPlaywrightEnabled, resolvePlaywrightEnv } from './playwright.js';
+import { ProgressTracker } from './progress.js';
 import { handoffToResult, waveProvider } from './result.js';
 import { cleanupSandbox, initSandboxLifecycle, startSandbox } from './sandbox-lifecycle.js';
 import { createInitialState, extractOwnerRepo, formatSkipComment } from './state-helpers.js';

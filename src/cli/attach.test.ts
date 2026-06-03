@@ -13,10 +13,10 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { EventBus } from '../services/event-bus/bus.js';
-import type { KovaEvent } from '../services/event-bus/schema.js';
-import { registerRun } from '../services/run-registry.js';
-import { createWebhookServer, type WebhookServer } from '../services/webhook-server.js';
+import { createWebhookServer, type WebhookServer } from '../core/webhook-server.js';
+import { EventBus } from '../telemetry/event-bus/bus.js';
+import type { KovaEvent } from '../telemetry/event-bus/schema.js';
+import { registerRun } from '../telemetry/run-registry.js';
 import { type AttachOptions, attach, formatEventLine, parseSseFrames } from './attach.js';
 
 const root = resolve(import.meta.dirname, '../..');

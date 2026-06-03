@@ -10,8 +10,8 @@
 // swallowed so they never break the REST-based `recordEpisode` path.
 
 import { join as joinPath } from 'node:path';
-import { EpisodeFTSStore } from '../services/episode-fts.js';
-import { PatternStore, upsertPatternFromEpisode } from '../services/pattern-store.js';
+import { EpisodeFTSStore } from '../memory/episode-fts.js';
+import { PatternStore, upsertPatternFromEpisode } from '../memory/pattern-store.js';
 import type { EpisodicMemoryConfig } from '../types/config.js';
 import type { EpisodeRecord } from '../types/memory.js';
 

@@ -17,7 +17,7 @@ import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import process from 'node:process';
-import { defaultSocketPath, isDaemonRunning, shutdownDaemon } from '../services/daemon-client.js';
+import { defaultSocketPath, isDaemonRunning, shutdownDaemon } from '../core/daemon-client.js';
 import { log } from '../utils/logger.js';
 
 /** Default pidfile path: `<home>/.kova/daemon.pid`. */
@@ -169,11 +169,11 @@ export async function runDaemonStop(socketPath: string = defaultSocketPath()): P
  * integration is a follow-up; the daemon plumbing + lifecycle landed first.
  */
 export async function runDaemonRun(): Promise<void> {
-  const { createDaemonServer } = await import('../services/daemon.js');
+  const { createDaemonServer } = await import('../core/daemon.js');
   // Issue #294: share the same process-singleton LiveFixRegistry between the
   // daemon's RPC handler (which routes `kova send` / `kova kill` into live
   // waves) and the fix-pipeline call sites (which register handles per wave).
-  const { defaultLiveFixRegistry } = await import('../services/live-fix-registry.js');
+  const { defaultLiveFixRegistry } = await import('../telemetry/live-fix-registry.js');
   const socketPath = process.env.KOVA_DAEMON_SOCKET ?? defaultSocketPath();
   const pidPath = process.env.KOVA_DAEMON_PIDFILE ?? defaultPidPath();
   const homeDir = homedir();

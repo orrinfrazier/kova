@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 // --- Metrics mock ---
 const mockSetCurrentCostUsd = vi.fn();
 
-vi.mock('../services/metrics.js', () => ({
+vi.mock('../telemetry/metrics.js', () => ({
   setCurrentCostUsd: (...args: unknown[]) => mockSetCurrentCostUsd(...args),
   recordWaveCompleted: vi.fn(),
   recordWaveDuration: vi.fn(),
@@ -18,7 +18,7 @@ vi.mock('../services/metrics.js', () => ({
 }));
 
 // --- Other mocks ---
-vi.mock('../services/github.js', () => ({
+vi.mock('../vcs/github.js', () => ({
   fetchIssues: vi.fn().mockResolvedValue([
     { number: 1, title: 'Issue 1', body: 'body 1', labels: [], url: 'https://github.com/o/r/issues/1' },
     { number: 2, title: 'Issue 2', body: 'body 2', labels: [], url: 'https://github.com/o/r/issues/2' },
@@ -29,19 +29,19 @@ vi.mock('../services/github.js', () => ({
   commentOnIssue: vi.fn(),
 }));
 
-vi.mock('../services/prioritize.js', () => ({
+vi.mock('./prioritize.js', () => ({
   prioritizeIssues: vi
     .fn()
     .mockImplementation((issues: unknown[]) => issues.map((issue, i) => ({ issue, score: 10 - i }))),
 }));
 
-vi.mock('../services/pr-context.js', () => ({
+vi.mock('../vcs/pr-context.js', () => ({
   fetchOpenPRsDetailed: vi.fn().mockResolvedValue([]),
   extractPRFromResult: vi.fn().mockReturnValue(null),
   formatPRContext: vi.fn().mockReturnValue(''),
 }));
 
-vi.mock('../services/shutdown.js', () => ({
+vi.mock('../core/shutdown.js', () => ({
   shutdownRequested: vi.fn().mockReturnValue(false),
 }));
 

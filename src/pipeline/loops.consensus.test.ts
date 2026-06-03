@@ -24,11 +24,11 @@ vi.mock('../ai/parallel-executor.js', () => ({
   spawnConsensusWave: vi.fn(),
 }));
 
-vi.mock('../services/consensus-disagreements.js', () => ({
+vi.mock('../telemetry/consensus-disagreements.js', () => ({
   appendConsensusDisagreement: vi.fn(async () => undefined),
 }));
 
-vi.mock('../services/language-detect.js', () => ({
+vi.mock('../core/language-detect.js', () => ({
   detectTooling: vi.fn().mockResolvedValue({ language: 'typescript', testRunner: 'vitest' }),
 }));
 
@@ -42,7 +42,7 @@ vi.mock('./review-persona.js', () => ({
   loadReviewPersonaPrompt: vi.fn(async () => 'mock review persona prompt'),
 }));
 
-vi.mock('../services/review-prescan.js', () => ({
+vi.mock('./review-prescan.js', () => ({
   scanDiffForBlockingFindings: vi.fn(async () => ({ findings: [], blocking: false, summary: '' })),
 }));
 

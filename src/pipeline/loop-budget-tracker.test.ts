@@ -21,24 +21,24 @@ beforeEach(() => {
   mockWriteRunReport.mockClear();
 });
 
-vi.mock('../services/github.js', () => ({
+vi.mock('../vcs/github.js', () => ({
   fetchIssues: (...args: unknown[]) => mockFetchIssues(...args),
 }));
 
-vi.mock('../services/pr-context.js', () => ({
+vi.mock('../vcs/pr-context.js', () => ({
   fetchOpenPRsDetailed: (...args: unknown[]) => mockFetchOpenPRsDetailed(...args),
   extractPRFromResult: (...args: unknown[]) => mockExtractPRFromResult(...args),
 }));
 
-vi.mock('../services/prioritize.js', () => ({
+vi.mock('./prioritize.js', () => ({
   prioritizeIssues: (...args: unknown[]) => mockPrioritizeIssues(...args),
 }));
 
-vi.mock('../services/metrics.js', () => ({
+vi.mock('../telemetry/metrics.js', () => ({
   setCurrentCostUsd: vi.fn(),
 }));
 
-vi.mock('../services/shutdown.js', () => ({
+vi.mock('../core/shutdown.js', () => ({
   shutdownRequested: vi.fn().mockReturnValue(false),
 }));
 

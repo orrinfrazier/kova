@@ -19,15 +19,15 @@ const formatCodeChunksMock = vi.fn();
 const logWarnMock = vi.fn();
 const logInfoMock = vi.fn();
 
-vi.mock('../services/reindex.js', () => ({
+vi.mock('../memory/reindex.js', () => ({
   reindexFiles: reindexFilesMock,
 }));
 
-vi.mock('../services/git-diff.js', () => ({
+vi.mock('../vcs/git-diff.js', () => ({
   getChangedFilesSince: getChangedFilesSinceMock,
 }));
 
-vi.mock('../services/memory/code-rest.js', () => ({
+vi.mock('../memory/code-rest.js', () => ({
   queryCodeContext: queryCodeContextMock,
   formatCodeChunks: formatCodeChunksMock,
 }));

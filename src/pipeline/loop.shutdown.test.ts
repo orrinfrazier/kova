@@ -7,7 +7,7 @@ vi.mock('./run-report.js', () => ({
   writeRunReport: vi.fn().mockResolvedValue(undefined),
 }));
 
-vi.mock('../services/github.js', () => ({
+vi.mock('../vcs/github.js', () => ({
   fetchIssues: vi.fn().mockResolvedValue([
     { number: 1, title: 'Issue 1', body: 'body 1', labels: [], url: 'https://example.com/1' },
     { number: 2, title: 'Issue 2', body: 'body 2', labels: [], url: 'https://example.com/2' },
@@ -43,7 +43,7 @@ vi.mock('./fix.js', () => ({
 }));
 
 const { fixLoop } = await import('./loop.js');
-const { installSignalHandlers, removeSignalHandlers, resetShutdown } = await import('../services/shutdown.js');
+const { installSignalHandlers, removeSignalHandlers, resetShutdown } = await import('../core/shutdown.js');
 
 function makeConfig(): RepoConfig {
   return {

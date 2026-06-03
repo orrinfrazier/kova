@@ -5,7 +5,7 @@ import type { KovaConfig } from '../types/index.js';
 
 const mockFetchOpenIssueCount = vi.fn();
 const mockFetchKovaPRs = vi.fn();
-vi.mock('../services/github.js', () => ({
+vi.mock('../vcs/github.js', () => ({
   fetchOpenIssueCount: (...args: unknown[]) => mockFetchOpenIssueCount(...args),
   fetchKovaPRs: (...args: unknown[]) => mockFetchKovaPRs(...args),
 }));

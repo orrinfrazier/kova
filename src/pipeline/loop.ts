@@ -1,17 +1,17 @@
 import { $ } from 'zx';
 import type { RuntimeKind } from '../ai/runtime/index.js';
-import { type EventBus, getDefaultEventBus } from '../services/event-bus/index.js';
-import { fetchIssue, fetchIssues, fetchMilestoneCounts } from '../services/github.js';
-import * as metrics from '../services/metrics.js';
-import { extractPRFromResult, fetchOpenPRsDetailed, type OpenPR } from '../services/pr-context.js';
-import { prioritizeIssues } from '../services/prioritize.js';
-import { shutdownRequested } from '../services/shutdown.js';
+import { shutdownRequested } from '../core/shutdown.js';
+import { type EventBus, getDefaultEventBus } from '../telemetry/event-bus/index.js';
+import * as metrics from '../telemetry/metrics.js';
 import type { Issue, RepoConfig, WaveResult } from '../types/index.js';
 import { log } from '../utils/logger.js';
+import { fetchIssue, fetchIssues, fetchMilestoneCounts } from '../vcs/github.js';
+import { extractPRFromResult, fetchOpenPRsDetailed, type OpenPR } from '../vcs/pr-context.js';
 import { CostAccumulator } from './cost-accumulator.js';
 import { extractFootprint } from './file-footprint.js';
 import { type FixResult, fix } from './fix.js';
 import { buildDependencyTiers, type FixExecutor, runFixesWithConcurrency } from './issue-scheduler.js';
+import { prioritizeIssues } from './prioritize.js';
 import { buildRunReport, printRunReport, writeRunReport } from './run-report.js';
 import type { SharedBudgetTracker } from './shared-budget.js';
 

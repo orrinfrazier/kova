@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { type Run, registerRun } from '../services/run-registry.js';
+import { type Run, registerRun } from '../telemetry/run-registry.js';
 import { formatLsTable, gatherLs, type LsResult } from './ls.js';
 
 const root = resolve(import.meta.dirname, '../..');

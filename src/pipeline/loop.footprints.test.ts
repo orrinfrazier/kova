@@ -11,7 +11,7 @@ vi.mock('./run-report.js', () => ({
   writeRunReport: vi.fn().mockResolvedValue(undefined),
 }));
 
-vi.mock('../services/github.js', () => ({
+vi.mock('../vcs/github.js', () => ({
   fetchIssues: vi.fn().mockResolvedValue([
     {
       number: 100,
@@ -39,7 +39,7 @@ vi.mock('../services/github.js', () => ({
   createPR: vi.fn(),
 }));
 
-vi.mock('../services/pr-context.js', () => ({
+vi.mock('../vcs/pr-context.js', () => ({
   fetchOpenPRsDetailed: vi.fn().mockResolvedValue([]),
   extractPRFromResult: vi.fn().mockReturnValue(null),
 }));

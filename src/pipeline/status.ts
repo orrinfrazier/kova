@@ -2,10 +2,10 @@
 
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { fetchKovaPRs, fetchOpenIssueCount } from '../services/github.js';
-import type { QueueStatus } from '../services/priority-queue.js';
 import type { KovaConfig } from '../types/index.js';
 import { log } from '../utils/logger.js';
+import { fetchKovaPRs, fetchOpenIssueCount } from '../vcs/github.js';
+import type { QueueStatus } from './priority-queue.js';
 
 export interface RepoStatus {
   name: string;

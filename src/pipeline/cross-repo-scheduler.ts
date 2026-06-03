@@ -9,8 +9,8 @@
 // `runAuto` calls — the unit of scheduling is the repo, not an issue. The
 // per-issue tier logic still runs inside each repo's `fixLoop`.
 
-import { parseCrossRepoDependencies } from '../services/prioritize.js';
 import type { Issue } from '../types/index.js';
+import { parseCrossRepoDependencies } from './prioritize.js';
 
 /** One repo's slice in a cross-repo tier. */
 export interface RepoTierEntry {

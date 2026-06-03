@@ -6,17 +6,12 @@
 
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { chunkFile } from '../services/chunker.js';
-import { type CodegraphHandle, indexSource, openCodegraph } from '../services/codegraph/index.js';
-import {
-  getChangedFilesSince,
-  getCurrentHeadSha,
-  getLastIndexedSha,
-  saveLastIndexedSha,
-} from '../services/git-diff.js';
-import { upsertChunks } from '../services/memory/code-rest.js';
+import { type CodegraphHandle, indexSource, openCodegraph } from '../codegraph/index.js';
+import { chunkFile } from '../memory/chunker.js';
+import { upsertChunks } from '../memory/code-rest.js';
 import type { VectorDBConfig } from '../types/config.js';
 import { log } from '../utils/logger.js';
+import { getChangedFilesSince, getCurrentHeadSha, getLastIndexedSha, saveLastIndexedSha } from '../vcs/git-diff.js';
 
 export interface IndexOptions {
   repoPath: string;

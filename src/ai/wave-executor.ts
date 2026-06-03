@@ -11,9 +11,9 @@
 // OpenAI Assistants, …) plug in via the same `AgentRuntimeFactory` seam.
 
 import type { z } from 'zod';
-import type { EventBus } from '../services/event-bus/bus.js';
-import type { EventWaveName } from '../services/event-bus/schema.js';
-import { createToolCallCounter, type ToolCallCounts } from '../services/tool-call-counter.js';
+import type { EventBus } from '../telemetry/event-bus/bus.js';
+import type { EventWaveName } from '../telemetry/event-bus/schema.js';
+import { createToolCallCounter, type ToolCallCounts } from '../telemetry/tool-call-counter.js';
 import type { WaveHandoff, WaveModelConfig, WaveName } from '../types/index.js';
 import { log } from '../utils/logger.js';
 import { createDestructiveEditGuard, type DestructiveEditGuardOptions } from './destructive-edit-guard.js';

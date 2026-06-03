@@ -13,7 +13,7 @@ const mockFetchIssues = vi.fn().mockResolvedValue([
 ]);
 const mockFetchMilestoneCounts = vi.fn().mockResolvedValue({ open: 0, closed: 0 });
 
-vi.mock('../services/github.js', () => ({
+vi.mock('../vcs/github.js', () => ({
   fetchIssues: (...args: unknown[]) => mockFetchIssues(...args),
   fetchIssue: vi.fn(),
   fetchMilestoneCounts: (...args: unknown[]) => mockFetchMilestoneCounts(...args),

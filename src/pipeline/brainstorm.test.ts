@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { BrainstormHistory, DiminishingReturnsReport } from '../services/brainstorm-history.js';
 import type { RepoConfig, WaveHandoff } from '../types/index.js';
+import type { BrainstormHistory, DiminishingReturnsReport } from './brainstorm-history.js';
 
 // --- Mock spawnWaveAgent ---
 
@@ -25,7 +25,7 @@ const mockFormatCrossRepoContext = vi.fn();
 const mockFetchSameRepoIssues = vi.fn();
 const mockFormatSameRepoContext = vi.fn();
 const mockClassifyProposalsAgainstOpenIssues = vi.fn();
-vi.mock('../services/cross-repo-issues.js', () => ({
+vi.mock('./cross-repo-issues.js', () => ({
   fetchCrossRepoIssues: (...args: unknown[]) => mockFetchCrossRepoIssues(...args),
   formatCrossRepoContext: (...args: unknown[]) => mockFormatCrossRepoContext(...args),
   fetchSameRepoIssues: (...args: unknown[]) => mockFetchSameRepoIssues(...args),
@@ -38,7 +38,7 @@ vi.mock('../services/cross-repo-issues.js', () => ({
 const mockLoadHistory = vi.fn();
 const mockAppendCycle = vi.fn();
 const mockDetectDiminishingReturns = vi.fn();
-vi.mock('../services/brainstorm-history.js', () => ({
+vi.mock('./brainstorm-history.js', () => ({
   loadHistory: (...args: unknown[]) => mockLoadHistory(...args),
   appendCycle: (...args: unknown[]) => mockAppendCycle(...args),
   detectDiminishingReturns: (...args: unknown[]) => mockDetectDiminishingReturns(...args),

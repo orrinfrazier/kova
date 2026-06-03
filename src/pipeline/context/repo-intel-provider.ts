@@ -5,7 +5,7 @@
 // code) keyed by issue title+body. Gated by `config.repo_intel?.enabled`
 // AND the presence of an `owner/repo` slug.
 
-import { formatRepoContext, queryRepoContext } from '../../services/repo-intel.js';
+import { formatRepoContext, queryRepoContext } from '../../memory/repo-intel.js';
 import type { ContextProvider, ContextProviderInput } from './types.js';
 
 export const repoIntelProvider: ContextProvider = {

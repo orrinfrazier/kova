@@ -15,8 +15,8 @@
 import http from 'node:http';
 import https from 'node:https';
 import { URL } from 'node:url';
-import type { EventBus } from '../services/event-bus/bus.js';
-import type { EventWaveName, KovaEvent } from '../services/event-bus/schema.js';
+import type { EventBus } from '../telemetry/event-bus/bus.js';
+import type { EventWaveName, KovaEvent } from '../telemetry/event-bus/schema.js';
 
 const VALID_WAVES: ReadonlySet<string> = new Set<EventWaveName>([
   'assess',

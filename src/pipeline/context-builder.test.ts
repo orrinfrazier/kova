@@ -22,7 +22,7 @@ vi.mock('./prompts.js', () => ({
   resolvePromptsDir: vi.fn(() => '/tmp/prompts'),
 }));
 
-vi.mock('../services/prompt-versions.js', () => ({
+vi.mock('../memory/prompt-versions.js', () => ({
   hashPrompt: vi.fn(() => 'hash-xyz'),
   detectPromptChange: vi.fn(async () => null),
   recordPromptVersion: vi.fn(async () => {}),
@@ -48,7 +48,7 @@ vi.mock('../sandbox/dispatch.js', () => ({
   dispatchSpawnWave: (...args: unknown[]) => dispatchMock(...args),
 }));
 
-vi.mock('../services/live-fix-registry.js', () => ({
+vi.mock('../telemetry/live-fix-registry.js', () => ({
   buildLiveHandleSink: vi.fn(() => undefined),
 }));
 

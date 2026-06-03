@@ -22,7 +22,7 @@ vi.mock('./run-report.js', () => ({
 
 const fetchIssuesMock = vi.fn();
 
-vi.mock('../services/github.js', () => ({
+vi.mock('../vcs/github.js', () => ({
   fetchIssues: (...args: unknown[]) => fetchIssuesMock(...args),
   fetchIssue: vi.fn(),
   fetchMilestoneCounts: vi.fn().mockResolvedValue({ open: 0, closed: 0 }),
@@ -31,7 +31,7 @@ vi.mock('../services/github.js', () => ({
   hasExistingWork: vi.fn().mockResolvedValue(false),
 }));
 
-vi.mock('../services/pr-context.js', () => ({
+vi.mock('../vcs/pr-context.js', () => ({
   fetchOpenPRsDetailed: vi.fn().mockResolvedValue([]),
   extractPRFromResult: vi.fn().mockReturnValue(undefined),
 }));
@@ -55,7 +55,7 @@ vi.mock('./fix.js', () => ({
 }));
 
 const { fixLoop } = await import('./loop.js');
-const { resetShutdown } = await import('../services/shutdown.js');
+const { resetShutdown } = await import('../core/shutdown.js');
 
 function makeIssue(n: number): Issue {
   return {

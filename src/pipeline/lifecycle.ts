@@ -5,8 +5,8 @@
 // helper that emits the terminal event + mirrors status into the registry.
 // fix.ts threads the result of `setupFixLifecycle()` through its waves.
 
-import type { EventBus } from '../services/event-bus/index.js';
-import { registerRun, updateRun } from '../services/run-registry.js';
+import type { EventBus } from '../telemetry/event-bus/index.js';
+import { registerRun, updateRun } from '../telemetry/run-registry.js';
 import type { Logger } from '../utils/logger.js';
 
 export interface SetupFixLifecycleInput {
