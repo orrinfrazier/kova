@@ -16,6 +16,7 @@
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "test:watch": "vitest",
+    "test:integration:local": "KOVA_RUN_LOCAL_MODEL_TESTS=1 vitest run src/integration",
     "bench:build": "tsc -p tsconfig.bench.json",
     "bench": "npm run bench:build && node dist-bench/bench/index.js",
     "bench:dry": "npm run bench:build && node dist-bench/bench/index.js --dry-run"
