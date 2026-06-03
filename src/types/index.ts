@@ -37,6 +37,7 @@ export type {
   WaveModelOverride,
   WaveName,
   WaveResult,
+  WaveResultConsensus,
   WaveSingleModelConfig,
 } from './config.js';
 export {
