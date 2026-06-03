@@ -52,6 +52,27 @@ npm run bench -- --fixtures /path/to/other/bench --out /tmp/result.jsonl
 The harness writes one JSON line per fixture to
 `bench/results/run-<timestamp>.jsonl` and prints a summary to stdout.
 
+## Default `RepoConfig`
+
+Fixture seed repos do **not** ship a `repos.yaml`. The harness builds a
+defaulted in-memory `RepoConfig` via `buildDefaultBenchConfig(workdir)`
+(see `bench/fixApply.ts`) — it fills in `rules`, `model`, and
+`isolation` defaults from `RepoConfigSchema` without touching the
+filesystem. No `~/.kova/repos.yaml` is required.
+
+Because the default config does not configure any local provider, the
+real `fix()` path falls back to the Anthropic API. Required env vars:
+
+- **`ANTHROPIC_API_KEY`** — required for `npm run bench` (the real-fix
+  path). Not required for `npm run bench:dry` (uses a no-op fixApply).
+- **`GH_TOKEN` / `GITHUB_TOKEN`** — NOT required. The harness never
+  hits the GitHub API — fixtures are local files.
+
+To pin the bench to a local model provider (e.g. Ollama), pass a
+`configOverride` to `createRealFixApply(repoName, override)` from a
+custom entrypoint — the default CLI does not currently expose this
+flag, see `bench/index.ts`.
+
 ## Isolation contract
 
 - Each fixture run mints a fresh temp directory under `os.tmpdir()`
