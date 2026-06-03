@@ -1,5 +1,12 @@
 export { COMPACTABLE_TOOLS, createTransformContext } from './context-transform.js';
-export { classifyError, type ErrorClassification, isRetryable, isSpendingCapBehavior, KovaError } from './errors.js';
+export {
+  classifyError,
+  type ErrorClassification,
+  isRetryable,
+  isSpendingCapBehavior,
+  KovaError,
+  type KovaErrorOptions,
+} from './errors.js';
 export {
   getMCPToolsForWave,
   loadMCPServersFromSettings,
@@ -73,6 +80,7 @@ export {
   type ToolResultMessage as RuntimeToolResultMessage,
   type UserMessage as RuntimeUserMessage,
 } from './runtime/index.js';
+export type { RuntimeError, RuntimeErrorAdapter } from './runtime-error.js';
 export {
   createAfterToolCallHook,
   DEFAULT_HEAD_TOKENS,
@@ -92,6 +100,7 @@ export {
   resolveApiKey,
   type SpawnWaveAgentConfig,
   type SpawnWithFallbackConfig,
+  shouldRetryWaveError,
   spawnWaveAgent,
   spawnWaveAgentWithFallback,
   type WaveExecutionResult,
