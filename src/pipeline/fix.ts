@@ -487,13 +487,16 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       });
       sandboxContainerId = handle.containerId;
       sandboxContainerName = handle.containerName;
-      // For non-docker backends the wave-dispatch path is not yet routed through the backend
-      // interface (dispatch.ts still targets the docker-exec contract). The Daytona backend's
-      // exec endpoint mirrors that shape, but until dispatch.ts is generalized in a follow-up,
-      // non-docker backends use the same dispatch routing — they expose a compatible
-      // containerName/repoPath surface so the docker-exec wire path still works against them.
-      sandboxContext = { containerName: handle.containerName, repoPath: workDir };
-      flog.info(`[sandbox] Backend '${backendName}' started: ${handle.containerName}`);
+      // Non-docker backends own wave dispatch through `SandboxBackend.execWave()` — issue #379
+      // generalized dispatch.ts to prefer `sandbox.backend` over the legacy docker-exec path
+      // when present. The Docker branch above continues to pass only `containerName`+`repoPath`
+      // so its behavior is bit-for-bit identical to the pre-extraction direct calls.
+      sandboxContext = {
+        containerName: handle.containerName,
+        repoPath: workDir,
+        backend: sandboxBackend,
+      };
+      flog.info(`[sandbox] Backend '${backendName}' started: ${handle.containerName} (dispatch via backend.execWave)`);
     }
   }
 
