@@ -74,7 +74,14 @@ export {
 export type { WaveHandoff } from './handoffs.js';
 export {
   loadAllHandoffs,
+  loadAssessHandoff,
+  loadBrainstormHandoff,
   loadHandoff,
+  loadImplHandoff,
+  loadQualityHandoff,
+  loadReviewHandoff,
+  loadSpecHandoff,
+  loadTestHandoff,
   StructuredOutputMetricsSchema,
   saveHandoff,
   WaveHandoffSchema,
