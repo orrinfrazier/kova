@@ -2,7 +2,8 @@
 // Uses spawnWaveAgent() for standalone waves, runTILoop() for test+impl,
 // and runReviewLoop() for review. Handoffs persist after every wave.
 
-import { join as joinPath } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { isAbsolute, join as joinPath } from 'node:path';
 import { z } from 'zod';
 import { $ } from 'zx';
 import {
@@ -123,6 +124,7 @@ import {
   saveHandoff,
 } from '../types/index.js';
 import { closeFileLogger, initFileLogger, type Logger, log } from '../utils/logger.js';
+import { resolveCallPaths } from './call-path-context.js';
 import { buildWaveContext } from './context.js';
 import { refreshCodebaseContext } from './context-refresh.js';
 import { buildCostReport, printRunSummary, writeCostReport } from './cost-report.js';
@@ -1084,6 +1086,48 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       );
     }
 
+    // Issue #275 — Framework-resolved call paths: scan the issue's surface-area
+    // files for HTTP route bindings (`app.get('/x', handler)`) and resolve each
+    // handler symbol against the same codegraph used above. Sits BELOW
+    // codegraphContext (symbol-level facts already most precise) and ABOVE
+    // codebaseContext (framework-resolved beats fuzzy vector neighbors).
+    //
+    // Graceful degradation contract (mirrors #273):
+    //  - No assess artifact / no surface_area files -> field omitted, waves proceed.
+    //  - No route bindings detected in any file -> field omitted, waves proceed.
+    //  - No handler resolves in the graph -> field omitted, waves proceed.
+    //  - Any unexpected error -> warn + field omitted, waves proceed.
+    let callPathContext: string | undefined;
+    try {
+      const callPathAssess = state.waveResults.assess?.artifact as AssessResult | undefined;
+      const assessFiles = callPathAssess?.surface_area.files ?? [];
+      if (assessFiles.length > 0) {
+        const dbPath = joinPath(repoPath, '.kova', 'codegraph.db');
+        const cg = openCodegraph(dbPath);
+        try {
+          const formatted = resolveCallPaths({
+            graph: cg,
+            files: assessFiles,
+            readSource: (relPath) => {
+              const abs = isAbsolute(relPath) ? relPath : joinPath(repoPath, relPath);
+              return readFileSync(abs, 'utf8');
+            },
+          });
+          if (formatted.length > 0) {
+            callPathContext = formatted;
+            const routeCount = (formatted.match(/^### /gm) ?? []).length;
+            flog.info(`[call-path-context] injected (${routeCount} routes, ${formatted.length} chars)`);
+          }
+        } finally {
+          cg.close();
+        }
+      }
+    } catch (err) {
+      flog.warn(
+        `[call-path-context] degraded — proceeding without call-path context: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
     // repo-intel: query for similar implementations (before spec wave)
     let repoSearchText: string | undefined;
     if (config.repo_intel?.enabled && ownerRepo) {
@@ -1121,6 +1165,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           ...(failedEpisodicContext != null && { episodicContext: failedEpisodicContext }),
           ...(playbookContext != null && { playbookContext }),
           ...(codegraphContext != null && { codegraphContext }),
+          ...(callPathContext != null && { callPathContext }),
           ...(codebaseContext != null && { codebaseContext }),
           ...(repoSearchText != null && { repoSearchText }),
           ...(patternContext != null && { patternContext }),
@@ -1209,6 +1254,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           prContext,
           ...(failedEpisodicContext != null && { episodicContext: failedEpisodicContext }),
           ...(codegraphContext != null && { codegraphContext }),
+          ...(callPathContext != null && { callPathContext }),
           ...(codebaseContext != null && { codebaseContext }),
           ...(repoSearchText != null && { repoSearchText }),
         });
@@ -1314,6 +1360,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           prContext,
           ...(failedEpisodicContext != null && { episodicContext: failedEpisodicContext }),
           ...(codegraphContext != null && { codegraphContext }),
+          ...(callPathContext != null && { callPathContext }),
           ...(codebaseContext != null && { codebaseContext }),
           ...(repoSearchText != null && { repoSearchText }),
         });
@@ -1385,6 +1432,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         prContext,
         codebaseContext,
         codegraphContext,
+        callPathContext,
         projectContext,
         ...(testRunner != null && { testRunner }),
         ...(serialFallback && { maxConcurrent: 1 }),
@@ -1448,6 +1496,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
             prContext,
             ...(failedEpisodicContext != null && { episodicContext: failedEpisodicContext }),
             ...(codegraphContext != null && { codegraphContext }),
+            ...(callPathContext != null && { callPathContext }),
             ...(codebaseContext != null && { codebaseContext }),
             ...(repoSearchText != null && { repoSearchText }),
             escalationHint: respecContext,
@@ -1477,6 +1526,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           prContext,
           codebaseContext,
           codegraphContext,
+          callPathContext,
           projectContext,
           ...(testRunner != null && { testRunner }),
           ...(sandboxContext != null && { sandbox: sandboxContext }),
@@ -1690,6 +1740,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
             prContext,
             codebaseContext: [codebaseContext, conflictHint].filter(Boolean).join('\n\n'),
             codegraphContext,
+            callPathContext,
             projectContext,
             ...(testRunner != null && { testRunner }),
             ...(sandboxContext != null && { sandbox: sandboxContext }),
