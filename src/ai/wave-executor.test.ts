@@ -1250,66 +1250,11 @@ describe('context monitoring', () => {
     expect(mockAbort).not.toHaveBeenCalled();
   });
 
-  it('sets transformContext at 80% context usage without aborting', async () => {
-    const { spawnWaveAgent } = await import('./wave-executor.js');
-
-    let subscribeCb: ((event: unknown) => void) | undefined;
-    let agentInstance: Record<string, unknown> | undefined;
-
-    mockSubscribe.mockImplementation((cb: (event: unknown) => void) => {
-      subscribeCb = cb;
-      return vi.fn();
-    });
-
-    // Capture the agent instance to check transformContext assignment
-    const { Agent: MockAgent } = await import('@earendil-works/pi-agent-core');
-    (MockAgent as unknown as ReturnType<typeof vi.fn>).mockImplementation(function (this: Record<string, unknown>) {
-      Object.assign(this, {
-        prompt: mockPrompt,
-        abort: mockAbort,
-        steer: mockSteer,
-        subscribe: mockSubscribe,
-        transformContext: undefined,
-        get state() {
-          return mockAgentState;
-        },
-      });
-      agentInstance = this;
-    });
-
-    mockPrompt.mockImplementation(async () => {
-      if (subscribeCb) {
-        // 82% of 200000 = 164000 — above 80% trim threshold, below 90% abort
-        subscribeCb({
-          type: 'turn_end',
-          message: {
-            role: 'assistant',
-            content: [{ type: 'text', text: 'working...' }],
-            usage: { input: 164000, output: 1000, totalTokens: 165000, cost: { total: 0.01 } },
-            stopReason: 'toolUse',
-          },
-          toolResults: [],
-        });
-      }
-    });
-
-    const result = await spawnWaveAgent({
-      wave: 'impl',
-      model: 'claude-sonnet-4-6',
-      tools: [],
-      systemPrompt: 'Prompt.',
-      handoffContext: '',
-      userMessage: 'Message.',
-      cwd: '/tmp/test',
-    });
-
-    expect(result.wave).toBe('impl');
-    expect(mockAbort).not.toHaveBeenCalled();
-    // transformContext should have been set on the agent
-    expect(agentInstance?.transformContext).toBeTypeOf('function');
-    // steer should also have been called (70% < 82%)
-    expect(mockSteer).toHaveBeenCalled();
-  });
+  // Note: issue #296 — the prior "sets transformContext at 80% context usage"
+  // test asserted Tier-2 lossy trim was installed. That hook (and the function
+  // it pointed to) is gone. The replacement is `wave-executor.no-trim.test.ts`,
+  // which pins the new behavior: at 82% no transformContext is installed, no
+  // abort fires, and Tier-1 steer is the only action.
 
   it('does not steer or trim below 70% usage', async () => {
     const { spawnWaveAgent } = await import('./wave-executor.js');
@@ -1369,7 +1314,10 @@ describe('context monitoring', () => {
     expect(agentInstance?.transformContext).toBeUndefined();
   });
 
-  it('does not abort at 80% — only trims', async () => {
+  it('does not abort at 85% — below the 90% Tier-3 abort threshold', async () => {
+    // Issue #296 — the old 80% "trim" branch is gone; 80-89% now flows through
+    // Tier-1 steer only (asserted in wave-executor.no-trim.test.ts). Here we
+    // pin that no abort fires anywhere in the 70-89% band.
     const { spawnWaveAgent } = await import('./wave-executor.js');
 
     let subscribeCb: ((event: unknown) => void) | undefined;
@@ -1380,7 +1328,7 @@ describe('context monitoring', () => {
 
     mockPrompt.mockImplementation(async () => {
       if (subscribeCb) {
-        // 85% of 200000 = 170000 — above 80% trim, below 90% abort
+        // 85% of 200000 = 170000 — below 90% abort
         subscribeCb({
           type: 'turn_end',
           message: {
@@ -1394,7 +1342,6 @@ describe('context monitoring', () => {
       }
     });
 
-    // Should NOT throw — 85% is in the trim zone, not the abort zone
     const result = await spawnWaveAgent({
       wave: 'impl',
       model: 'claude-sonnet-4-6',
