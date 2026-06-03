@@ -143,6 +143,26 @@ export interface SandboxWaveInput {
   thinkingLevel?: string | undefined;
   fallbackModel?: string | undefined;
   outputSchemaName?: string | undefined;
+  /**
+   * Issue #306 — host-resolved MCP server config forwarded into the container.
+   * The in-container runner reconstructs and starts these servers on
+   * `/workspace` so codegraph (and other path-sensitive MCP servers) operate
+   * on the bind-mounted worktree without any host round-trip. Required because
+   * `restrict_network:true` containers have `--network none` and cannot proxy
+   * MCP traffic to the host. Omit/undefined → no MCP startup (current
+   * behavior preserved for callers that have not opted in).
+   */
+  mcpServers?:
+    | Record<string, { command: string; args?: string[] | undefined; env?: Record<string, string> | undefined }>
+    | undefined;
+  /**
+   * Issue #306 — per-wave MCP server allowlist override. Same shape as the
+   * `mcp.waves` block in repos.yaml; forwarded so the runner-side
+   * `getMCPToolsForWave` call sees the same wave-routing rules the host
+   * orchestrator would have applied. Omit → runner falls back to
+   * `WAVE_MCP_DEFAULTS` from `src/ai/mcp.ts`.
+   */
+  mcpWaveOverrides?: Partial<Record<string, string[]>> | undefined;
 }
 
 /** Execute an Agent SDK wave inside the sandbox container via docker exec. */
