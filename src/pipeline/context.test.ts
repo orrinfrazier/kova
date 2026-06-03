@@ -424,6 +424,103 @@ describe('buildWaveContext', () => {
     });
   });
 
+  // ---- Issue #275 — callPathContext injection ------------------------------
+
+  describe('framework call-path context (issue #275)', () => {
+    const callPathContext =
+      '## Framework call paths\n\n### GET /users → listUsers\n`src/api/users.ts:L42-L60` — function listUsers(req, res)\n\n**Callers:** registerRoutes (src/api/index.ts:L8)\n**Callees:** queryUsers (src/services/users.ts:L12)\n';
+    const codegraphContext =
+      '## Code graph context\n\n### formatCodeChunks (function)\n`src/services/vectordb.ts:L76-L89` — function formatCodeChunks(chunks)\n';
+    const codebaseContext = '## Relevant code from the codebase\n\n### src/services/vectordb.ts\n```\n// chunk\n```';
+
+    it('injects call-path context into spec wave', () => {
+      const handoffs: Partial<Record<string, WaveResult>> = {
+        assess: makeWaveResult('assess', assessArtifact),
+      };
+      const ctx = buildWaveContext('spec', makeIssue(), handoffs, { callPathContext });
+      expect(ctx).toContain('## Framework call paths');
+      expect(ctx).toContain('GET /users');
+    });
+
+    it('injects call-path context into impl wave', () => {
+      const handoffs: Partial<Record<string, WaveResult>> = {
+        spec: makeWaveResult('spec', specArtifact),
+      };
+      const ctx = buildWaveContext('impl', makeIssue(), handoffs, { callPathContext });
+      expect(ctx).toContain('## Framework call paths');
+    });
+
+    it('orders sections codegraph -> call-path -> codebase in spec wave', () => {
+      const handoffs: Partial<Record<string, WaveResult>> = {
+        assess: makeWaveResult('assess', assessArtifact),
+      };
+      const ctx = buildWaveContext('spec', makeIssue(), handoffs, {
+        callPathContext,
+        codegraphContext,
+        codebaseContext,
+      });
+      const codegraphIdx = ctx.indexOf('## Code graph context');
+      const callPathIdx = ctx.indexOf('## Framework call paths');
+      const codebaseIdx = ctx.indexOf('## Relevant code from the codebase');
+      expect(codegraphIdx).toBeGreaterThanOrEqual(0);
+      expect(callPathIdx).toBeGreaterThanOrEqual(0);
+      expect(codebaseIdx).toBeGreaterThanOrEqual(0);
+      expect(codegraphIdx).toBeLessThan(callPathIdx);
+      expect(callPathIdx).toBeLessThan(codebaseIdx);
+    });
+
+    it('orders sections codegraph -> call-path -> codebase in impl wave', () => {
+      const handoffs: Partial<Record<string, WaveResult>> = {
+        spec: makeWaveResult('spec', specArtifact),
+      };
+      const ctx = buildWaveContext('impl', makeIssue(), handoffs, {
+        callPathContext,
+        codegraphContext,
+        codebaseContext,
+      });
+      const codegraphIdx = ctx.indexOf('## Code graph context');
+      const callPathIdx = ctx.indexOf('## Framework call paths');
+      const codebaseIdx = ctx.indexOf('## Relevant code from the codebase');
+      expect(codegraphIdx).toBeLessThan(callPathIdx);
+      expect(callPathIdx).toBeLessThan(codebaseIdx);
+    });
+
+    it('omits call-path section when not provided', () => {
+      const handoffs: Partial<Record<string, WaveResult>> = {
+        assess: makeWaveResult('assess', assessArtifact),
+      };
+      const ctx = buildWaveContext('spec', makeIssue(), handoffs);
+      expect(ctx).not.toContain('## Framework call paths');
+    });
+
+    it('does NOT inject call-path context into assess wave', () => {
+      const ctx = buildWaveContext('assess', makeIssue(), {}, { callPathContext });
+      expect(ctx).not.toContain('## Framework call paths');
+    });
+
+    it('does NOT inject call-path context into test wave', () => {
+      const handoffs: Partial<Record<string, WaveResult>> = {
+        spec: makeWaveResult('spec', specArtifact),
+      };
+      const ctx = buildWaveContext('test', makeIssue(), handoffs, { callPathContext });
+      expect(ctx).not.toContain('## Framework call paths');
+    });
+
+    it('does NOT inject call-path context into quality wave', () => {
+      const ctx = buildWaveContext('quality', makeIssue(), {}, { callPathContext });
+      expect(ctx).not.toContain('## Framework call paths');
+    });
+
+    it('does NOT inject call-path context into review wave', () => {
+      const handoffs: Partial<Record<string, WaveResult>> = {
+        spec: makeWaveResult('spec', specArtifact),
+        quality: makeWaveResult('quality', qualityArtifact),
+      };
+      const ctx = buildWaveContext('review', makeIssue(), handoffs, { callPathContext });
+      expect(ctx).not.toContain('## Framework call paths');
+    });
+  });
+
   describe('episodic context (past learnings)', () => {
     const episodicContext =
       '## Learnings from similar past issues\n\n### #10: Fix token expiry handling\n- **Approach:** Added TTL check\n- **Outcome:** success\n- **Learning:** Token refresh must happen before the API call';
