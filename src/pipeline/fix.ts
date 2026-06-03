@@ -137,9 +137,11 @@ import {
 } from './loops.js';
 import { applyPipelineMode, autoSelectMode, describeAutoSelection, MODE_EXTRA_IMPL_ATTEMPTS } from './mode.js';
 import { loadPrompt, resolvePromptsDir } from './prompts.js';
+import { formatRegressionSurface } from './regression-surface.js';
 import { buildRuntimeFactory, resolveRuntimeKind } from './runtime-select.js';
 import { loadWaveSkills } from './skills-loader.js';
 import {
+  detectDependencyOverlaps,
   formatOverlapFeedback,
   formatPendingPRConflictFeedback,
   validatePieceFileOwnership,
@@ -1337,6 +1339,44 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           }
         }
       }
+
+      // Issue #276 — dependency-overlap gate. Even when piece file sets are
+      // fully disjoint, the codegraph may reveal cross-piece call/import edges
+      // (e.g. piece A defines `exportedFn` in src/a.ts, piece B calls it from
+      // src/b.ts). Running both concurrently risks rename/signature collision.
+      // We probe the graph and, if any cross-piece edges exist, force serial
+      // execution. Graph unavailable -> falls back to file-overlap-only
+      // behavior (this block is a no-op).
+      const postValidationSpec = state.waveResults.spec?.artifact as SpecResult | undefined;
+      if (postValidationSpec?.pieces && postValidationSpec.pieces.length > 1 && !serialFallback) {
+        try {
+          const dbPath = joinPath(repoPath, '.kova', 'codegraph.db');
+          const cg = openCodegraph(dbPath);
+          try {
+            const depOverlaps = detectDependencyOverlaps(postValidationSpec.pieces, {
+              listFileSymbols: (fp) => cg.listFileSymbols(fp),
+              getCallers: (id) => cg.getCallers(id),
+            });
+            if (depOverlaps.length > 0) {
+              const sampleNames = depOverlaps
+                .slice(0, 3)
+                .map((o) => `${o.sourcePieceName}->${o.dependentPieceName}(${o.symbolName})`)
+                .join(', ');
+              log.warn(
+                `[fix] Dependency-overlap detected (${depOverlaps.length} cross-piece edge(s): ${sampleNames}) — forcing serial execution`,
+              );
+              serialFallback = true;
+            }
+          } finally {
+            cg.close();
+          }
+        } catch (err) {
+          // Graceful fallback: codegraph missing/unreachable — keep existing
+          // file-overlap-only behavior. Logged at debug to avoid noise on the
+          // common "no codegraph indexed" path.
+          log.debug(`[fix] dependency-overlap probe degraded: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
     }
 
     // Gate: if spec produced no pieces OR fell back to the raw-string path,
@@ -1643,6 +1683,42 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         }
       }
 
+      // Issue #276 — compute regression-surface context from the codegraph.
+      // For each file changed in the worktree, list dependents (callers +
+      // importers) so the reviewer can verify behavioral consistency at each
+      // dependent. Graceful: any failure leaves context undefined and the
+      // review wave proceeds with the existing inputs.
+      let regressionSurfaceContext: string | undefined;
+      try {
+        const changedFiles = await getChangedFiles(workDir);
+        if (changedFiles.length > 0) {
+          const dbPath = joinPath(repoPath, '.kova', 'codegraph.db');
+          const cg = openCodegraph(dbPath);
+          try {
+            const formatted = formatRegressionSurface({
+              lookup: {
+                listFileSymbols: (fp) => cg.listFileSymbols(fp),
+                getCallers: (id) => cg.getCallers(id),
+                getFileDependents: (fp) => cg.getFileDependents(fp),
+              },
+              changedFiles,
+            });
+            if (formatted.length > 0) {
+              regressionSurfaceContext = formatted;
+              flog.info(
+                `[regression-surface] injected (${changedFiles.length} changed files, ${formatted.length} chars)`,
+              );
+            }
+          } finally {
+            cg.close();
+          }
+        }
+      } catch (err) {
+        flog.warn(
+          `[regression-surface] degraded — proceeding without surface context: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+
       const reviewLoopResult = await runReviewLoop({
         issue,
         workDir,
@@ -1651,6 +1727,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         prContext,
         projectContext,
         ...(reviewFeedbackContext != null && { reviewFeedbackContext }),
+        ...(regressionSurfaceContext != null && { regressionSurfaceContext }),
         ...(testRunner != null && { testRunner }),
         playwright: playwrightOption,
         ...(sandboxContext != null && { sandbox: sandboxContext }),
@@ -1701,7 +1778,61 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       // Pre-ship conflict detection via dry-run merge
       const specArtifactForShip = state.waveResults.spec?.artifact as SpecResult | undefined;
       const specFiles = specArtifactForShip?.pieces?.flatMap((p) => p.files) ?? [];
-      const conflictCheck = await checkForConflicts(workDir, specFiles);
+
+      // Issue #276 — wire the codegraph into checkForConflicts so a renamed
+      // export with a live dependent but no textual merge conflict is still
+      // flagged. Graceful: if .kova/codegraph.db is missing/unreadable we
+      // pass no lookup and conflict-check behaves exactly as before.
+      let conflictDepLookup:
+        | {
+            listFileSymbols: (fp: string) => { id: string; name: string; filePath: string }[];
+            getFileDependents: (fp: string) => string[];
+          }
+        | undefined;
+      let conflictCgHandle: ReturnType<typeof openCodegraph> | undefined;
+      let conflictChangedFiles: string[] | undefined;
+      try {
+        // Files changed in the branch (post-commits + uncommitted) vs base.
+        // Use `diff --name-only <base>...HEAD` so committed wave changes are
+        // included; append uncommitted modified/untracked from getChangedFiles.
+        const defaultBranch = await detectDefaultBranch(workDir);
+        const committedDiff = await $`git -C ${workDir} diff --name-only origin/${defaultBranch}...HEAD`.nothrow();
+        const committed = committedDiff.exitCode === 0 ? committedDiff.stdout.trim().split('\n').filter(Boolean) : [];
+        const uncommitted = await getChangedFiles(workDir);
+        conflictChangedFiles = [...new Set([...committed, ...uncommitted])];
+
+        if (conflictChangedFiles.length > 0) {
+          const dbPath = joinPath(repoPath, '.kova', 'codegraph.db');
+          const cg = openCodegraph(dbPath);
+          conflictCgHandle = cg;
+          conflictDepLookup = {
+            listFileSymbols: (fp) => cg.listFileSymbols(fp),
+            getFileDependents: (fp) => cg.getFileDependents(fp),
+          };
+        }
+      } catch (err) {
+        flog.debug(`[conflict-check] dependency wiring degraded: ${err instanceof Error ? err.message : String(err)}`);
+        conflictDepLookup = undefined;
+      }
+
+      const conflictCheck = await checkForConflicts(
+        workDir,
+        specFiles,
+        conflictDepLookup && conflictChangedFiles
+          ? { dependencyLookup: conflictDepLookup, changedFiles: conflictChangedFiles }
+          : undefined,
+      );
+      conflictCgHandle?.close();
+
+      if (conflictCheck.dependencyOverlaps.length > 0) {
+        const sample = conflictCheck.dependencyOverlaps
+          .slice(0, 3)
+          .map((d) => `${d.sourceFile}->${d.dependentFile}`)
+          .join(', ');
+        flog.warn(
+          `[conflict-check] dependency-overlap surfaced (${conflictCheck.dependencyOverlaps.length} edge(s): ${sample}) — review the dependents before merging`,
+        );
+      }
 
       if (conflictCheck.hasConflicts) {
         metrics.recordConflictDetected();

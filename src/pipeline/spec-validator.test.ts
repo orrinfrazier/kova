@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
+import type { SymbolNode } from '../types/codegraph.js';
 import type { SpecPiece } from '../types/index.js';
 import {
+  type DependencyOverlapLookup,
+  detectDependencyOverlaps,
+  formatDependencyOverlapFeedback,
   formatOverlapFeedback,
   formatPendingPRConflictFeedback,
   validatePieceFileOwnership,
@@ -304,5 +308,197 @@ describe('formatPendingPRConflictFeedback', () => {
 
   it('returns empty string for no conflicts', () => {
     expect(formatPendingPRConflictFeedback([])).toBe('');
+  });
+});
+
+// --- Dependency-overlap detection (#276) ---
+
+function node(filePath: string, name: string, kind: SymbolNode['kind'] = 'function'): SymbolNode {
+  return {
+    id: `${filePath}::${name}@1`,
+    kind,
+    name,
+    filePath,
+    startLine: 1,
+    endLine: 10,
+    signature: `function ${name}()`,
+    isExported: true,
+  };
+}
+
+function makeLookup(
+  symbolsByFile: Record<string, SymbolNode[]>,
+  callersByNode: Record<string, SymbolNode[]> = {},
+): DependencyOverlapLookup {
+  return {
+    listFileSymbols: (filePath) => symbolsByFile[filePath] ?? [],
+    getCallers: (nodeId) => callersByNode[nodeId] ?? [],
+  };
+}
+
+describe('detectDependencyOverlaps', () => {
+  it('returns empty list for 0 or 1 pieces', () => {
+    expect(detectDependencyOverlaps([], makeLookup({}))).toEqual([]);
+    expect(detectDependencyOverlaps([makePiece('only', ['src/a.ts'])], makeLookup({}))).toEqual([]);
+  });
+
+  it('returns empty list when codegraph has no symbols (graceful)', () => {
+    const pieces = [makePiece('a', ['src/a.ts']), makePiece('b', ['src/b.ts'])];
+    expect(detectDependencyOverlaps(pieces, makeLookup({}))).toEqual([]);
+  });
+
+  it('returns empty list when pieces share no call edges', () => {
+    const pieces = [makePiece('a', ['src/a.ts']), makePiece('b', ['src/b.ts'])];
+    const a = node('src/a.ts', 'aFn');
+    const b = node('src/b.ts', 'bFn');
+    // No callers on either — they don't call each other
+    const lookup = makeLookup({ 'src/a.ts': [a], 'src/b.ts': [b] });
+    expect(detectDependencyOverlaps(pieces, lookup)).toEqual([]);
+  });
+
+  it('flags disjoint-files-but-call-edge case (the load-bearing test)', () => {
+    // The whole point of #276: piece A defines `exportedFn` (src/a.ts),
+    // piece B calls it (src/b.ts). File sets are disjoint, but they are
+    // coupled via the codegraph.
+    const pieces = [makePiece('a', ['src/a.ts']), makePiece('b', ['src/b.ts'])];
+    const exportedFn = node('src/a.ts', 'exportedFn');
+    const callerInB = node('src/b.ts', 'usesExportedFn');
+    const lookup = makeLookup({ 'src/a.ts': [exportedFn], 'src/b.ts': [callerInB] }, { [exportedFn.id]: [callerInB] });
+
+    const overlaps = detectDependencyOverlaps(pieces, lookup);
+
+    expect(overlaps).toHaveLength(1);
+    expect(overlaps[0]).toMatchObject({
+      symbolName: 'exportedFn',
+      sourceFile: 'src/a.ts',
+      sourcePieceIndex: 0,
+      sourcePieceName: 'a',
+      dependentFile: 'src/b.ts',
+      dependentPieceIndex: 1,
+      dependentPieceName: 'b',
+    });
+  });
+
+  it('does not flag in-piece self-callers', () => {
+    // Symbol defined in src/a.ts is called from src/a-helper.ts — both belong
+    // to the same piece. Not a cross-piece overlap.
+    const pieces = [makePiece('a', ['src/a.ts', 'src/a-helper.ts']), makePiece('b', ['src/b.ts'])];
+    const aFn = node('src/a.ts', 'aFn');
+    const helper = node('src/a-helper.ts', 'helperUsesA');
+    const lookup = makeLookup({ 'src/a.ts': [aFn], 'src/a-helper.ts': [helper] }, { [aFn.id]: [helper] });
+
+    expect(detectDependencyOverlaps(pieces, lookup)).toEqual([]);
+  });
+
+  it('deduplicates the same edge encountered twice', () => {
+    const pieces = [makePiece('a', ['src/a.ts']), makePiece('b', ['src/b.ts'])];
+    const aFn = node('src/a.ts', 'aFn');
+    const callerInB = node('src/b.ts', 'callerInB');
+    // Same caller listed twice (e.g. multi-call)
+    const lookup = makeLookup({ 'src/a.ts': [aFn], 'src/b.ts': [callerInB] }, { [aFn.id]: [callerInB, callerInB] });
+
+    expect(detectDependencyOverlaps(pieces, lookup)).toHaveLength(1);
+  });
+
+  it('flags multiple distinct cross-piece edges', () => {
+    const pieces = [makePiece('a', ['src/a.ts']), makePiece('b', ['src/b.ts']), makePiece('c', ['src/c.ts'])];
+    const a1 = node('src/a.ts', 'a1');
+    const a2 = node('src/a.ts', 'a2');
+    const inB = node('src/b.ts', 'usesA1');
+    const inC = node('src/c.ts', 'usesA2');
+    const lookup = makeLookup(
+      { 'src/a.ts': [a1, a2], 'src/b.ts': [inB], 'src/c.ts': [inC] },
+      { [a1.id]: [inB], [a2.id]: [inC] },
+    );
+
+    const overlaps = detectDependencyOverlaps(pieces, lookup);
+    expect(overlaps).toHaveLength(2);
+    expect(overlaps.map((o) => o.symbolName).sort()).toEqual(['a1', 'a2']);
+  });
+
+  it('ignores callers whose file is outside any piece', () => {
+    // src/external.ts is not part of any spec piece — those callers are
+    // out-of-scope for the conflict-scheduling decision.
+    const pieces = [makePiece('a', ['src/a.ts']), makePiece('b', ['src/b.ts'])];
+    const aFn = node('src/a.ts', 'aFn');
+    const external = node('src/external.ts', 'externalCaller');
+    const lookup = makeLookup({ 'src/a.ts': [aFn] }, { [aFn.id]: [external] });
+
+    expect(detectDependencyOverlaps(pieces, lookup)).toEqual([]);
+  });
+
+  it('tolerates per-file lookup throws (graceful per-file degradation)', () => {
+    const pieces = [makePiece('a', ['src/a.ts']), makePiece('b', ['src/b.ts']), makePiece('c', ['src/c.ts'])];
+    const aFn = node('src/a.ts', 'aFn');
+    const inB = node('src/b.ts', 'usesA');
+
+    const lookup: DependencyOverlapLookup = {
+      listFileSymbols: (fp) => {
+        if (fp === 'src/c.ts') throw new Error('boom');
+        if (fp === 'src/a.ts') return [aFn];
+        if (fp === 'src/b.ts') return [inB];
+        return [];
+      },
+      getCallers: (id) => (id === aFn.id ? [inB] : []),
+    };
+
+    const overlaps = detectDependencyOverlaps(pieces, lookup);
+    expect(overlaps).toHaveLength(1);
+    expect(overlaps[0]?.symbolName).toBe('aFn');
+  });
+});
+
+describe('formatDependencyOverlapFeedback', () => {
+  it('returns empty string for no overlaps', () => {
+    expect(formatDependencyOverlapFeedback([])).toBe('');
+  });
+
+  it('formats a single dependency overlap', () => {
+    const out = formatDependencyOverlapFeedback([
+      {
+        symbolName: 'doStuff',
+        sourceFile: 'src/a.ts',
+        sourcePieceIndex: 0,
+        sourcePieceName: 'core',
+        dependentFile: 'src/b.ts',
+        dependentPieceIndex: 1,
+        dependentPieceName: 'consumer',
+      },
+    ]);
+
+    expect(out).toContain('Dependency Overlap Feedback');
+    expect(out).toContain('core');
+    expect(out).toContain('consumer');
+    expect(out).toContain('doStuff');
+    expect(out).toContain('src/a.ts');
+    expect(out).toContain('src/b.ts');
+  });
+
+  it('formats multiple dependency overlaps', () => {
+    const out = formatDependencyOverlapFeedback([
+      {
+        symbolName: 'aFn',
+        sourceFile: 'src/a.ts',
+        sourcePieceIndex: 0,
+        sourcePieceName: 'p0',
+        dependentFile: 'src/b.ts',
+        dependentPieceIndex: 1,
+        dependentPieceName: 'p1',
+      },
+      {
+        symbolName: 'cFn',
+        sourceFile: 'src/c.ts',
+        sourcePieceIndex: 2,
+        sourcePieceName: 'p2',
+        dependentFile: 'src/d.ts',
+        dependentPieceIndex: 3,
+        dependentPieceName: 'p3',
+      },
+    ]);
+
+    expect(out).toContain('aFn');
+    expect(out).toContain('cFn');
+    expect(out).toContain('p0');
+    expect(out).toContain('p3');
   });
 });

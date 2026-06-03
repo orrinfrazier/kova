@@ -13,6 +13,7 @@ import { CodegraphStore } from './store.js';
 export interface CodegraphHandle {
   readonly path: string;
   findSymbol: CodegraphStore['findSymbol'];
+  listFileSymbols: CodegraphStore['listFileSymbols'];
   getCallers: CodegraphStore['getCallers'];
   getCallees: CodegraphStore['getCallees'];
   getFileDependents: CodegraphStore['getFileDependents'];
@@ -29,6 +30,7 @@ export function openCodegraph(dbPath: string): CodegraphHandle {
   return {
     path: dbPath,
     findSymbol: store.findSymbol.bind(store),
+    listFileSymbols: store.listFileSymbols.bind(store),
     getCallers: store.getCallers.bind(store),
     getCallees: store.getCallees.bind(store),
     getFileDependents: store.getFileDependents.bind(store),
