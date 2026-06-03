@@ -205,4 +205,17 @@ describe('ReviewEngine', () => {
     expect(args.currentFailures).toEqual(['t-new']);
     expect(args.prescanRunner).toBe(fakePrescan);
   });
+
+  it('forwards regressionSurfaceContext from input into runReviewLoop (issue #276)', async () => {
+    mockRun.mockResolvedValueOnce(makeReviewLoopResult());
+    const engine = createReviewEngine();
+    await engine.run(
+      ctx(),
+      input({
+        regressionSurfaceContext: '## Regression Surface\n- a.ts <- b.ts',
+      }),
+    );
+    const args = mockRun.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(args.regressionSurfaceContext).toBe('## Regression Surface\n- a.ts <- b.ts');
+  });
 });

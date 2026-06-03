@@ -39,6 +39,8 @@ export function buildTILoopConfig(ctx: EngineContext, input: TIEngineInput): Par
     ...(input.diffRunner !== undefined && { diffRunner: input.diffRunner }),
     ...(input.prContext !== undefined && { prContext: input.prContext }),
     ...(input.codebaseContext !== undefined && { codebaseContext: input.codebaseContext }),
+    ...(input.codegraphContext !== undefined && { codegraphContext: input.codegraphContext }),
+    ...(input.callPathContext !== undefined && { callPathContext: input.callPathContext }),
     ...(ctx.projectContext !== undefined && { projectContext: ctx.projectContext }),
     ...(ctx.sandbox !== undefined && { sandbox: ctx.sandbox }),
     ...(ctx.cacheContext !== undefined && { cacheContext: ctx.cacheContext }),

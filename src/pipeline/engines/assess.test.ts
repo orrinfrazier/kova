@@ -152,4 +152,48 @@ describe('AssessEngine', () => {
 
     await expect(AssessEngine.run(makeCtx(), { userMessage: 'go' })).rejects.toThrow('provider down');
   });
+
+  it('forwards runtimeFactory from ctx into dispatchSpawnWave (issue #407)', async () => {
+    vi.mocked(dispatchSpawnWave).mockResolvedValueOnce(makeHandoff());
+
+    const runtimeFactory = vi.fn() as unknown as NonNullable<EngineContext['runtimeFactory']>;
+    await AssessEngine.run(makeCtx({ runtimeFactory }), { userMessage: 'go' });
+
+    const call = vi.mocked(dispatchSpawnWave).mock.calls[0]?.[0];
+    expect(call?.runtimeFactory).toBe(runtimeFactory);
+  });
+
+  it('forwards eventContext from ctx into dispatchSpawnWave (issue #340)', async () => {
+    vi.mocked(dispatchSpawnWave).mockResolvedValueOnce(makeHandoff());
+
+    const eventBus = { publish: vi.fn() } as unknown as NonNullable<EngineContext['eventContext']>['eventBus'];
+    const eventContext = { eventBus, runId: 'r1', repoId: 'owner/repo', fixId: 'f1' };
+    await AssessEngine.run(makeCtx({ eventContext }), { userMessage: 'go' });
+
+    const call = vi.mocked(dispatchSpawnWave).mock.calls[0]?.[0];
+    expect(call?.eventBus).toBe(eventBus);
+    expect(call?.eventContext).toEqual({ runId: 'r1', repoId: 'owner/repo', fixId: 'f1' });
+  });
+
+  it('forwards resolvedMcpServers ONLY when sandbox is set (issue #306)', async () => {
+    vi.mocked(dispatchSpawnWave).mockResolvedValueOnce(makeHandoff());
+
+    const resolvedMcpServers = { srvA: { command: 'node', args: ['srv.js'] } } as unknown as NonNullable<
+      EngineContext['resolvedMcpServers']
+    >;
+    const sandbox = { containerName: 'kova', repoPath: '/workspace' } as unknown as NonNullable<
+      EngineContext['sandbox']
+    >;
+
+    // Without sandbox — mcpServers should be elided even when resolvedMcpServers is set.
+    await AssessEngine.run(makeCtx({ resolvedMcpServers }), { userMessage: 'host-path' });
+    const hostCall = vi.mocked(dispatchSpawnWave).mock.calls[0]?.[0];
+    expect(hostCall?.mcpServers).toBeUndefined();
+
+    vi.mocked(dispatchSpawnWave).mockResolvedValueOnce(makeHandoff());
+    // With sandbox — mcpServers should be forwarded.
+    await AssessEngine.run(makeCtx({ resolvedMcpServers, sandbox }), { userMessage: 'sandbox-path' });
+    const sandboxCall = vi.mocked(dispatchSpawnWave).mock.calls[1]?.[0];
+    expect(sandboxCall?.mcpServers).toBe(resolvedMcpServers);
+  });
 });

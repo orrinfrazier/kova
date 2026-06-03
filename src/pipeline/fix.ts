@@ -1,6 +1,13 @@
-// Fix pipeline — Assess → Spec → Test → Impl → Quality → Review → Ship
-// Uses spawnWaveAgent() for standalone waves, runTILoop() for test+impl,
-// and runReviewLoop() for review. Handoffs persist after every wave.
+// Fix pipeline — Assess → Spec → Test → Impl → Quality → Review → Ship.
+//
+// Issue #357: every wave delegates to a per-wave engine in `./engines/`
+// (AssessEngine, SpecEngine, createTIEngine, createQualityEngine,
+// createReviewEngine, createShipEngine). The orchestrator owns checkpoints,
+// metrics, lifecycle events, run-registry mirroring, episodic/codegraph/MCP
+// plumbing, mode resolution, and the pipeline scope gates. The engines own
+// wave dispatch + per-wave retry logic. Only WAVE Q's initial quality-wave
+// dispatch still uses the local `spawnWave` helper inline — the QualityEngine
+// docs flag the initial-dispatch fold as a follow-up.
 
 import { readFileSync } from 'node:fs';
 import { isAbsolute, join as joinPath } from 'node:path';
@@ -40,12 +47,11 @@ import { selectVariants, type VariantSelection } from '../services/ab-test.js';
 import { clearCheckpoint, loadCheckpoint, saveCheckpoint } from '../services/checkpoint.js';
 import { openCodegraph } from '../services/codegraph/index.js';
 import { checkForConflicts } from '../services/conflict-check.js';
-import { resolveConflicts } from '../services/conflict-resolver.js';
 import { type EpisodeFTSRecord, EpisodeFTSStore } from '../services/episode-fts.js';
 import { type EventBus, getDefaultEventBus } from '../services/event-bus/index.js';
 import { collectPRFeedback } from '../services/feedback-collector.js';
 import { getCurrentHeadSha } from '../services/git-diff.js';
-import { commentOnIssue, createPR, listOpenPRs } from '../services/github.js';
+import { commentOnIssue } from '../services/github.js';
 import { appendHistoryEntry, readHistory } from '../services/history.js';
 import { validateIsolation } from '../services/isolation.js';
 import { detectTooling } from '../services/language-detect.js';
@@ -75,7 +81,6 @@ import {
   parseTimeout,
   startSandboxContainer,
 } from '../services/sandbox.js';
-import { scanForSecrets } from '../services/secrets-scan.js';
 import { shutdownRequested } from '../services/shutdown.js';
 import type { EpisodeContext, EpisodeRecord } from '../services/vectordb.js';
 import {
@@ -92,12 +97,10 @@ import {
   recordEpisode,
 } from '../services/vectordb.js';
 import {
-  commitAndPush,
   createWorktree,
   detectDefaultBranch,
   getChangedFiles,
   worktreePath as getWorktreePath,
-  rebaseOnDefault,
   removeWorktree,
   worktreeExists,
 } from '../services/worktree.js';
@@ -129,23 +132,24 @@ import { buildWaveContext } from './context.js';
 import { refreshCodebaseContext } from './context-refresh.js';
 import { buildCostReport, printRunSummary, writeCostReport } from './cost-report.js';
 import {
-  detectThrashing,
-  runParallelPieceTILoop,
-  runQualityRetryLoop,
-  runReviewLoop,
-  type TestRunner,
-} from './loops.js';
+  AssessEngine,
+  type AssessEngineInput,
+  createQualityEngine,
+  createReviewEngine,
+  createShipEngine,
+  createTIEngine,
+  type EngineContext,
+  SpecEngine,
+  type SpecEngineInput,
+  type SpecEnginePendingPR,
+} from './engines/index.js';
+import { detectThrashing, type TestRunner } from './loops.js';
 import { applyPipelineMode, autoSelectMode, describeAutoSelection, MODE_EXTRA_IMPL_ATTEMPTS } from './mode.js';
 import { loadPrompt, resolvePromptsDir } from './prompts.js';
 import { formatRegressionSurface } from './regression-surface.js';
 import { buildRuntimeFactory, resolveRuntimeKind } from './runtime-select.js';
 import { loadWaveSkills } from './skills-loader.js';
-import {
-  detectDependencyOverlaps,
-  formatOverlapFeedback,
-  formatPendingPRConflictFeedback,
-  validatePieceFileOwnership,
-} from './spec-validator.js';
+import { detectDependencyOverlaps } from './spec-validator.js';
 
 function toOutputFormat(schema: z.ZodType): OutputFormat {
   return {
@@ -895,6 +899,34 @@ export async function fix(options: FixOptions): Promise<FixResult> {
     const tooling = await detectTooling(workDir);
     const playwrightEnabled = isPlaywrightEnabled(config, tooling);
     const playwrightOption = playwrightEnabled ? { enabled: true } : undefined;
+
+    // Issue #357 — engine instances. Engines are stateless factories; reuse
+    // across the run so ship's retry-TI callback can dispatch into the same
+    // engine the WAVE T+I block uses.
+    const tiEngine = createTIEngine();
+    // Issue #357 — engine context builder. Every wave engine receives the same
+    // shape: orchestrator-owned fields (workDir, repoPath, config, sandbox,
+    // mcpHandles, runtimeFactory, resolvedMcpServers, eventContext) come from
+    // the outer fix() closure; wave-specific fields are passed via the engine
+    // input. Built as a closure so it sees the latest `config` (mutated post-
+    // WAVE A by applyPipelineMode) on every call.
+    const buildEngineContext = (overrides: Partial<EngineContext> = {}): EngineContext => ({
+      workDir,
+      repoPath,
+      repoName,
+      config,
+      ...(sandboxContext != null && { sandbox: sandboxContext }),
+      ...(mcpHandles.size > 0 && { mcpHandles }),
+      promptsDir: resolvedPromptsDir,
+      projectContext,
+      runSkills,
+      cacheContext,
+      ...(playwrightOption != null && { playwright: playwrightOption }),
+      ...(resolvedRuntimeFactory != null && { runtimeFactory: resolvedRuntimeFactory }),
+      ...(Object.keys(resolvedMcpServers).length > 0 && { resolvedMcpServers }),
+      eventContext: eventDispatchContext,
+      ...overrides,
+    });
     if (playwrightEnabled) {
       await ensureScreenshotsDir(workDir, config);
       const pwEnv = resolvePlaywrightEnv(config, tooling);
@@ -963,15 +995,11 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       }
     }
 
-    // WAVE A: Assess
+    // WAVE A: Assess — delegated to AssessEngine (issue #357).
     if (!shouldSkip('assess')) {
       const waveStart = Date.now();
-      const { handoff, promptHash } = await spawnWave<AssessResult>(
-        'assess',
-        workDir,
-        repoPath,
-        config,
-        buildWaveContext(
+      const assessInput: AssessEngineInput = {
+        userMessage: buildWaveContext(
           'assess',
           issue,
           {},
@@ -981,19 +1009,12 @@ export async function fix(options: FixOptions): Promise<FixResult> {
             ...(patternContext != null && { patternContext }),
           },
         ),
-        toOutputFormat(AssessResultSchema),
-        mcpHandles,
-        undefined,
-        resolvedPromptsDir,
-        projectContext,
-        abTestVariants?.assess,
-        sandboxContext,
-        runSkills,
-        cacheContext,
-        eventDispatchContext,
-        resolvedRuntimeFactory,
-        resolvedMcpServers,
-      );
+        outputFormat: toOutputFormat(AssessResultSchema),
+      };
+      const assessCtx = buildEngineContext({
+        ...(abTestVariants?.assess != null && { abTestVariant: abTestVariants.assess }),
+      });
+      const { handoff, promptHash } = await AssessEngine.run(assessCtx, assessInput);
       await saveHandoff(workDir, handoff);
       promptHashes.assess = promptHash;
       state.waveResults.assess = handoffToResult(handoff, waveProvider(config, 'assess'), promptHash);
@@ -1154,15 +1175,20 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       }
     }
 
-    // WAVE S: Spec
+    // WAVE S: Spec — delegated to SpecEngine (issue #357).
+    // SpecEngine owns: initial dispatch + piece-to-piece validation (merge in place) +
+    // retry on pendingPR conflicts + post-retry validation + serialFallback flag +
+    // mergeDependencies. Orchestrator still owns: checkpoints, codegraph dependency-
+    // overlap probe, empty-pieces retry (#243), respec-after-TI escalation.
+    const pendingPRFileList = (pendingPRs ?? []).flatMap((pr) => pr.files);
+    let serialFallback = false;
+    const specCtxBase = buildEngineContext({
+      ...(abTestVariants?.spec != null && { abTestVariant: abTestVariants.spec }),
+    });
     if (!shouldSkip('spec')) {
       const waveStart = Date.now();
-      const { handoff, promptHash } = await spawnWave(
-        'spec',
-        workDir,
-        repoPath,
-        config,
-        buildWaveContext('spec', issue, state.waveResults, {
+      const specInput: SpecEngineInput = {
+        userMessage: buildWaveContext('spec', issue, state.waveResults, {
           prContext,
           ...(failedEpisodicContext != null && { episodicContext: failedEpisodicContext }),
           ...(playbookContext != null && { playbookContext }),
@@ -1172,23 +1198,23 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           ...(repoSearchText != null && { repoSearchText }),
           ...(patternContext != null && { patternContext }),
         }),
-        toOutputFormat(SpecResultSchema),
-        mcpHandles,
-        undefined,
-        resolvedPromptsDir,
-        projectContext,
-        abTestVariants?.spec,
-        sandboxContext,
-        runSkills,
-        cacheContext,
-        eventDispatchContext,
-        resolvedRuntimeFactory,
-        resolvedMcpServers,
-      );
-      await saveHandoff(workDir, handoff);
-      promptHashes.spec = promptHash;
-      state.waveResults.spec = handoffToResult(handoff, waveProvider(config, 'spec'), promptHash);
+        outputFormat: toOutputFormat(SpecResultSchema),
+        pendingPRFiles: pendingPRFileList,
+        ...(pendingPRs != null && {
+          pendingPRs: pendingPRs.map<SpecEnginePendingPR>((pr) => ({ number: pr.number, files: pr.files })),
+        }),
+      };
+      const specResult = await SpecEngine.run(specCtxBase, specInput);
+
+      await saveHandoff(workDir, specResult.handoff);
+      promptHashes.spec = specResult.promptHash;
+      state.waveResults.spec = handoffToResult(specResult.handoff, waveProvider(config, 'spec'), specResult.promptHash);
       state.completedWaves.push('spec');
+      // Engine surfaces serialFallback / mergeDependencies — orchestrator records them on state.
+      if (specResult.serialFallback) serialFallback = true;
+      if (specResult.mergeDependencies && specResult.mergeDependencies.length > 0) {
+        state.mergeDependencies = [...specResult.mergeDependencies];
+      }
       await saveCheckpoint(workDir, state);
       await progress?.waveCompleted('spec', state);
       metrics.recordWaveCompleted('spec');
@@ -1198,148 +1224,11 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       if (interrupted) return interrupted;
     }
 
-    // Gate: validate spec pieces have no overlapping files (between pieces or with pending PRs)
-    let serialFallback = false;
-    const pendingPRFileList = (pendingPRs ?? []).flatMap((pr) => pr.files);
-    const specArtifact = state.waveResults.spec?.artifact as SpecResult | undefined;
-    if (specArtifact?.pieces && specArtifact.pieces.length > 0) {
-      const validation = validatePieceFileOwnership(
-        specArtifact.pieces,
-        specArtifact.dependency_order,
-        pendingPRFileList,
-      );
-
-      // If a piece-to-piece merge occurred, persist the merged result back to state.
-      // The TI loop reads from state.waveResults.spec.artifact, so the merge must
-      // be visible there or downstream waves operate on stale, conflicting pieces.
-      const existingSpecResult = state.waveResults.spec;
-      if (validation.merged && existingSpecResult) {
-        const mergedArtifact: SpecResult = {
-          ...specArtifact,
-          pieces: validation.pieces,
-          dependency_order: validation.dependencyOrder,
-        };
-        state.waveResults.spec = {
-          ...existingSpecResult,
-          artifact: mergedArtifact,
-        };
-        await saveCheckpoint(workDir, state);
-        log.info(
-          `[fix] Persisted merged spec to state (${specArtifact.pieces.length} → ${validation.pieces.length} pieces)`,
-        );
-      }
-
-      // Decide whether a spec retry is needed.
-      // Retry is required only when merging cannot resolve the conflict on its own:
-      //   - Pending-PR conflicts: the spec must restructure to avoid the PR files entirely.
-      //   - Piece overlaps that did NOT result in a merge (defensive — shouldn't happen
-      //     in practice since validator always merges what it can).
-      const needsRetry =
-        validation.pendingPRConflicts.length > 0 || (validation.overlaps.length > 0 && !validation.merged);
-
-      if (needsRetry) {
-        // Build combined feedback for both overlap types
-        const feedbackParts: string[] = [];
-        if (validation.overlaps.length > 0) {
-          feedbackParts.push(formatOverlapFeedback(validation.overlaps));
-        }
-        if (validation.pendingPRConflicts.length > 0) {
-          feedbackParts.push(formatPendingPRConflictFeedback(validation.pendingPRConflicts));
-        }
-        const feedback = feedbackParts.join('\n\n');
-
-        log.warn(
-          `[fix] Spec retry needed (${validation.overlaps.length} piece overlap(s), ${validation.pendingPRConflicts.length} pending PR conflict(s)), re-running spec with feedback`,
-        );
-
-        const specContext = buildWaveContext('spec', issue, state.waveResults, {
-          prContext,
-          ...(failedEpisodicContext != null && { episodicContext: failedEpisodicContext }),
-          ...(codegraphContext != null && { codegraphContext }),
-          ...(callPathContext != null && { callPathContext }),
-          ...(codebaseContext != null && { codebaseContext }),
-          ...(repoSearchText != null && { repoSearchText }),
-        });
-
-        const { handoff: retryHandoff, promptHash: retryPromptHash } = await spawnWave(
-          'spec',
-          workDir,
-          repoPath,
-          config,
-          `${specContext}\n\n${feedback}`,
-          toOutputFormat(SpecResultSchema),
-          mcpHandles,
-          undefined,
-          resolvedPromptsDir,
-          projectContext,
-          abTestVariants?.spec,
-          sandboxContext,
-          runSkills,
-          cacheContext,
-          eventDispatchContext,
-          resolvedRuntimeFactory,
-          resolvedMcpServers,
-        );
-
-        await saveHandoff(workDir, retryHandoff);
-        promptHashes.spec = retryPromptHash;
-        state.waveResults.spec = handoffToResult(retryHandoff, waveProvider(config, 'spec'), retryPromptHash);
-        await saveCheckpoint(workDir, state);
-
-        // Validate retry result
-        const retryArtifact = state.waveResults.spec?.artifact as SpecResult | undefined;
-        if (retryArtifact?.pieces && retryArtifact.pieces.length > 0) {
-          const retryValidation = validatePieceFileOwnership(
-            retryArtifact.pieces,
-            retryArtifact.dependency_order,
-            pendingPRFileList,
-          );
-
-          // Persist any merge from the retry as well — same reason as the first pass.
-          const existingRetrySpec = state.waveResults.spec;
-          if (retryValidation.merged && existingRetrySpec) {
-            const mergedRetryArtifact: SpecResult = {
-              ...retryArtifact,
-              pieces: retryValidation.pieces,
-              dependency_order: retryValidation.dependencyOrder,
-            };
-            state.waveResults.spec = {
-              ...existingRetrySpec,
-              artifact: mergedRetryArtifact,
-            };
-            await saveCheckpoint(workDir, state);
-            log.info(
-              `[fix] Persisted merged retry spec to state (${retryArtifact.pieces.length} → ${retryValidation.pieces.length} pieces)`,
-            );
-          }
-
-          if (!retryValidation.valid) {
-            if (retryValidation.overlaps.length > 0 && !retryValidation.merged) {
-              log.warn(
-                `[fix] Spec retry still has overlapping files — falling back to serial execution (maxConcurrent: 1)`,
-              );
-              serialFallback = true;
-            }
-            if (retryValidation.pendingPRConflicts.length > 0) {
-              // Persistent pending PR conflicts — record merge dependencies
-              const conflictingFiles = new Set(retryValidation.pendingPRConflicts.map((c) => c.file));
-              const depPRNumbers = new Set<number>();
-              for (const pr of pendingPRs ?? []) {
-                if (pr.files.some((f) => conflictingFiles.has(f))) {
-                  depPRNumbers.add(pr.number);
-                }
-              }
-              if (depPRNumbers.size > 0) {
-                state.mergeDependencies = [...depPRNumbers];
-                log.warn(
-                  `[fix] Pending PR conflicts persist — recording merge dependencies: [${[...depPRNumbers].map((n) => `#${n}`).join(', ')}]`,
-                );
-              }
-            }
-          }
-        }
-      }
-
+    // Codegraph dependency-overlap gate (issue #276) — orchestrator concern,
+    // not spec-validation concern. Probes cross-piece call/import edges even
+    // when piece file sets are disjoint and forces serial when found.
+    const specArtifactPostEngine = state.waveResults.spec?.artifact as SpecResult | undefined;
+    if (specArtifactPostEngine?.pieces && specArtifactPostEngine.pieces.length > 0) {
       // Issue #276 — dependency-overlap gate. Even when piece file sets are
       // fully disjoint, the codegraph may reveal cross-piece call/import edges
       // (e.g. piece A defines `exportedFn` in src/a.ts, piece B calls it from
@@ -1347,13 +1236,12 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       // We probe the graph and, if any cross-piece edges exist, force serial
       // execution. Graph unavailable -> falls back to file-overlap-only
       // behavior (this block is a no-op).
-      const postValidationSpec = state.waveResults.spec?.artifact as SpecResult | undefined;
-      if (postValidationSpec?.pieces && postValidationSpec.pieces.length > 1 && !serialFallback) {
+      if (specArtifactPostEngine.pieces.length > 1 && !serialFallback) {
         try {
           const dbPath = joinPath(repoPath, '.kova', 'codegraph.db');
           const cg = openCodegraph(dbPath);
           try {
-            const depOverlaps = detectDependencyOverlaps(postValidationSpec.pieces, {
+            const depOverlaps = detectDependencyOverlaps(specArtifactPostEngine.pieces, {
               listFileSymbols: (fp) => cg.listFileSymbols(fp),
               getCallers: (id) => cg.getCallers(id),
             });
@@ -1405,29 +1293,22 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           ...(repoSearchText != null && { repoSearchText }),
         });
 
-        const { handoff: emptyRetryHandoff, promptHash: emptyRetryPromptHash } = await spawnWave(
-          'spec',
-          workDir,
-          repoPath,
-          config,
-          emptyRetryContext,
-          toOutputFormat(SpecResultSchema),
-          mcpHandles,
-          undefined,
-          resolvedPromptsDir,
-          projectContext,
-          abTestVariants?.spec,
-          sandboxContext,
-          runSkills,
-          cacheContext,
-          eventDispatchContext,
-          resolvedRuntimeFactory,
-          resolvedMcpServers,
-        );
+        // Empty-pieces retry uses SpecEngine in pass-through mode (no pendingPR
+        // context — the prior validation already handled that). The orchestrator
+        // owns this retry path per SpecEngine's docs.
+        const emptyRetryResult = await SpecEngine.run(specCtxBase, {
+          userMessage: emptyRetryContext,
+          outputFormat: toOutputFormat(SpecResultSchema),
+          pendingPRFiles: [],
+        });
 
-        await saveHandoff(workDir, emptyRetryHandoff);
-        promptHashes.spec = emptyRetryPromptHash;
-        state.waveResults.spec = handoffToResult(emptyRetryHandoff, waveProvider(config, 'spec'), emptyRetryPromptHash);
+        await saveHandoff(workDir, emptyRetryResult.handoff);
+        promptHashes.spec = emptyRetryResult.promptHash;
+        state.waveResults.spec = handoffToResult(
+          emptyRetryResult.handoff,
+          waveProvider(config, 'spec'),
+          emptyRetryResult.promptHash,
+        );
         await saveCheckpoint(workDir, state);
 
         const specAfterRetry = state.waveResults.spec?.artifact as SpecResult | undefined;
@@ -1464,24 +1345,24 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         flog.warn(`[context-refresh] Could not capture pre-impl SHA (${msg}) — context refresh will be a no-op`);
       }
 
-      const tiResult = await runParallelPieceTILoop({
+      // WAVE T+I — delegated to TIEngine (issue #357). Engine wraps
+      // runParallelPieceTILoop and returns the full ParallelPieceTILoopResult
+      // as `handoff.artifact`, preserving every field the orchestrator reads.
+      const tiCtx = buildEngineContext();
+      const tiEngineResult = await tiEngine.run(tiCtx, {
         issue,
-        workDir,
-        repoConfig: config,
         waveResults: state.waveResults,
-        prContext,
-        codebaseContext,
-        codegraphContext,
-        callPathContext,
-        projectContext,
+        ...(prContext != null && { prContext }),
+        ...(codebaseContext != null && { codebaseContext }),
+        ...(codegraphContext != null && { codegraphContext }),
+        ...(callPathContext != null && { callPathContext }),
         ...(testRunner != null && { testRunner }),
         ...(serialFallback && { maxConcurrent: 1 }),
-        ...(sandboxContext != null && { sandbox: sandboxContext }),
-        cacheContext,
         ...(skipTestPhase && { skipTestPhase: true }),
         ...(skipImplPhase && { skipImplPhase: true }),
         ...(extraImplAttempts > 0 && { extraImplAttempts }),
       });
+      const tiResult = tiEngineResult.handoff.artifact;
 
       // Save handoffs for test and impl
       await saveHandoff(workDir, waveResultToHandoff(tiResult.testWaveResult));
@@ -1523,16 +1404,13 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         currentContext: codebaseContext,
       });
 
-      // Escalation: shouldRespec → re-run spec + TI loop (max 1 re-spec)
+      // Escalation: shouldRespec → re-run spec + TI loop (max 1 re-spec).
+      // Both delegated to their engines (issue #357).
       if (!tiResult.testsPassing && tiResult.shouldRespec) {
         flog.info(`[escalation] ${tiResult.diagnosis ?? 'SPEC_WRONG'} — re-running spec then TI loop`);
         const respecContext = `Previous spec led to ${tiResult.diagnosis ?? 'failure'} — the implementation could not pass the tests. Re-examine the requirements and produce a revised spec.`;
-        const { handoff: specHandoff, promptHash: specPromptHash } = await spawnWave(
-          'spec',
-          workDir,
-          repoPath,
-          config,
-          buildWaveContext('spec', issue, state.waveResults, {
+        const respecResult = await SpecEngine.run(specCtxBase, {
+          userMessage: buildWaveContext('spec', issue, state.waveResults, {
             prContext,
             ...(failedEpisodicContext != null && { episodicContext: failedEpisodicContext }),
             ...(codegraphContext != null && { codegraphContext }),
@@ -1541,40 +1419,30 @@ export async function fix(options: FixOptions): Promise<FixResult> {
             ...(repoSearchText != null && { repoSearchText }),
             escalationHint: respecContext,
           }),
-          toOutputFormat(SpecResultSchema),
-          mcpHandles,
-          undefined,
-          resolvedPromptsDir,
-          projectContext,
-          abTestVariants?.spec,
-          sandboxContext,
-          runSkills,
-          cacheContext,
-          eventDispatchContext,
-          resolvedRuntimeFactory,
-          resolvedMcpServers,
+          outputFormat: toOutputFormat(SpecResultSchema),
+          pendingPRFiles: pendingPRFileList,
+        });
+        await saveHandoff(workDir, respecResult.handoff);
+        promptHashes.spec = respecResult.promptHash;
+        state.waveResults.spec = handoffToResult(
+          respecResult.handoff,
+          waveProvider(config, 'spec'),
+          respecResult.promptHash,
         );
-        await saveHandoff(workDir, specHandoff);
-        promptHashes.spec = specPromptHash;
-        state.waveResults.spec = handoffToResult(specHandoff, waveProvider(config, 'spec'), specPromptHash);
 
-        const retryTI = await runParallelPieceTILoop({
+        const respecTI = await tiEngine.run(tiCtx, {
           issue,
-          workDir,
-          repoConfig: config,
           waveResults: state.waveResults,
-          prContext,
-          codebaseContext,
-          codegraphContext,
-          callPathContext,
-          projectContext,
+          ...(prContext != null && { prContext }),
+          ...(codebaseContext != null && { codebaseContext }),
+          ...(codegraphContext != null && { codegraphContext }),
+          ...(callPathContext != null && { callPathContext }),
           ...(testRunner != null && { testRunner }),
-          ...(sandboxContext != null && { sandbox: sandboxContext }),
-          cacheContext,
           ...(skipTestPhase && { skipTestPhase: true }),
           ...(skipImplPhase && { skipImplPhase: true }),
           ...(extraImplAttempts > 0 && { extraImplAttempts }),
         });
+        const retryTI = respecTI.handoff.artifact;
         state.waveResults.test = retryTI.testWaveResult;
         state.waveResults.impl = retryTI.implWaveResult;
         await saveCheckpoint(workDir, state);
@@ -1599,7 +1467,8 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       }
     }
 
-    // WAVE Q: Quality
+    // WAVE Q: Quality — initial dispatch stays inline (the engine wraps the
+    // retry loop only); self-healing retry delegated to QualityEngine (#357).
     if (!shouldSkip('quality')) {
       const waveStart = Date.now();
       const { handoff, promptHash } = await spawnWave(
@@ -1633,17 +1502,14 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       metrics.recordWaveCompleted('quality');
       metrics.recordWaveDuration('quality', Date.now() - waveStart);
 
-      // Quality self-healing: retry impl if quality detects test failures
-      const qualityRetry = await runQualityRetryLoop({
+      // Quality self-healing: delegated to QualityEngine.
+      const qualityEngine = createQualityEngine();
+      const qualityRetryEngineResult = await qualityEngine.run(buildEngineContext(), {
         issue,
-        workDir,
-        repoConfig: config,
         waveResults: state.waveResults,
         ...(testRunner != null && { testRunner }),
-        projectContext,
-        ...(sandboxContext != null && { sandbox: sandboxContext }),
-        cacheContext,
       });
+      const qualityRetry = qualityRetryEngineResult.handoff.artifact;
       if (qualityRetry.retried) {
         state.waveResults.quality = qualityRetry.qualityWaveResult;
         await saveCheckpoint(workDir, state);
@@ -1719,32 +1585,21 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         );
       }
 
-      const reviewLoopResult = await runReviewLoop({
+      // WAVE R — delegated to ReviewEngine (issue #357).
+      const reviewEngine = createReviewEngine();
+      const reviewEngineResult = await reviewEngine.run(buildEngineContext(), {
         issue,
-        workDir,
-        repoConfig: config,
         waveResults: state.waveResults,
-        prContext,
-        projectContext,
+        ...(prContext != null && { prContext }),
         ...(reviewFeedbackContext != null && { reviewFeedbackContext }),
         ...(regressionSurfaceContext != null && { regressionSurfaceContext }),
         ...(testRunner != null && { testRunner }),
-        playwright: playwrightOption,
-        ...(sandboxContext != null && { sandbox: sandboxContext }),
-        cacheContext,
       });
+      const reviewLoopResult = reviewEngineResult.handoff.artifact;
 
-      // Save review handoff
-      await saveHandoff(workDir, {
-        wave: 'review' as WaveName,
-        timestamp: new Date().toISOString(),
-        model: reviewLoopResult.reviewWaveResult.model ?? 'unknown',
-        cost: reviewLoopResult.totalCost,
-        turns: reviewLoopResult.reviewWaveResult.turns,
-        confidence: reviewLoopResult.knownIssues.length === 0 ? 'high' : 'medium',
-        artifact: reviewLoopResult.reviewWaveResult.artifact,
-        approach_notes: `${reviewLoopResult.iterations} iteration(s)`,
-      });
+      // Save review handoff — engine emits the same shape as the prior inline
+      // construction (model + cost + turns + confidence + iterations notes).
+      await saveHandoff(workDir, reviewEngineResult.handoff);
 
       state.waveResults.review = reviewLoopResult.reviewWaveResult;
       if (reviewLoopResult.qualityWaveResult) {
@@ -1770,170 +1625,126 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       }
     }
 
-    // Ship — no AI wave, just git operations
+    // Ship — no AI wave, just git operations. Delegated to ShipEngine (#357).
+    // ShipEngine owns the conflict-check → non-overlapping autoresolve →
+    // overlapping retry → rebase → secrets scan → commit → push → PR sequence.
+    // Orchestrator owns: codegraph-aware dependency-overlap WARNING (#276 pre-
+    // ship pre-flight), metrics emission, state persistence, and the no-changes
+    // early-exit path.
     if (!shouldSkip('ship')) {
       const shipStart = Date.now();
       const branch = worktree?.branch ?? `kova/fix-${issue.number}`;
 
-      // Pre-ship conflict detection via dry-run merge
       const specArtifactForShip = state.waveResults.spec?.artifact as SpecResult | undefined;
       const specFiles = specArtifactForShip?.pieces?.flatMap((p) => p.files) ?? [];
 
-      // Issue #276 — wire the codegraph into checkForConflicts so a renamed
-      // export with a live dependent but no textual merge conflict is still
-      // flagged. Graceful: if .kova/codegraph.db is missing/unreadable we
-      // pass no lookup and conflict-check behaves exactly as before.
-      let conflictDepLookup:
-        | {
-            listFileSymbols: (fp: string) => { id: string; name: string; filePath: string }[];
-            getFileDependents: (fp: string) => string[];
-          }
-        | undefined;
-      let conflictCgHandle: ReturnType<typeof openCodegraph> | undefined;
-      let conflictChangedFiles: string[] | undefined;
+      // Codegraph-aware dependency-overlap pre-flight WARNING (#276). Pure
+      // observation — does not block the ship. Engine runs its own simpler
+      // conflict-check internally; this one logs the cross-file dependent set
+      // so reviewers see the impact before merge.
       try {
-        // Files changed in the branch (post-commits + uncommitted) vs base.
-        // Use `diff --name-only <base>...HEAD` so committed wave changes are
-        // included; append uncommitted modified/untracked from getChangedFiles.
         const defaultBranch = await detectDefaultBranch(workDir);
         const committedDiff = await $`git -C ${workDir} diff --name-only origin/${defaultBranch}...HEAD`.nothrow();
         const committed = committedDiff.exitCode === 0 ? committedDiff.stdout.trim().split('\n').filter(Boolean) : [];
         const uncommitted = await getChangedFiles(workDir);
-        conflictChangedFiles = [...new Set([...committed, ...uncommitted])];
+        const allChangedFiles = [...new Set([...committed, ...uncommitted])];
 
-        if (conflictChangedFiles.length > 0) {
+        if (allChangedFiles.length > 0) {
           const dbPath = joinPath(repoPath, '.kova', 'codegraph.db');
           const cg = openCodegraph(dbPath);
-          conflictCgHandle = cg;
-          conflictDepLookup = {
-            listFileSymbols: (fp) => cg.listFileSymbols(fp),
-            getFileDependents: (fp) => cg.getFileDependents(fp),
-          };
+          try {
+            const preCheck = await checkForConflicts(workDir, specFiles, {
+              dependencyLookup: {
+                listFileSymbols: (fp) => cg.listFileSymbols(fp),
+                getFileDependents: (fp) => cg.getFileDependents(fp),
+              },
+              changedFiles: allChangedFiles,
+            });
+            if (preCheck.dependencyOverlaps.length > 0) {
+              const sample = preCheck.dependencyOverlaps
+                .slice(0, 3)
+                .map((d) => `${d.sourceFile}->${d.dependentFile}`)
+                .join(', ');
+              flog.warn(
+                `[conflict-check] dependency-overlap surfaced (${preCheck.dependencyOverlaps.length} edge(s): ${sample}) — review the dependents before merging`,
+              );
+            }
+          } finally {
+            cg.close();
+          }
         }
       } catch (err) {
         flog.debug(`[conflict-check] dependency wiring degraded: ${err instanceof Error ? err.message : String(err)}`);
-        conflictDepLookup = undefined;
       }
 
-      const conflictCheck = await checkForConflicts(
-        workDir,
-        specFiles,
-        conflictDepLookup && conflictChangedFiles
-          ? { dependencyLookup: conflictDepLookup, changedFiles: conflictChangedFiles }
-          : undefined,
-      );
-      conflictCgHandle?.close();
-
-      if (conflictCheck.dependencyOverlaps.length > 0) {
-        const sample = conflictCheck.dependencyOverlaps
-          .slice(0, 3)
-          .map((d) => `${d.sourceFile}->${d.dependentFile}`)
-          .join(', ');
-        flog.warn(
-          `[conflict-check] dependency-overlap surfaced (${conflictCheck.dependencyOverlaps.length} edge(s): ${sample}) — review the dependents before merging`,
-        );
-      }
-
-      if (conflictCheck.hasConflicts) {
-        metrics.recordConflictDetected();
-        flog.info(`Pre-ship conflict check: ${conflictCheck.conflictingFiles.join(', ')}`);
-
-        // Non-overlapping conflicts (files we didn't touch) — accept upstream version
-        if (conflictCheck.nonOverlapping.length > 0) {
-          const defaultBranch = await detectDefaultBranch(workDir);
-          flog.info(`Auto-resolving non-overlapping conflicts: ${conflictCheck.nonOverlapping.join(', ')}`);
-          for (const file of conflictCheck.nonOverlapping) {
-            try {
-              await $`git -C ${workDir} checkout origin/${defaultBranch} -- ${file}`;
-              await $`git -C ${workDir} add ${file}`;
-            } catch {
-              flog.warn(`Failed to checkout upstream version of ${file}`);
-            }
-          }
-          // Commit the upstream file adoptions
-          try {
-            await $`git -C ${workDir} commit -m ${'chore: adopt upstream changes for non-overlapping files'}`;
-          } catch {
-            // Nothing to commit — that's fine
-          }
-        }
-
-        // Overlapping conflicts (in our spec files) — retry impl once with conflict context
-        if (conflictCheck.overlapping.length > 0) {
-          flog.info(`Overlapping conflicts in spec files: ${conflictCheck.overlapping.join(', ')} — retrying impl`);
-          const conflictHint = `Your changes conflict with upstream in: ${conflictCheck.overlapping.join(', ')}. Fetch the latest version of these files from the default branch and adapt your implementation to avoid merge conflicts.`;
-
-          const retryTI = await runParallelPieceTILoop({
-            issue,
-            workDir,
-            repoConfig: config,
-            waveResults: state.waveResults,
-            prContext,
-            codebaseContext: [codebaseContext, conflictHint].filter(Boolean).join('\n\n'),
-            codegraphContext,
-            callPathContext,
-            projectContext,
-            ...(testRunner != null && { testRunner }),
-            ...(sandboxContext != null && { sandbox: sandboxContext }),
-            cacheContext,
-            ...(skipTestPhase && { skipTestPhase: true }),
-            ...(skipImplPhase && { skipImplPhase: true }),
-            ...(extraImplAttempts > 0 && { extraImplAttempts }),
-          });
-
-          state.waveResults.test = retryTI.testWaveResult;
-          state.waveResults.impl = retryTI.implWaveResult;
-          await saveCheckpoint(workDir, state);
-
-          if (!retryTI.testsPassing) {
-            flog.warn('Conflict retry: tests not passing after impl retry, proceeding with rebase');
-          }
-        }
-      }
-
-      // Rebase on default branch before shipping
-      const rebaseResult = await rebaseOnDefault(workDir);
       metrics.recordRebaseAttempt();
+      const shipEngine = createShipEngine();
+      const shipResult = await shipEngine.run(
+        { workDir, repoPath, config },
+        {
+          issue,
+          branch,
+          specFiles,
+          openPRs: [], // engine fetches via listOpenPRs internally
+          ...(state.mergeDependencies &&
+            state.mergeDependencies.length > 0 && {
+              mergeDependencies: state.mergeDependencies,
+            }),
+          // FixState.reviewKnownIssues stores findings with a broader string
+          // type for category/severity; ShipEngine expects narrowed ReviewFinding
+          // enums. The runtime values are the same — the cast preserves them.
+          ...(state.reviewKnownIssues &&
+            state.reviewKnownIssues.length > 0 && {
+              reviewKnownIssues: state.reviewKnownIssues.map(
+                (i) =>
+                  ({
+                    category: i.category,
+                    file: i.file,
+                    description: i.description,
+                    severity: i.severity,
+                  }) as import('../types/index.js').ReviewFinding,
+              ),
+            }),
+          retryParallelTILoop: async (retryInput) => {
+            // ShipEngine emits this callback when overlapping conflicts are
+            // detected. Run the TI engine again with the conflict hint so the
+            // impl picks up the upstream files. Conflict counter mirrors the
+            // pre-extraction emission path.
+            metrics.recordConflictDetected();
+            const conflictTIResult = await tiEngine.run(buildEngineContext(), {
+              issue,
+              waveResults: state.waveResults,
+              ...(prContext != null && { prContext }),
+              codebaseContext: [codebaseContext, retryInput.codebaseContext].filter(Boolean).join('\n\n'),
+              ...(codegraphContext != null && { codegraphContext }),
+              ...(callPathContext != null && { callPathContext }),
+              ...(testRunner != null && { testRunner }),
+              ...(skipTestPhase && { skipTestPhase: true }),
+              ...(skipImplPhase && { skipImplPhase: true }),
+              ...(extraImplAttempts > 0 && { extraImplAttempts }),
+            });
+            const retryTI = conflictTIResult.handoff.artifact;
+            state.waveResults.test = retryTI.testWaveResult;
+            state.waveResults.impl = retryTI.implWaveResult;
+            await saveCheckpoint(workDir, state);
+            return { testsPassing: retryTI.testsPassing };
+          },
+        },
+      );
 
-      if (!rebaseResult.success && rebaseResult.conflicted) {
-        metrics.recordConflictDetected();
-
-        // Attempt auto-resolution — resolveConflicts completes the rebase if successful
-        const defaultBranch = await detectDefaultBranch(workDir);
-        const resolution = await resolveConflicts(workDir, defaultBranch);
-
-        if (resolution.resolved) {
-          metrics.recordConflictResolved();
-          flog.info(`Conflicts auto-resolved in: ${resolution.filesResolved.join(', ')}`);
-        } else {
-          metrics.recordConflictFailed();
-          const filesUnresolved = (resolution as { filesUnresolved?: string[] }).filesUnresolved ?? [];
-          flog.error('Merge conflicts could not be resolved');
-          state.status = 'failed';
-          state.error = `Unresolvable merge conflicts in: ${filesUnresolved.join(', ')}`;
-          await saveCheckpoint(workDir, state);
-          metrics.recordIssueFailed();
-          return { success: false, error: state.error, state };
-        }
+      // Map ShipEngine's discriminated-union result back to FixState +
+      // metrics. Failure reasons map to the same error strings the inline
+      // ship phase used pre-extraction so consumers see no diff.
+      if (shipResult.status === 'failed') {
+        if (shipResult.reason === 'rebase') metrics.recordConflictFailed();
+        state.status = 'failed';
+        state.error = shipResult.error;
+        await saveCheckpoint(workDir, state);
+        metrics.recordIssueFailed();
+        return { success: false, error: state.error, state };
       }
 
-      // Pre-commit secrets scan — deterministic orchestrator gate
-      const changedFiles = await getChangedFiles(workDir);
-
-      if (changedFiles.length > 0) {
-        const secretsScan = await scanForSecrets(workDir, changedFiles);
-        if (!secretsScan.clean) {
-          flog.error(`Secrets detected before commit:\n${secretsScan.report}`);
-          state.status = 'failed';
-          state.error = `Secrets detected — commit blocked: ${secretsScan.findings.length} finding(s)\n${secretsScan.report}`;
-          await saveCheckpoint(workDir, state);
-          metrics.recordIssueFailed();
-          return { success: false, error: state.error, state };
-        }
-      }
-
-      const commitResult = await commitAndPush(workDir, branch, issue);
-      if (!commitResult.committed) {
+      if (shipResult.status === 'no_changes') {
         flog.child({ wave: 'ship' }).warn('No changes to commit — skipping PR');
         state.waveResults.ship = {
           wave: 'ship',
@@ -1952,40 +1763,15 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         return { success: true, state };
       }
 
-      const openPRs = await listOpenPRs(repoPath);
-      const prTitle = `fix: ${issue.title} (#${issue.number})`;
-      const prSections = [
-        `## Summary`,
-        `Fixes #${issue.number}`,
-        ``,
-        `## Context`,
-        `${issue.title}`,
-        ``,
-        `## Open PRs (for merge ordering)`,
-        ...openPRs.map((pr) => `- ${pr}`),
-      ];
-
-      if (state.mergeDependencies && state.mergeDependencies.length > 0) {
-        prSections.push(``, `## Merge Dependencies`, ...state.mergeDependencies.map((n) => `depends on #${n}`));
-      }
-
-      if (state.reviewKnownIssues && state.reviewKnownIssues.length > 0) {
-        prSections.push(
-          ``,
-          `## Known Issues`,
-          `The following issues were identified during review but could not be resolved within the iteration limit:`,
-          ``,
-          ...state.reviewKnownIssues.map((i) => `- [${i.severity}] \`${i.file}\`: ${i.description}`),
-        );
-      }
-
-      const prBody = prSections.join('\n');
-      const prUrl = await createPR(workDir, branch, prTitle, prBody);
-
+      // shipResult.status === 'shipped' — record PR + metrics.
       state.waveResults.ship = {
         wave: 'ship',
         success: true,
-        artifact: { prUrl, commitMessage: commitResult.commitMessage, filesStaged: commitResult.filesStaged },
+        artifact: {
+          prUrl: shipResult.prUrl,
+          ...(shipResult.commitMessage != null && { commitMessage: shipResult.commitMessage }),
+          filesStaged: shipResult.filesStaged,
+        },
         duration: 0,
         cost: 0,
         turns: 0,
@@ -1993,13 +1779,13 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       state.completedWaves.push('ship');
       state.status = 'completed';
       await saveCheckpoint(workDir, state);
-      await progress?.complete(prUrl);
+      await progress?.complete(shipResult.prUrl);
       metrics.recordWaveCompleted('ship');
       metrics.recordWaveDuration('ship', Date.now() - shipStart);
       metrics.recordPRCreated();
       metrics.recordIssueFixed();
-      flog.info(`Fix complete: ${prUrl}`);
-      return { success: true, prUrl, state };
+      flog.info(`Fix complete: ${shipResult.prUrl}`);
+      return { success: true, prUrl: shipResult.prUrl, state };
     }
 
     state.status = 'completed';
