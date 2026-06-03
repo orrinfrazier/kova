@@ -9,91 +9,62 @@
 // dispatch still uses the local `spawnWave` helper inline — the QualityEngine
 // docs flag the initial-dispatch fold as a follow-up.
 
-import { join as joinPath } from 'node:path';
 import { z } from 'zod';
-import { $ } from 'zx';
 import {
   initCodegraph,
   isCodegraphOnPath,
   probeCodegraphStatus,
   shouldWithholdCodegraphTools,
-  syncCodegraph,
 } from '../ai/codegraph.js';
 import {
   type AgentRuntimeFactory,
-  buildWaveSessionId,
   type FixAIWaveName,
-  getApiFallbackModelString,
-  getMCPToolsForWave,
-  getModelString,
-  getWaveTools,
   isConsensusPool,
-  isLocalModel,
   type MCPServerHandle,
   type OutputFormat,
   type RuntimeKind,
   resolveMCPServers,
-  resolveThinkingLevel,
-  resolveWaveModel,
   startAllMCPServers,
   stopAllMCPServers,
 } from '../ai/index.js';
-import { getSandboxBackend, type SandboxBackend } from '../sandbox/backend.js';
-import { dispatchSpawnWave, type SandboxContext } from '../sandbox/dispatch.js';
-import {
-  buildSandboxImage,
-  DEFAULT_SANDBOX_LIMITS,
-  getContainerStats,
-  killContainer,
-  parseTimeout,
-  startSandboxContainer,
-} from '../sandbox/sandbox.js';
+// Sandbox lifecycle (start + cleanup) moved to ./sandbox-lifecycle.ts (#435).
 import { selectVariants, type VariantSelection } from '../services/ab-test.js';
 import { clearCheckpoint, loadCheckpoint, saveCheckpoint } from '../services/checkpoint.js';
-import { openCodegraph } from '../services/codegraph/index.js';
-import { checkForConflicts } from '../services/conflict-check.js';
-import { EpisodeFTSStore } from '../services/episode-fts.js';
+// codegraph + conflict-check helpers moved to ./codegraph-checks.ts (#435)
 import { type EventBus, getDefaultEventBus } from '../services/event-bus/index.js';
 import { collectPRFeedback } from '../services/feedback-collector.js';
-import { getCurrentHeadSha } from '../services/git-diff.js';
+// getCurrentHeadSha moved into ./wave-runners.ts (#435)
 import { commentOnIssue } from '../services/github.js';
-import { appendHistoryEntry, readHistory } from '../services/history.js';
+import { readHistory } from '../services/history.js';
 import { validateIsolation } from '../services/isolation.js';
 import { detectTooling } from '../services/language-detect.js';
-import { buildLiveHandleSink, defaultLiveFixRegistry, type LiveFixRegistry } from '../services/live-fix-registry.js';
+import { defaultLiveFixRegistry } from '../services/live-fix-registry.js';
 import { buildEpisodeRecord, recordEpisode } from '../services/memory/episode-rest.js';
-import { formatReviewFeedback, queryReviewFeedbackContext } from '../services/memory/review-feedback-rest.js';
+// review-feedback-rest imports moved to ./wave-runners.ts (#435)
 import * as metrics from '../services/metrics.js';
-import { PatternStore, upsertPatternFromEpisode } from '../services/pattern-store.js';
+// pattern-store helpers moved to ./episodic-mirror.ts (#435)
 import { applyScopeToState, detectScope, formatScopeLogLine } from '../services/pipeline-scope.js';
 import { ensureScreenshotsDir, isPlaywrightEnabled, resolvePlaywrightEnv } from '../services/playwright.js';
 import { formatPRContext, type OpenPR } from '../services/pr-context.js';
 import { ProgressTracker } from '../services/progress.js';
 import { type ABTestVariantStats, correlateByABTestVariant } from '../services/prompt-correlation.js';
-import { detectPromptChange, hashPrompt, recordPromptVersion } from '../services/prompt-versions.js';
-import { formatRepoStandards, queryRepoStandards } from '../services/repo-intel.js';
-import { registerRun, updateRun } from '../services/run-registry.js';
+// prompt-versions imports moved into ./context-builder.ts (#435)
+// repo-intel imports moved to ./wave-runners.ts (#435)
+// run-registry imports moved into ./lifecycle.ts (#435)
 import { shutdownRequested } from '../services/shutdown.js';
 import {
   createWorktree,
-  detectDefaultBranch,
-  getChangedFiles,
   worktreePath as getWorktreePath,
   removeWorktree,
   worktreeExists,
 } from '../services/worktree.js';
-import type { EpisodicMemoryConfig } from '../types/config.js';
 import type {
-  FailedPiece,
   FixState,
   Issue,
   PipelineMode,
   RepoConfig,
   SpecResult,
-  WaveHandoff,
-  WaveModelConfig,
   WaveName,
-  WaveResult,
   WaveSingleModelConfig,
 } from '../types/index.js';
 import {
@@ -101,13 +72,25 @@ import {
   AssessResultSchema,
   loadAllHandoffs,
   loadHandoff,
-  QualityRemediationSchema,
   SpecResultSchema,
   saveHandoff,
 } from '../types/index.js';
-import type { EpisodeRecord } from '../types/memory.js';
 import { closeFileLogger, initFileLogger, type Logger, log } from '../utils/logger.js';
+import { probeDependencyOverlap } from './codegraph-checks.js';
 import { applyConsensusToConfig, formatConsensusActivationLog } from './consensus-flags.js';
+import type { FixRunSkills } from './context-builder.js';
+import { upsertEpisodeFTS, upsertEpisodePattern } from './episodic-mirror.js';
+import { emitHistoryEntry } from './history-emit.js';
+import { setupFixLifecycle } from './lifecycle.js';
+import { handoffToResult, waveProvider } from './result.js';
+import { cleanupSandbox, initSandboxLifecycle, startSandbox } from './sandbox-lifecycle.js';
+import { createInitialState, extractOwnerRepo, formatSkipComment } from './state-helpers.js';
+import { runQualityWave, runReviewWave, runShipWave, runTIWave } from './wave-runners.js';
+
+// Re-export helpers from extracted modules for back-compat with test files
+// that imported these from './fix.js' before the strip (issues #242, #262, #435).
+export { handoffToResult, waveFallbackModel } from './result.js';
+
 import {
   type ContextProviderInput,
   gatherContext,
@@ -115,16 +98,13 @@ import {
   PRE_ASSESS_CONTEXT_PROVIDERS,
 } from './context/index.js';
 import { buildWaveContext } from './context.js';
-import { refreshCodebaseContext } from './context-refresh.js';
+// context-refresh moved into ./wave-runners.ts:runTIWave (#435)
 import { buildCostReport, printRunSummary, writeCostReport } from './cost-report.js';
 import {
   AssessEngine,
   type AssessEngineInput,
   applyEngineStateDelta,
   buildAssessConfigDelta,
-  createQualityEngine,
-  createReviewEngine,
-  createShipEngine,
   createTIEngine,
   type EngineContext,
   SpecEngine,
@@ -132,12 +112,13 @@ import {
   type SpecEnginePendingPR,
 } from './engines/index.js';
 import type { TestRunner } from './loops.js';
-import { loadProjectContext, type ProjectContext } from './project-context.js';
-import { loadPrompt, resolvePromptsDir } from './prompts.js';
-import { formatRegressionSurface } from './regression-surface.js';
+import { loadProjectContext } from './project-context.js';
+import { resolvePromptsDir } from './prompts.js';
+// regression-surface helper moved to ./codegraph-checks.ts (#435)
 import { buildRuntimeFactory, resolveRuntimeKind } from './runtime-select.js';
 import { loadWaveSkills } from './skills-loader.js';
-import { detectDependencyOverlaps } from './spec-validator.js';
+
+// spec-validator's detectDependencyOverlaps moved to ./codegraph-checks.ts (#435)
 
 function toOutputFormat(schema: z.ZodType): OutputFormat {
   return {
@@ -211,304 +192,6 @@ export interface FixResult {
   state: FixState;
 }
 
-// --- Helpers ---
-
-/** Extract provider name from a wave's model config.
- *  For consensus pools the "provider" concept doesn't fit (multi-provider by design);
- *  we return the first pool member's provider for telemetry-tagging purposes only. */
-function waveProvider(config: RepoConfig, wave: FixAIWaveName): string {
-  const waveModel = config.model[wave];
-  if (isConsensusPool(waveModel)) {
-    const first = waveModel.pool[0];
-    // `first` is guaranteed defined: pool min length is 2 via WaveConsensusConfigSchema.
-    if (first === undefined) throw new Error(`Empty consensus pool for wave ${wave}`);
-    if (typeof first === 'string') return resolveWaveModel(first).provider;
-    return first.provider;
-  }
-  if (typeof waveModel !== 'string') return waveModel.provider;
-  return resolveWaveModel(waveModel).provider;
-}
-
-/** Determine the fallback model string for a wave config, if applicable.
- *  Uses the configured fallback model when set, otherwise falls back to
- *  the tier-default API model for local-only models.
- *
- *  `configFallback === false` (issue #242) disables API fallback entirely —
- *  intended for pure-local setups with no API key. In that mode we skip both
- *  the configured-fallback path and the local-tier default.
- *
- *  Consensus pools are not supported by this single-model fallback path —
- *  pool wave runners handle their own per-member fallback.
- *
- *  Exported for unit testing — callers in this module use it directly. */
-export function waveFallbackModel(
-  waveConfig: WaveModelConfig,
-  modelString: string,
-  configFallback?: string | false,
-): string | undefined {
-  // Explicit opt-out: `false` disables ALL fallback paths (issue #242).
-  if (configFallback === false) return undefined;
-  // Configured fallback takes priority — only use if different from primary
-  if (configFallback && configFallback !== modelString) return configFallback;
-  // Default behavior: local models fall back to API tier defaults
-  if (!isLocalModel(modelString)) return undefined;
-  if (isConsensusPool(waveConfig)) {
-    // Pool wave runners own their own fallback per member; nothing to do here.
-    return undefined;
-  }
-  if (typeof waveConfig === 'string') {
-    if (waveConfig === 'small' || waveConfig === 'medium' || waveConfig === 'large') {
-      return getApiFallbackModelString(waveConfig);
-    }
-    // Bare model string with local prefix — fall back to medium tier
-    return getApiFallbackModelString('medium');
-  }
-  // Object override with a local provider — fall back to medium tier
-  return getApiFallbackModelString('medium');
-}
-
-/** Spawn a wave agent with automatic local-to-API fallback. Returns handoff + prompt hash.
- *
- * When `sandbox` is provided, the wave is dispatched into the sandbox container via
- * `dispatchSpawnWave` — the AI runs on `/workspace` inside the container, not on the
- * host filesystem. Without `sandbox`, the wave runs in-process on the host (the
- * worktree/none isolation modes).
- *
- * Issue #297: when `cacheContext` is provided, builds a deterministic
- * `sessionId` of the form `kova-<repo>-<issue>-<wave>` and forwards it to the
- * underlying spawn so providers that key prompt caching off session affinity
- * can keep the cache hot across the multi-turn run. The per-wave cache
- * retention default (long for impl/test) is applied inside spawnWaveAgent.
- */
-/** Cached per-run skills + the configured enabledWaves list. Loaded once at the
- *  top of `fix()` and threaded through `spawnWave` so each wave's loadPrompt
- *  call gets the same skill set without re-scanning the filesystem (issue #298). */
-interface FixRunSkills {
-  skills: readonly import('@earendil-works/pi-coding-agent').Skill[];
-  enabledWaves: readonly import('../types/index.js').SkillWaveName[];
-}
-
-async function spawnWave<T>(
-  wave: FixAIWaveName,
-  workDir: string,
-  repoPath: string,
-  config: RepoConfig,
-  userMessage: string,
-  outputFormat?: OutputFormat,
-  mcpHandles?: Map<string, MCPServerHandle>,
-  playwright?: { enabled: boolean },
-  promptsDir?: string,
-  projectContext?: ProjectContext,
-  abTestVariant?: string,
-  sandbox?: SandboxContext | undefined,
-  runSkills?: FixRunSkills | undefined,
-  cacheContext?: { repo: string; issue: string | number },
-  eventContext?: { eventBus: EventBus; runId: string; repoId: string; fixId: string },
-  /**
-   * Issue #407 — pre-resolved `AgentRuntimeFactory`. When undefined, spawnWaveAgent
-   * applies its own `defaultAgentRuntimeFactory` default (pi-mono).  Caller `fix()`
-   * resolves precedence (option > config.runtime > 'pi') once and threads the
-   * factory into every wave so the runtime choice is consistent across S/T/I/Q/R.
-   */
-  runtimeFactory?: AgentRuntimeFactory | undefined,
-  /**
-   * Issue #306 — host-resolved MCP server config map. Forwarded only when
-   * `sandbox` is set so dispatch.ts can serialize it across the docker-exec
-   * boundary; the runner inside the sandbox starts the same servers locally
-   * on `/workspace`. Host-path waves get MCP tools via `mcpHandles` (live
-   * connections) and ignore this field — it would be redundant on the host.
-   */
-  resolvedMcpServers?: Record<string, import('../types/index.js').MCPServerConfig> | undefined,
-  /**
-   * Issue #294 — optional LiveFixRegistry to register the wave's live agent
-   * handle in (keyed by `eventContext.fixId`). When set, `kova send <fixId>`
-   * and `kova kill <fixId>` route into the running wave via the daemon's
-   * steer/abort RPCs. When unset, the wave runs unchanged — backward-compat.
-   * Sandbox path skips registration (agent runs in a remote container).
-   */
-  liveFixRegistry?: LiveFixRegistry | undefined,
-): Promise<{ handoff: WaveHandoff<T>; promptHash: string }> {
-  const model = resolveWaveModel(config.model[wave]);
-  const mcpTools =
-    mcpHandles && mcpHandles.size > 0
-      ? getMCPToolsForWave(wave, mcpHandles, config.mcp?.waves as Partial<Record<FixAIWaveName, string[]>> | undefined)
-      : undefined;
-  const tools = getWaveTools(wave, workDir, { customTools: config.tools, mcpTools, playwright });
-  const systemPrompt = await loadPrompt(wave, config.tools, projectContext, promptsDir, {
-    abTestVariant,
-    ...(runSkills != null && {
-      skills: { skills: runSkills.skills, enabledWaves: runSkills.enabledWaves },
-    }),
-  });
-  const promptHash = hashPrompt(systemPrompt);
-
-  // Prompt versioning: detect changes and record version
-  const change = await detectPromptChange(repoPath, wave, systemPrompt).catch(() => null);
-  if (change) {
-    log.info(`Prompt changed for ${wave}: ${change.previousHash} → ${change.currentHash}`);
-  }
-  await recordPromptVersion(repoPath, wave, systemPrompt).catch(() => {});
-  const thinkingLevel = resolveThinkingLevel(config, wave);
-  const modelString = getModelString(model);
-  const fallbackModel = waveFallbackModel(config.model[wave], modelString, config.model.fallback);
-  // Issue #244: per-repo wave_timeout override (seconds) → ms.
-  // Falls back to DEFAULT_WAVE_TIMEOUTS in spawnWaveAgent when undefined.
-  const timeoutSeconds = config.rules.wave_timeout?.[wave];
-  const timeoutMs = timeoutSeconds != null ? timeoutSeconds * 1000 : undefined;
-  // Issue #297: build a deterministic session id when caller supplied the
-  // cache context. Forwarded to dispatchSpawnWave → spawnWaveAgent →
-  // runtime, where pi-mono Agent threads it into the provider call as the
-  // cache-affinity key. Cache retention defaults (long for impl/test) are
-  // applied inside spawnWaveAgent and do not need to be set here.
-  const sessionId = cacheContext != null ? buildWaveSessionId({ ...cacheContext, wave }) : undefined;
-  // Issue #306 — when dispatching into a sandbox, the host-side `mcpHandles`
-  // live connections cannot cross the container boundary. Instead we forward
-  // the resolved MCP server CONFIG map (commands + args + env) so the
-  // in-container runner can call `startAllMCPServers` on /workspace itself.
-  // Host-path waves use `mcpTools` (already in `tools`) and don't need this.
-  const sandboxMcpServers =
-    sandbox != null && resolvedMcpServers != null && Object.keys(resolvedMcpServers).length > 0
-      ? resolvedMcpServers
-      : undefined;
-  const sandboxMcpWaveOverrides =
-    sandbox != null ? (config.mcp?.waves as Partial<Record<FixAIWaveName, string[]>> | undefined) : undefined;
-
-  // Issue #294: when a registry + fixId are present AND we're on the host path
-  // (no sandbox), build a sink that registers the live handle under the fixId
-  // for the duration of this wave. The wrapped handle also publishes
-  // `steered` / `aborted` events on the shared bus with `reason: 'manual_*'`
-  // so subscribers (kova capture, event ledger) can observe send-keys actions
-  // distinct from automatic Tier-1/Tier-3 degradation. We clear the entry
-  // from the same closure that registered it so concurrent waves on other
-  // fixIds are unaffected. Sandbox path skips registration (the agent runs
-  // in a remote container — there is no in-process handle to expose).
-  const fixIdForRegistry = eventContext?.fixId;
-  const liveHandleSink = buildLiveHandleSink({
-    registry: liveFixRegistry,
-    fixId: fixIdForRegistry,
-    sandboxActive: sandbox != null,
-    ...(eventContext != null
-      ? { eventBus: eventContext.eventBus, eventContext: { runId: eventContext.runId, repoId: eventContext.repoId } }
-      : {}),
-    wave,
-  });
-
-  try {
-    const handoff = await dispatchSpawnWave<T>(
-      {
-        wave,
-        model: modelString,
-        tools,
-        systemPrompt,
-        handoffContext: '',
-        userMessage,
-        cwd: workDir,
-        thinkingLevel,
-        fallbackModel,
-        ...(outputFormat != null && { outputFormat }),
-        ...(timeoutMs != null && { timeoutMs }),
-        ...(sessionId != null ? { sessionId } : {}),
-        // Issue #340: forward eventBus + eventContext so wave-executor's
-        // wave-enter / wave-output / cost / aborted events share the same
-        // runId/fixId tags as the fix() lifecycle events. Subscribers can
-        // correlate the full lifecycle on a single fixId.
-        ...(eventContext != null
-          ? {
-              eventBus: eventContext.eventBus,
-              eventContext: { runId: eventContext.runId, repoId: eventContext.repoId, fixId: eventContext.fixId },
-            }
-          : {}),
-        ...(runtimeFactory != null ? { runtimeFactory } : {}),
-        // Issue #306 — sandbox-only MCP plumbing; host path ignores these fields.
-        ...(sandboxMcpServers != null ? { mcpServers: sandboxMcpServers } : {}),
-        ...(sandboxMcpWaveOverrides != null ? { mcpWaveOverrides: sandboxMcpWaveOverrides } : {}),
-        // Issue #294 — host-path only; sandbox is excluded above.
-        ...(liveHandleSink != null ? { liveHandleSink } : {}),
-      },
-      sandbox,
-    );
-    return { handoff, promptHash };
-  } finally {
-    // Issue #294: clear the live handle for this fixId so a subsequent
-    // `kova send <fixId>` between waves (or after the fix completes) returns
-    // a clear "not running" error instead of routing into a stale agent.
-    if (liveFixRegistry != null && fixIdForRegistry != null) {
-      liveFixRegistry.clear(fixIdForRegistry);
-    }
-  }
-}
-
-/** Convert a WaveHandoff to WaveResult for checkpoint/cost-report compatibility.
- *
- *  Exported for unit testing the consensus-telemetry propagation contract
- *  (#262). Callers within this module use it directly.
- *
- *  When the handoff carries a `consensus` property (only emitted by
- *  `spawnConsensusWave`), project it into `WaveResult.consensus` so the
- *  multi-model telemetry survives the WaveResult round-trip. Single-model
- *  handoffs leave `WaveResult.consensus` undefined — existing consumers are
- *  unaffected. */
-export function handoffToResult(handoff: WaveHandoff, provider?: string, promptHash?: string): WaveResult {
-  const result: WaveResult = {
-    wave: handoff.wave,
-    success: true,
-    artifact: handoff.artifact,
-    duration: 0,
-    cost: handoff.cost,
-    turns: handoff.turns,
-    model: handoff.model,
-    provider,
-    fallback_used: handoff.fallback_used || undefined,
-    local_attempt_cost: handoff.local_attempt_cost,
-    promptHash,
-    structured_output_metrics: handoff.structured_output_metrics,
-    toolCallCounts: handoff.toolCallCounts,
-  };
-  // Structural check: ConsensusWaveHandoff extends WaveHandoff with a
-  // `consensus` member of shape `ConsensusMetadata`. We project the relevant
-  // fields onto the flattened `WaveResultConsensus` telemetry shape — pool
-  // becomes the list of pool model ids in input order, rejected_count is
-  // recomputed (not stored on ConsensusMetadata directly; see #262 spec).
-  const consensus = (handoff as unknown as { consensus?: import('../ai/parallel-executor.js').ConsensusMetadata })
-    .consensus;
-  if (consensus != null) {
-    result.consensus = {
-      pool: consensus.pool_results.map((r) => r.model),
-      adjudicator: consensus.adjudicator_model,
-      agreement: consensus.agreement,
-      // `rejected_count` is reported via the disagreement log record in
-      // `spawnConsensusWave` (which has access to the artifacts). At this
-      // mapping layer we don't have the raw artifacts anymore — but we DO
-      // know the answer when the handoff itself was produced by a consensus
-      // wave: the count is computed below the handoff layer. For now, default
-      // to 0 here; pipeline call sites that own the disagreement log can
-      // overwrite `result.consensus.rejected_count` when they construct the
-      // WaveResult. See the WaveResultConsensus jsdoc on config.ts.
-      rejected_count: 0,
-      degraded: consensus.degraded,
-    };
-  }
-  return result;
-}
-
-/** Convert a WaveResult to WaveHandoff for persistence. */
-function waveResultToHandoff(result: WaveResult): WaveHandoff {
-  // Infer `parsed` from the artifact shape: structured artifacts are objects;
-  // raw model output that fell back to string fails the discriminator. See issue #308.
-  const parsed = typeof result.artifact !== 'string' && result.artifact != null;
-  return {
-    wave: result.wave,
-    timestamp: new Date().toISOString(),
-    model: result.model ?? 'unknown',
-    cost: result.cost,
-    turns: result.turns,
-    confidence: 'medium',
-    parsed,
-    artifact: result.artifact,
-    approach_notes: '',
-  };
-}
-
 // --- Active fix counter (for gauge) ---
 let _activeFixes = 0;
 
@@ -552,97 +235,24 @@ export async function fix(options: FixOptions): Promise<FixResult> {
   const flog: Logger = log.child({ issue: issue.number, repo: repoName });
   initFileLogger(repoPath, runId);
 
-  // Event bus (issue #340): resolve to the caller-provided bus, else the
-  // process-singleton. `fixId` is stable across the lifecycle so subscribers
-  // can correlate `fix-started` → wave events → `fix-done` on the same
-  // identifier. `runId` doubles as the bus-level run id; loop.ts callers
-  // who share a bus across concurrent fixes get one event stream tagged by
-  // `fixId`. `publishedFixDone` guards against the finally block double-
-  // publishing the terminal event when an early return path already emitted.
+  // Lifecycle (issue #340 + #293): event-bus + run-registry plumbing moved to
+  // `./lifecycle.ts`. Resolves the bus (caller-provided or singleton), publishes
+  // `fix-started`, registers the on-disk run entry, and returns a `publishFixDone`
+  // that mirrors the terminal event + registry status. `fixId === runId` is
+  // stable across the lifecycle so subscribers correlate every event on the
+  // same identifier.
   const eventBus = options.eventBus ?? getDefaultEventBus();
   const fixId = runId;
-  let publishedFixDone = false;
-
-  // Issue #293: register this fix in the on-disk RunRegistry and mirror
-  // wave-enter / fix-done into it so `kova ls` and `kova attach` can discover
-  // and follow the run. Registry writes are fire-and-forget (best-effort, log
-  // on failure) — a registry-disk problem must never alter fix outcomes.
-  const registerRunSafe = (run: Parameters<typeof registerRun>[1]): Promise<void> =>
-    registerRun(repoPath, run).catch((err) => {
-      flog.warn(`[run-registry] registerRun failed: ${err instanceof Error ? err.message : String(err)}`);
-    });
-  const updateRunSafe = (patch: Parameters<typeof updateRun>[2]): Promise<void> =>
-    updateRun(repoPath, runId, patch).catch((err) => {
-      flog.warn(`[run-registry] updateRun failed: ${err instanceof Error ? err.message : String(err)}`);
-    });
-  // Subscribe to wave-enter events on this fixId to write the currentWave
-  // field as the pipeline advances. Subscription is per-fixId, so other
-  // concurrent fixes on the same bus do not bleed into this run's registry
-  // entry. The unsubscribe is invoked from publishFixDone() so the bus does
-  // not retain a listener after the run terminates.
-  const unsubscribeWaveEnter = eventBus.subscribeForFix(fixId, (event) => {
-    if (event.type === 'wave-enter') {
-      void updateRunSafe({ currentWave: event.wave });
-    }
-  });
-
-  const publishFixDone = async (
-    outcome: 'done' | 'failed' | 'done_with_known_issues',
-    extras: { totalCostUsd: number; prNumber?: number; reason?: string },
-  ): Promise<void> => {
-    if (publishedFixDone) return;
-    publishedFixDone = true;
-    try {
-      eventBus.publish({
-        type: 'fix-done',
-        runId,
-        repoId: repoName,
-        fixId,
-        outcome,
-        totalCostUsd: extras.totalCostUsd,
-        ...(extras.prNumber != null ? { prNumber: extras.prNumber } : {}),
-        ...(extras.reason != null ? { reason: extras.reason } : {}),
-      });
-    } catch (err) {
-      // Pure side-effect: a misbehaving bus must never alter fix outcomes.
-      flog.warn(`[event-bus] fix-done publish failed: ${err instanceof Error ? err.message : String(err)}`);
-    }
-    // Issue #293: mirror terminal status into the on-disk registry BEFORE
-    // returning so callers (and tests) observing the registry after fix()
-    // resolves see the terminal status, not the prior 'running'. We map
-    // 'done_with_known_issues' to 'done' — the registry's status field is
-    // the binary "is this still active?" signal that `kova ls` needs;
-    // outcome detail lives in the event stream.
-    const registryStatus = outcome === 'failed' ? 'failed' : 'done';
-    await updateRunSafe({
-      status: registryStatus,
-      completedAt: new Date().toISOString(),
-      ...(extras.prNumber != null ? { prNumber: extras.prNumber } : {}),
-    });
-    unsubscribeWaveEnter();
-  };
-
-  try {
-    eventBus.publish({
-      type: 'fix-started',
-      runId,
-      repoId: repoName,
-      fixId,
-      issueNumber: issue.number,
-    });
-  } catch (err) {
-    flog.warn(`[event-bus] fix-started publish failed: ${err instanceof Error ? err.message : String(err)}`);
-  }
-  // Issue #293: register the run AFTER fix-started publishes so the on-disk
-  // entry is created exactly once per run lifecycle.
-  await registerRunSafe({
+  const lifecycle = await setupFixLifecycle({
+    eventBus,
+    repoPath,
+    repoName,
     runId,
     fixId,
-    repoId: repoName,
     issueNumber: issue.number,
-    startedAt: new Date().toISOString(),
-    status: 'running',
+    logger: flog,
   });
+  const publishFixDone = lifecycle.publishFixDone;
 
   // Pre-flight: validate isolation mode is available
   const isolationCheck = await validateIsolation(config.isolation);
@@ -712,83 +322,24 @@ export async function fix(options: FixOptions): Promise<FixResult> {
 
   // Sandbox: start the configured backend (docker by default, daytona for serverless persistence).
   // The backend abstraction (issue #301) lets repos.yaml swap docker for daytona/modal/fly without
-  // touching pipeline code. The `docker` path preserves its legacy semantics (image build + timeout
-  // kill) because they are docker-specific; non-docker backends manage hibernate/resume themselves.
-  let sandboxContainerId: string | undefined;
-  let sandboxContainerName: string | undefined;
-  let sandboxContext: SandboxContext | undefined;
-  let sandboxBackend: SandboxBackend | undefined;
-  let sandboxTimeoutHandle: ReturnType<typeof setTimeout> | undefined;
-  let sandboxTimedOut = false;
-  const sandboxStartTime = Date.now();
-
+  // touching pipeline code. Start logic delegated to `./sandbox-lifecycle.ts:startSandbox` (#435).
+  const sandboxLifecycle = { ...initSandboxLifecycle() };
   if (config.isolation === 'docker') {
-    // `sandbox.backend` defaults to 'docker' via Zod, but the optional sandbox block can be omitted
-    // entirely — fall back to 'docker' explicitly so behavior matches pre-extraction default.
-    const backendName = config.sandbox?.backend ?? 'docker';
-    sandboxBackend = getSandboxBackend(backendName);
-
-    if (backendName === 'docker') {
-      // Legacy docker path: image build + direct container start. Behavior preserved bit-for-bit.
-      const buildResult = await buildSandboxImage({ repoName, config: config.sandbox });
-      if (!buildResult.success) {
-        const state = createInitialState(issue, repoName, repoPath);
-        state.status = 'failed';
-        const errorMsg = buildResult.error ?? 'Docker image build failed';
-        state.error = errorMsg;
-        metrics.recordIssueFailed();
-        metrics.recordFixDuration(Date.now() - fixStartTime);
-        metrics.recordFixCost(0);
-        _activeFixes--;
-        metrics.setActiveFixes(_activeFixes);
-        return { success: false, error: errorMsg, state };
-      }
-
-      const sandbox = await startSandboxContainer({
-        repoName,
-        issueNumber: issue.number,
-        repoPath: workDir,
-        config: config.sandbox,
-      });
-      sandboxContainerId = sandbox.containerId;
-      sandboxContainerName = sandbox.containerName;
-      // Build the SandboxContext that every wave-dispatch site below uses to
-      // route into the container. Without this, the AI would run on the host
-      // and the docker isolation would be a no-op (see issue #319).
-      sandboxContext = { containerName: sandbox.containerName, repoPath: workDir };
-
-      // Set up timeout kill
-      const timeoutStr = config.sandbox?.timeout ?? DEFAULT_SANDBOX_LIMITS.timeout;
-      const timeoutMs = parseTimeout(timeoutStr);
-      sandboxTimeoutHandle = setTimeout(async () => {
-        sandboxTimedOut = true;
-        flog.warn(`[sandbox] Timeout (${timeoutStr}) exceeded — killing container ${sandboxContainerName}`);
-        if (sandboxContainerId) await killContainer(sandboxContainerId);
-      }, timeoutMs);
-    } else {
-      // Non-docker backend (daytona/modal/etc) — delegate fully to the SandboxBackend interface.
-      // Credential errors surface here at start() rather than mid-wave, matching the
-      // acceptance criterion "fail fast with a clear classified error during start".
-      const handle = await sandboxBackend.start({
-        repoName,
-        issueNumber: issue.number,
-        repoPath: workDir,
-        config: config.sandbox,
-      });
-      sandboxContainerId = handle.containerId;
-      sandboxContainerName = handle.containerName;
-      // Non-docker backends own wave dispatch through `SandboxBackend.execWave()` — issue #379
-      // generalized dispatch.ts to prefer `sandbox.backend` over the legacy docker-exec path
-      // when present. The Docker branch above continues to pass only `containerName`+`repoPath`
-      // so its behavior is bit-for-bit identical to the pre-extraction direct calls.
-      sandboxContext = {
-        containerName: handle.containerName,
-        repoPath: workDir,
-        backend: sandboxBackend,
-      };
-      flog.info(`[sandbox] Backend '${backendName}' started: ${handle.containerName} (dispatch via backend.execWave)`);
+    const startResult = await startSandbox({ issue, repoName, workDir, config, logger: flog });
+    if (startResult.status === 'failed') {
+      const state = createInitialState(issue, repoName, repoPath);
+      state.status = 'failed';
+      state.error = startResult.error;
+      metrics.recordIssueFailed();
+      metrics.recordFixDuration(Date.now() - fixStartTime);
+      metrics.recordFixCost(0);
+      _activeFixes--;
+      metrics.setActiveFixes(_activeFixes);
+      return { success: false, error: startResult.error, state };
     }
+    Object.assign(sandboxLifecycle, startResult.state);
   }
+  const sandboxContext = sandboxLifecycle.context;
 
   // Issue #271 — codegraph init+probe gate.
   //
@@ -1182,46 +733,13 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       if (interrupted) return interrupted;
     }
 
-    // Codegraph dependency-overlap gate (issue #276) — orchestrator concern,
-    // not spec-validation concern. Probes cross-piece call/import edges even
-    // when piece file sets are disjoint and forces serial when found.
+    // Codegraph dependency-overlap gate (issue #276). Even when piece file
+    // sets are disjoint, the graph may reveal cross-piece call/import edges
+    // that force serial execution. Delegated to `./codegraph-checks.ts`.
     const specArtifactPostEngine = state.waveResults.spec?.artifact as SpecResult | undefined;
-    if (specArtifactPostEngine?.pieces && specArtifactPostEngine.pieces.length > 0) {
-      // Issue #276 — dependency-overlap gate. Even when piece file sets are
-      // fully disjoint, the codegraph may reveal cross-piece call/import edges
-      // (e.g. piece A defines `exportedFn` in src/a.ts, piece B calls it from
-      // src/b.ts). Running both concurrently risks rename/signature collision.
-      // We probe the graph and, if any cross-piece edges exist, force serial
-      // execution. Graph unavailable -> falls back to file-overlap-only
-      // behavior (this block is a no-op).
-      if (specArtifactPostEngine.pieces.length > 1 && !serialFallback) {
-        try {
-          const dbPath = joinPath(repoPath, '.kova', 'codegraph.db');
-          const cg = openCodegraph(dbPath);
-          try {
-            const depOverlaps = detectDependencyOverlaps(specArtifactPostEngine.pieces, {
-              listFileSymbols: (fp) => cg.listFileSymbols(fp),
-              getCallers: (id) => cg.getCallers(id),
-            });
-            if (depOverlaps.length > 0) {
-              const sampleNames = depOverlaps
-                .slice(0, 3)
-                .map((o) => `${o.sourcePieceName}->${o.dependentPieceName}(${o.symbolName})`)
-                .join(', ');
-              log.warn(
-                `[fix] Dependency-overlap detected (${depOverlaps.length} cross-piece edge(s): ${sampleNames}) — forcing serial execution`,
-              );
-              serialFallback = true;
-            }
-          } finally {
-            cg.close();
-          }
-        } catch (err) {
-          // Graceful fallback: codegraph missing/unreachable — keep existing
-          // file-overlap-only behavior. Logged at debug to avoid noise on the
-          // common "no codegraph indexed" path.
-          log.debug(`[fix] dependency-overlap probe degraded: ${err instanceof Error ? err.message : String(err)}`);
-        }
+    if (specArtifactPostEngine?.pieces && !serialFallback) {
+      if (probeDependencyOverlap({ pieces: specArtifactPostEngine.pieces, repoPath, logger: log })) {
+        serialFallback = true;
       }
     }
 
@@ -1287,296 +805,90 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       }
     }
 
-    // WAVE T + I: Parallel Piece TI Loop (fan-out per piece, backward compat for 1 piece)
+    // WAVE T + I: delegated to `./wave-runners.ts:runTIWave` (#435). Encapsulates
+    // pre-impl SHA capture (#277), TIEngine dispatch, handoff persistence,
+    // post-impl codebaseContext refresh, and the shouldRespec escalation.
     if (!(shouldSkip('test') && shouldSkip('impl'))) {
-      const tiWaveStart = Date.now();
-
-      // Issue #277: capture the pre-impl HEAD SHA so `refreshCodebaseContext`
-      // can later list the affected-set via `git diff <sha> HEAD` and
-      // incrementally re-embed only those files. Failure to capture (e.g. a
-      // shallow worktree mid-rebase) degrades to `null` → refresh becomes a
-      // no-op rather than a full-repo reindex.
-      let preImplSha: string | null = null;
-      try {
-        preImplSha = await getCurrentHeadSha(workDir);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        flog.warn(`[context-refresh] Could not capture pre-impl SHA (${msg}) — context refresh will be a no-op`);
-      }
-
-      // WAVE T+I — delegated to TIEngine (issue #357). Engine wraps
-      // runParallelPieceTILoop and returns the full ParallelPieceTILoopResult
-      // as `handoff.artifact`, preserving every field the orchestrator reads.
-      const tiCtx = buildEngineContext();
-      const tiEngineResult = await tiEngine.run(tiCtx, {
+      const tiOutcome = await runTIWave({
         issue,
-        waveResults: state.waveResults,
-        ...(prContext != null && { prContext }),
-        ...(codebaseContext != null && { codebaseContext }),
-        ...(codegraphContext != null && { codegraphContext }),
-        ...(callPathContext != null && { callPathContext }),
-        ...(testRunner != null && { testRunner }),
-        ...(serialFallback && { maxConcurrent: 1 }),
-        ...(skipTestPhase && { skipTestPhase: true }),
-        ...(skipImplPhase && { skipImplPhase: true }),
-        ...(extraImplAttempts > 0 && { extraImplAttempts }),
-      });
-      const tiResult = tiEngineResult.handoff.artifact;
-
-      // Save handoffs for test and impl
-      await saveHandoff(workDir, waveResultToHandoff(tiResult.testWaveResult));
-      state.waveResults.test = tiResult.testWaveResult;
-
-      const implHandoff: WaveHandoff = {
-        ...waveResultToHandoff(tiResult.implWaveResult),
-        confidence: tiResult.testsPassing ? 'high' : 'low',
-        approach_notes: tiResult.diagnosis ? `diagnosis: ${tiResult.diagnosis}` : '',
-      };
-      await saveHandoff(workDir, implHandoff);
-      state.waveResults.impl = tiResult.implWaveResult;
-      // Issue #432 — apply TIEngine stateDelta (diagnosis/thrashingSignal/
-      // retryAttempts) through the single application point.
-      state = applyEngineStateDelta(state, tiEngineResult.stateDelta);
-
-      if (!state.completedWaves.includes('test')) state.completedWaves.push('test');
-      if (!state.completedWaves.includes('impl')) state.completedWaves.push('impl');
-      await saveCheckpoint(workDir, state);
-      await progress?.waveCompleted('impl', state);
-      const tiDuration = Date.now() - tiWaveStart;
-      metrics.recordWaveCompleted('test');
-      metrics.recordWaveDuration('test', tiDuration);
-      metrics.recordWaveCompleted('impl');
-      metrics.recordWaveDuration('impl', tiDuration);
-
-      // Issue #277: refresh codebaseContext to reflect post-impl edits BEFORE
-      // any subsequent wave (re-spec / re-impl on shouldRespec, conflict
-      // resolution retry, etc) consumes it. No-op when vectordb is disabled,
-      // when no source files changed, or when the pre-impl SHA was not
-      // captured. Failures degrade to the stale (pre-impl) context — never
-      // crash the pipeline.
-      codebaseContext = await refreshCodebaseContext({
+        state,
         config,
         workDir,
-        sinceSha: preImplSha,
-        issueQuery: `${issue.title}\n\n${issue.body}`,
-        currentContext: codebaseContext,
+        prContext,
+        codebaseContext,
+        codegraphContext,
+        callPathContext,
+        failedEpisodicContext,
+        repoSearchText,
+        testRunner,
+        serialFallback,
+        skipTestPhase,
+        skipImplPhase,
+        extraImplAttempts,
+        pendingPRFileList,
+        tiEngine,
+        specCtxBase,
+        buildEngineContext,
+        progress,
+        setPromptHash,
+        logger: flog,
       });
-
-      // Escalation: shouldRespec → re-run spec + TI loop (max 1 re-spec).
-      // Both delegated to their engines (issue #357).
-      if (!tiResult.testsPassing && tiResult.shouldRespec) {
-        flog.info(`[escalation] ${tiResult.diagnosis ?? 'SPEC_WRONG'} — re-running spec then TI loop`);
-        const respecContext = `Previous spec led to ${tiResult.diagnosis ?? 'failure'} — the implementation could not pass the tests. Re-examine the requirements and produce a revised spec.`;
-        const respecResult = await SpecEngine.run(specCtxBase, {
-          userMessage: buildWaveContext('spec', issue, state.waveResults, {
-            prContext,
-            ...(failedEpisodicContext != null && { episodicContext: failedEpisodicContext }),
-            ...(codegraphContext != null && { codegraphContext }),
-            ...(callPathContext != null && { callPathContext }),
-            ...(codebaseContext != null && { codebaseContext }),
-            ...(repoSearchText != null && { repoSearchText }),
-            escalationHint: respecContext,
-          }),
-          outputFormat: toOutputFormat(SpecResultSchema),
-          pendingPRFiles: pendingPRFileList,
-        });
-        await saveHandoff(workDir, respecResult.handoff);
-        setPromptHash('spec', respecResult.promptHash);
-        state.waveResults.spec = handoffToResult(
-          respecResult.handoff,
-          waveProvider(config, 'spec'),
-          respecResult.promptHash,
-        );
-        state = applyEngineStateDelta(state, respecResult.stateDelta);
-
-        const respecTI = await tiEngine.run(tiCtx, {
-          issue,
-          waveResults: state.waveResults,
-          ...(prContext != null && { prContext }),
-          ...(codebaseContext != null && { codebaseContext }),
-          ...(codegraphContext != null && { codegraphContext }),
-          ...(callPathContext != null && { callPathContext }),
-          ...(testRunner != null && { testRunner }),
-          ...(skipTestPhase && { skipTestPhase: true }),
-          ...(skipImplPhase && { skipImplPhase: true }),
-          ...(extraImplAttempts > 0 && { extraImplAttempts }),
-        });
-        const retryTI = respecTI.handoff.artifact;
-        state.waveResults.test = retryTI.testWaveResult;
-        state.waveResults.impl = retryTI.implWaveResult;
-        // Issue #432 — apply respec TI's stateDelta (the retry's diagnosis +
-        // thrashing + attempt counts replace the first attempt's values).
-        state = applyEngineStateDelta(state, respecTI.stateDelta);
-        appendFailedPiece(state, respecTI.newFailedPiece);
-        await saveCheckpoint(workDir, state);
-      } else {
-        // First TI attempt was the final one — append failed piece if present.
-        appendFailedPiece(state, tiEngineResult.newFailedPiece);
-      }
+      state = tiOutcome.state;
+      codebaseContext = tiOutcome.codebaseContext;
 
       const interrupted = await interruptIfShutdown();
       if (interrupted) return interrupted;
     }
 
-    // repo-intel: query for project standards (before quality wave)
-    let repoStandardsText: string | undefined;
-    if (config.repo_intel?.enabled && ownerRepo) {
-      const raw = await queryRepoStandards(config.repo_intel, ownerRepo);
-      if (raw.length > 0) {
-        repoStandardsText = formatRepoStandards(raw);
-      }
-    }
-
-    // WAVE Q: Quality — initial dispatch stays inline (the engine wraps the
-    // retry loop only); self-healing retry delegated to QualityEngine (#357).
+    // WAVE Q: Quality — delegated to `./wave-runners.ts:runQualityWave` (#435).
+    // Encapsulates repo-intel project-standards query, initial quality dispatch,
+    // QualityEngine self-healing retry, and metrics/checkpoint persistence.
     if (!shouldSkip('quality')) {
-      const waveStart = Date.now();
-      const { handoff, promptHash } = await spawnWave(
-        'quality',
+      state = await runQualityWave({
+        issue,
+        state,
+        config,
         workDir,
         repoPath,
-        config,
-        buildWaveContext('quality', issue, state.waveResults, {
-          coverageThreshold: config.rules.coverage,
-          ...(repoStandardsText != null && { repoStandardsText }),
-        }),
-        toOutputFormat(QualityRemediationSchema),
+        ownerRepo,
+        testRunner,
         mcpHandles,
-        undefined,
         resolvedPromptsDir,
         projectContext,
-        abTestVariants?.quality,
+        abTestVariants,
         sandboxContext,
         runSkills,
         cacheContext,
-        eventDispatchContext,
+        eventContext: eventDispatchContext,
         resolvedRuntimeFactory,
         resolvedMcpServers,
-        defaultLiveFixRegistry,
-      );
-      await saveHandoff(workDir, handoff);
-      setPromptHash('quality', promptHash);
-      state.waveResults.quality = handoffToResult(handoff, waveProvider(config, 'quality'), promptHash);
-      state.completedWaves.push('quality');
-      await saveCheckpoint(workDir, state);
-      await progress?.waveCompleted('quality', state);
-      metrics.recordWaveCompleted('quality');
-      metrics.recordWaveDuration('quality', Date.now() - waveStart);
-
-      // Quality self-healing: delegated to QualityEngine.
-      const qualityEngine = createQualityEngine();
-      const qualityRetryEngineResult = await qualityEngine.run(buildEngineContext(), {
-        issue,
-        waveResults: state.waveResults,
-        ...(testRunner != null && { testRunner }),
+        liveFixRegistry: defaultLiveFixRegistry,
+        buildEngineContext,
+        progress,
+        setPromptHash,
+        logger: flog,
       });
-      const qualityRetry = qualityRetryEngineResult.handoff.artifact;
-      if (qualityRetry.retried) {
-        state.waveResults.quality = qualityRetry.qualityWaveResult;
-        await saveCheckpoint(workDir, state);
-        log.info(`[fix] Quality self-healing completed (cost: $${qualityRetry.totalCost.toFixed(2)})`);
-      }
-
       const interrupted = await interruptIfShutdown();
       if (interrupted) return interrupted;
     }
 
-    // WAVE R: Review Loop
+    // WAVE R: Review — delegated to `./wave-runners.ts:runReviewWave` (#435).
     if (!shouldSkip('review')) {
-      // Issue #271 — sync the codegraph so impact/callers/callees reflect
-      // WAVE-I edits before the review wave consults the graph. Only runs when
-      // codegraph is on PATH AND was not withheld for empty index — otherwise
-      // there is nothing to sync.
-      if (codegraphAvailable && codegraphWithholdList.length === 0) {
-        const syncResult = await syncCodegraph(workDir);
-        if (!syncResult.ok) {
-          flog.warn(`[codegraph] pre-review sync failed (${syncResult.reason}) — review will use stale graph`);
-        } else {
-          flog.info('[codegraph] pre-review sync complete');
-        }
-      }
-
-      const waveStart = Date.now();
-      // Query past review feedback for injection into review wave
-      let reviewFeedbackContext: string | undefined;
-      if (config.episodes?.enabled) {
-        const feedbackItems = await queryReviewFeedbackContext(
-          config.episodes,
-          `${issue.title}\n\n${issue.body}`,
-          repoName,
-          workDir,
-        );
-        if (feedbackItems.length > 0) {
-          reviewFeedbackContext = formatReviewFeedback(feedbackItems);
-        }
-      }
-
-      // Issue #276 — compute regression-surface context from the codegraph.
-      // For each file changed in the worktree, list dependents (callers +
-      // importers) so the reviewer can verify behavioral consistency at each
-      // dependent. Graceful: any failure leaves context undefined and the
-      // review wave proceeds with the existing inputs.
-      let regressionSurfaceContext: string | undefined;
-      try {
-        const changedFiles = await getChangedFiles(workDir);
-        if (changedFiles.length > 0) {
-          const dbPath = joinPath(repoPath, '.kova', 'codegraph.db');
-          const cg = openCodegraph(dbPath);
-          try {
-            const formatted = formatRegressionSurface({
-              lookup: {
-                listFileSymbols: (fp) => cg.listFileSymbols(fp),
-                getCallers: (id) => cg.getCallers(id),
-                getFileDependents: (fp) => cg.getFileDependents(fp),
-              },
-              changedFiles,
-            });
-            if (formatted.length > 0) {
-              regressionSurfaceContext = formatted;
-              flog.info(
-                `[regression-surface] injected (${changedFiles.length} changed files, ${formatted.length} chars)`,
-              );
-            }
-          } finally {
-            cg.close();
-          }
-        }
-      } catch (err) {
-        flog.warn(
-          `[regression-surface] degraded — proceeding without surface context: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-
-      // WAVE R — delegated to ReviewEngine (issue #357).
-      const reviewEngine = createReviewEngine();
-      const reviewEngineResult = await reviewEngine.run(buildEngineContext(), {
+      state = await runReviewWave({
         issue,
-        waveResults: state.waveResults,
-        ...(prContext != null && { prContext }),
-        ...(reviewFeedbackContext != null && { reviewFeedbackContext }),
-        ...(regressionSurfaceContext != null && { regressionSurfaceContext }),
-        ...(testRunner != null && { testRunner }),
+        state,
+        config,
+        repoName,
+        workDir,
+        repoPath,
+        prContext,
+        testRunner,
+        codegraphAvailable,
+        codegraphWithholdList,
+        buildEngineContext,
+        progress,
+        logger: flog,
       });
-      const reviewLoopResult = reviewEngineResult.handoff.artifact;
-
-      // Save review handoff — engine emits the same shape as the prior inline
-      // construction (model + cost + turns + confidence + iterations notes).
-      await saveHandoff(workDir, reviewEngineResult.handoff);
-
-      state.waveResults.review = reviewLoopResult.reviewWaveResult;
-      if (reviewLoopResult.qualityWaveResult) {
-        state.waveResults.quality = reviewLoopResult.qualityWaveResult;
-      }
-      // Issue #432 — apply reviewKnownIssues through the single application
-      // point. The engine surfaces them via stateDelta when knownIssues are
-      // non-empty; empty list → no delta → state.reviewKnownIssues untouched.
-      state = applyEngineStateDelta(state, reviewEngineResult.stateDelta);
-      state.completedWaves.push('review');
-      await saveCheckpoint(workDir, state);
-      await progress?.waveCompleted('review', state);
-      metrics.recordWaveCompleted('review');
-      metrics.recordWaveDuration('review', Date.now() - waveStart);
-
       const interrupted = await interruptIfShutdown();
       if (interrupted) return interrupted;
     }
@@ -1588,160 +900,28 @@ export async function fix(options: FixOptions): Promise<FixResult> {
     // ship pre-flight), metrics emission, state persistence, and the no-changes
     // early-exit path.
     if (!shouldSkip('ship')) {
-      const shipStart = Date.now();
-      const branch = worktree?.branch ?? `kova/fix-${issue.number}`;
-
-      const specArtifactForShip = state.waveResults.spec?.artifact as SpecResult | undefined;
-      const specFiles = specArtifactForShip?.pieces?.flatMap((p) => p.files) ?? [];
-
-      // Codegraph-aware dependency-overlap pre-flight WARNING (#276). Pure
-      // observation — does not block the ship. Engine runs its own simpler
-      // conflict-check internally; this one logs the cross-file dependent set
-      // so reviewers see the impact before merge.
-      try {
-        const defaultBranch = await detectDefaultBranch(workDir);
-        const committedDiff = await $`git -C ${workDir} diff --name-only origin/${defaultBranch}...HEAD`.nothrow();
-        const committed = committedDiff.exitCode === 0 ? committedDiff.stdout.trim().split('\n').filter(Boolean) : [];
-        const uncommitted = await getChangedFiles(workDir);
-        const allChangedFiles = [...new Set([...committed, ...uncommitted])];
-
-        if (allChangedFiles.length > 0) {
-          const dbPath = joinPath(repoPath, '.kova', 'codegraph.db');
-          const cg = openCodegraph(dbPath);
-          try {
-            const preCheck = await checkForConflicts(workDir, specFiles, {
-              dependencyLookup: {
-                listFileSymbols: (fp) => cg.listFileSymbols(fp),
-                getFileDependents: (fp) => cg.getFileDependents(fp),
-              },
-              changedFiles: allChangedFiles,
-            });
-            if (preCheck.dependencyOverlaps.length > 0) {
-              const sample = preCheck.dependencyOverlaps
-                .slice(0, 3)
-                .map((d) => `${d.sourceFile}->${d.dependentFile}`)
-                .join(', ');
-              flog.warn(
-                `[conflict-check] dependency-overlap surfaced (${preCheck.dependencyOverlaps.length} edge(s): ${sample}) — review the dependents before merging`,
-              );
-            }
-          } finally {
-            cg.close();
-          }
-        }
-      } catch (err) {
-        flog.debug(`[conflict-check] dependency wiring degraded: ${err instanceof Error ? err.message : String(err)}`);
-      }
-
-      metrics.recordRebaseAttempt();
-      const shipEngine = createShipEngine();
-      const shipResult = await shipEngine.run(
-        { workDir, repoPath, config },
-        {
-          issue,
-          branch,
-          specFiles,
-          openPRs: [], // engine fetches via listOpenPRs internally
-          ...(state.mergeDependencies &&
-            state.mergeDependencies.length > 0 && {
-              mergeDependencies: state.mergeDependencies,
-            }),
-          // FixState.reviewKnownIssues stores findings with a broader string
-          // type for category/severity; ShipEngine expects narrowed ReviewFinding
-          // enums. The runtime values are the same — the cast preserves them.
-          ...(state.reviewKnownIssues &&
-            state.reviewKnownIssues.length > 0 && {
-              reviewKnownIssues: state.reviewKnownIssues.map(
-                (i) =>
-                  ({
-                    category: i.category,
-                    file: i.file,
-                    description: i.description,
-                    severity: i.severity,
-                  }) as import('../types/index.js').ReviewFinding,
-              ),
-            }),
-          retryParallelTILoop: async (retryInput) => {
-            // ShipEngine emits this callback when overlapping conflicts are
-            // detected. Run the TI engine again with the conflict hint so the
-            // impl picks up the upstream files. Conflict counter mirrors the
-            // pre-extraction emission path.
-            metrics.recordConflictDetected();
-            const conflictTIResult = await tiEngine.run(buildEngineContext(), {
-              issue,
-              waveResults: state.waveResults,
-              ...(prContext != null && { prContext }),
-              codebaseContext: [codebaseContext, retryInput.codebaseContext].filter(Boolean).join('\n\n'),
-              ...(codegraphContext != null && { codegraphContext }),
-              ...(callPathContext != null && { callPathContext }),
-              ...(testRunner != null && { testRunner }),
-              ...(skipTestPhase && { skipTestPhase: true }),
-              ...(skipImplPhase && { skipImplPhase: true }),
-              ...(extraImplAttempts > 0 && { extraImplAttempts }),
-            });
-            const retryTI = conflictTIResult.handoff.artifact;
-            state.waveResults.test = retryTI.testWaveResult;
-            state.waveResults.impl = retryTI.implWaveResult;
-            await saveCheckpoint(workDir, state);
-            return { testsPassing: retryTI.testsPassing };
-          },
-        },
-      );
-
-      // Map ShipEngine's discriminated-union result back to FixState +
-      // metrics. Failure reasons map to the same error strings the inline
-      // ship phase used pre-extraction so consumers see no diff.
-      if (shipResult.status === 'failed') {
-        if (shipResult.reason === 'rebase') metrics.recordConflictFailed();
-        state.status = 'failed';
-        state.error = shipResult.error;
-        await saveCheckpoint(workDir, state);
-        metrics.recordIssueFailed();
-        return { success: false, error: state.error, state };
-      }
-
-      if (shipResult.status === 'no_changes') {
-        flog.child({ wave: 'ship' }).warn('No changes to commit — skipping PR');
-        state.waveResults.ship = {
-          wave: 'ship',
-          success: true,
-          artifact: { noChanges: true },
-          duration: 0,
-          cost: 0,
-          turns: 0,
-        };
-        state.completedWaves.push('ship');
-        state.status = 'completed';
-        await saveCheckpoint(workDir, state);
-        metrics.recordWaveCompleted('ship');
-        metrics.recordWaveDuration('ship', Date.now() - shipStart);
-        metrics.recordIssueFixed();
-        return { success: true, state };
-      }
-
-      // shipResult.status === 'shipped' — record PR + metrics.
-      state.waveResults.ship = {
-        wave: 'ship',
-        success: true,
-        artifact: {
-          prUrl: shipResult.prUrl,
-          ...(shipResult.commitMessage != null && { commitMessage: shipResult.commitMessage }),
-          filesStaged: shipResult.filesStaged,
-        },
-        duration: 0,
-        cost: 0,
-        turns: 0,
-      };
-      state.completedWaves.push('ship');
-      state.status = 'completed';
-      await saveCheckpoint(workDir, state);
-      await progress?.complete(shipResult.prUrl);
-      metrics.recordWaveCompleted('ship');
-      metrics.recordWaveDuration('ship', Date.now() - shipStart);
-      metrics.recordPRCreated();
-      metrics.recordIssueFixed();
-      flog.info(`Fix complete: ${shipResult.prUrl}`);
-      return { success: true, prUrl: shipResult.prUrl, state };
+      const shipOutcome = await runShipWave({
+        issue,
+        state,
+        config,
+        workDir,
+        repoPath,
+        worktreeBranch: worktree?.branch,
+        prContext,
+        codebaseContext,
+        codegraphContext,
+        callPathContext,
+        testRunner,
+        skipTestPhase,
+        skipImplPhase,
+        extraImplAttempts,
+        tiEngine,
+        buildEngineContext,
+        progress,
+        logger: flog,
+      });
+      if (shipOutcome.kind === 'early_return') return shipOutcome.result;
+      state = shipOutcome.updatedState;
     }
 
     state.status = 'completed';
@@ -1773,7 +953,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
     // The PR number (when present) is parsed from the ship-artifact URL — the
     // same source the history-write path uses below, so the two records can be
     // cross-referenced by subscribers. Issue #340.
-    if (!publishedFixDone) {
+    if (!lifecycle.hasPublishedFixDone()) {
       const shipArtifactForEvent = state.waveResults.ship?.artifact as { prUrl?: string } | undefined;
       const prUrlForEvent = shipArtifactForEvent?.prUrl;
       const prNumberMatch = prUrlForEvent?.match(/\/pull\/(\d+)/);
@@ -1790,42 +970,21 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         ...(state.error != null ? { reason: state.error } : {}),
       });
     }
-    // Sandbox cleanup: collect stats then stop the backend.
-    // Docker path uses the legacy helpers directly to preserve observable behavior;
-    // non-docker backends (daytona/modal/etc) route through the SandboxBackend interface.
-    if (sandboxContainerId) {
-      if (sandboxTimeoutHandle) clearTimeout(sandboxTimeoutHandle);
-
-      // Collect resource usage before stopping
-      const stats = sandboxBackend
-        ? await sandboxBackend.getStats().catch(() => ({ memoryMB: 0, cpuPercent: 0 }))
-        : await getContainerStats(sandboxContainerId).catch(() => ({ memoryMB: 0, cpuPercent: 0 }));
-      const wallTimeMs = Date.now() - sandboxStartTime;
-      const cpuCount = config.sandbox?.cpus ?? DEFAULT_SANDBOX_LIMITS.cpus;
-
-      state.sandboxResourceUsage = {
-        peakMemoryMB: stats.memoryMB,
-        cpuSeconds: (stats.cpuPercent / 100) * cpuCount * (wallTimeMs / 1000),
-        wallTimeMs,
-        containerName: sandboxContainerName ?? 'unknown',
-        limitsApplied: {
-          cpus: cpuCount,
-          memory: config.sandbox?.memory ?? DEFAULT_SANDBOX_LIMITS.memory,
-          timeout: config.sandbox?.timeout ?? DEFAULT_SANDBOX_LIMITS.timeout,
-        },
-      };
-
-      if (sandboxTimedOut) {
-        flog.warn('[sandbox] Container was killed due to timeout');
-      }
-
-      const backendName = config.sandbox?.backend ?? 'docker';
-      if (backendName === 'docker') {
-        // Preserve the legacy direct call so DockerBackend extraction is observationally identical.
-        await killContainer(sandboxContainerId).catch(() => {});
-      } else if (sandboxBackend) {
-        await sandboxBackend.stop().catch(() => {});
-      }
+    // Sandbox cleanup: collect stats + stop the backend (delegated to
+    // `./sandbox-lifecycle.ts`). Docker path preserves its legacy direct
+    // killContainer call; non-docker backends route through SandboxBackend.
+    if (sandboxLifecycle.containerId) {
+      await cleanupSandbox({
+        containerId: sandboxLifecycle.containerId,
+        containerName: sandboxLifecycle.containerName,
+        backend: sandboxLifecycle.backend,
+        startTime: sandboxLifecycle.startTime,
+        timeoutHandle: sandboxLifecycle.timeoutHandle,
+        timedOut: sandboxLifecycle.timedOut,
+        config,
+        state,
+        logger: flog,
+      });
     }
 
     const costReport = buildCostReport(state);
@@ -1834,128 +993,9 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       flog.warn(`Failed to write cost report: ${err instanceof Error ? err.message : String(err)}`);
     });
 
-    // History: append run entry for analytics
-    const shipResult = state.waveResults.ship?.artifact as { prUrl?: string } | undefined;
-    const prUrlForHistory = shipResult?.prUrl;
-
-    // Aggregate per-wave structured-output telemetry for the history entry
-    // (issue #247). Skip waves that don't carry metrics so legacy/no-op waves
-    // don't appear with empty objects.
-    type HistoryWaveMetric = {
-      parse_method?:
-        | 'json-tag'
-        | 'json-tag-repaired'
-        | 'markdown-fence'
-        | 'markdown-fence-repaired'
-        | 'direct-parse'
-        | 'direct-parse-repaired'
-        | null
-        | undefined;
-      attempts: number;
-      success: boolean;
-      repair_attempts: number;
-      model?: string;
-    };
-    const structuredOutputMetrics: Record<string, HistoryWaveMetric> = {};
-    for (const [waveName, waveResult] of Object.entries(state.waveResults)) {
-      const metrics = waveResult?.structured_output_metrics;
-      if (!metrics) continue;
-      const entry: HistoryWaveMetric = {
-        attempts: metrics.attempts,
-        success: metrics.success,
-        repair_attempts: metrics.repair_attempts,
-      };
-      if (metrics.parse_method !== undefined) {
-        entry.parse_method = metrics.parse_method;
-      }
-      if (waveResult?.model != null) {
-        entry.model = waveResult.model;
-      }
-      structuredOutputMetrics[waveName] = entry;
-    }
-
-    // Issue #278: aggregate per-wave tool-call counts into a single run-level
-    // total. The retrieval-quality eval harness reads this from history.jsonl
-    // to compute the context-on vs context-off delta (tool-call/Read reduction).
-    let aggregatedToolCallCounts: { total: number; reads: number; byTool: Record<string, number> } | undefined;
-    {
-      let total = 0;
-      let reads = 0;
-      const byTool: Record<string, number> = {};
-      let observedAny = false;
-      for (const waveResult of Object.values(state.waveResults)) {
-        const counts = waveResult?.toolCallCounts;
-        if (!counts) continue;
-        observedAny = true;
-        total += counts.total;
-        reads += counts.reads;
-        for (const [name, n] of Object.entries(counts.byTool)) {
-          byTool[name] = (byTool[name] ?? 0) + n;
-        }
-      }
-      if (observedAny) {
-        aggregatedToolCallCounts = { total, reads, byTool };
-      }
-    }
-
-    // Per-run causal telemetry (issue #266): hoist assess.grade, FixState
-    // diagnosis/thrashing/retryAttempts, and quality.* gate failures into the
-    // flat history.jsonl so `kova history --stats` and `/reflect` can break
-    // success down by why-it-failed, not just cost/outcome.
-    const assessArtifactForHistory = state.waveResults.assess?.artifact as
-      | { grade?: 'A' | 'B' | 'C' | 'D' | 'F' }
-      | undefined;
-    const qualityArtifactForHistory = state.waveResults.quality?.artifact as
-      | { lint?: string; typecheck?: string; tests?: string; audit?: string; all_passing?: boolean }
-      | undefined;
-    const GATE_KEYS = ['lint', 'typecheck', 'tests', 'audit'] as const;
-    const gatesFailed: string[] = qualityArtifactForHistory
-      ? GATE_KEYS.filter((k) => qualityArtifactForHistory[k] === 'fail')
-      : [];
-    // firstPassQuality is only meaningful when we observed quality at all.
-    // Definition: zero impl retries AND all quality gates passed → green on
-    // first try. If quality didn't run, leave the field undefined.
-    const firstPassQuality =
-      qualityArtifactForHistory?.all_passing != null
-        ? qualityArtifactForHistory.all_passing && (state.retryAttempts ?? 0) === 0
-        : undefined;
-
-    await appendHistoryEntry(repoPath, {
-      timestamp: state.startedAt,
-      repo: repoName,
-      issues: [
-        {
-          number: issue.number,
-          title: issue.title,
-          success: state.status === 'completed',
-          ...(prUrlForHistory != null && { prUrl: prUrlForHistory }),
-          ...(state.error != null && { error: state.error }),
-        },
-      ],
-      prsCreated: prUrlForHistory ? 1 : 0,
-      cost: costReport.totalCost,
-      duration: costReport.totalDuration,
-      outcome:
-        state.status === 'completed'
-          ? state.failedPieces && state.failedPieces.length > 0
-            ? 'partial'
-            : 'success'
-          : 'failure',
-      ...(Object.keys(promptHashes).length > 0 && { promptHashes }),
-      ...(abTestVariants != null && Object.keys(abTestVariants).length > 0 && { abTestVariants }),
-      ...(Object.keys(structuredOutputMetrics).length > 0 && { structuredOutputMetrics }),
-      ...(assessArtifactForHistory?.grade != null && { grade: assessArtifactForHistory.grade }),
-      ...(state.diagnosis != null && { diagnosis: state.diagnosis }),
-      ...(state.thrashingSignal != null && { thrashingSignal: state.thrashingSignal }),
-      ...(gatesFailed.length > 0 && { gatesFailed }),
-      ...(firstPassQuality != null && { firstPassQuality }),
-      ...(state.retryAttempts != null && { retryAttempts: state.retryAttempts }),
-      // Issue #278: per-run tool-call totals + contextArm from repo config.
-      ...(aggregatedToolCallCounts != null && { toolCallCounts: aggregatedToolCallCounts }),
-      ...(config.eval?.context_arm != null && { contextArm: config.eval.context_arm }),
-    }).catch((err) => {
-      log.warn(`Failed to record history: ${err instanceof Error ? err.message : String(err)}`);
-    });
+    // History entry — full per-run causal telemetry aggregation delegated to
+    // `./history-emit.ts` (#247, #266, #278).
+    await emitHistoryEntry({ state, issue, repoName, repoPath, config, costReport, promptHashes, abTestVariants });
 
     // Episodic memory: record fix outcome (success or failure)
     if (config.episodes?.enabled) {
@@ -2004,163 +1044,5 @@ export async function fix(options: FixOptions): Promise<FixResult> {
     if (worktree && state.status === 'completed') {
       await removeWorktree(repoPath, worktree.path);
     }
-  }
-}
-
-/**
- * Append a TIEngine-emitted `FailedPiece` to `state.failedPieces`. Issue #432:
- * replaces the previous `trackFailedPiece` helper that knew how to construct a
- * piece from a diagnosis string. The construction lives in
- * `engines/ti.ts:buildFailedPiece` now; this helper is the orchestrator's
- * single application point for the APPEND-style accumulator (the only FixState
- * field that cannot use the REPLACE-style `EngineStateDelta`).
- */
-function appendFailedPiece(state: FixState, piece: FailedPiece | undefined): void {
-  if (piece == null) return;
-  state.failedPieces = [...(state.failedPieces ?? []), piece];
-}
-
-function createInitialState(issue: Issue, repo: string, repoPath: string, worktree?: string): FixState {
-  return {
-    issue,
-    repo,
-    repoPath,
-    worktree,
-    startedAt: new Date().toISOString(),
-    completedWaves: [],
-    waveResults: {},
-    status: 'running',
-  };
-}
-
-/** Extract "owner/repo" from a GitHub issue URL. Returns undefined if not parseable. */
-function extractOwnerRepo(issueUrl: string): string | undefined {
-  const match = issueUrl.match(/github\.com\/([^/]+\/[^/]+)/);
-  return match?.[1];
-}
-
-function formatSkipComment(assess: AssessResult, _issue: Issue): string {
-  const files = assess.surface_area.files.length > 0 ? assess.surface_area.files.join(', ') : 'N/A';
-  const recommendation =
-    assess.grade === 'F'
-      ? 'Break this issue into smaller, independently fixable pieces.'
-      : 'Consider rescoping this issue to reduce surface area.';
-  return [
-    '## Kova Assessment — Skipped',
-    '',
-    '| Field | Value |',
-    '|-------|-------|',
-    `| **Grade** | ${assess.grade} |`,
-    `| **Risk** | ${assess.risk} |`,
-    `| **Estimated lines** | ${assess.surface_area.estimated_lines} |`,
-    `| **Files** | ${files} |`,
-    `| **Modules** | ${assess.surface_area.modules_affected.join(', ') || 'N/A'} |`,
-    '',
-    '### Reasoning',
-    assess.reasoning,
-    '',
-    '### Recommendation',
-    recommendation,
-  ].join('\n');
-}
-
-/* ================================================================== */
-/*  Local FTS5 episode recall (#302) — helpers                         */
-/* ================================================================== */
-
-/**
- * Resolve the on-disk path for the local FTS5 episode index. Honors an
- * explicit override on `config.episodes.fts.path` if present; otherwise
- * defaults to `{workDir}/.kova/episode-fts.db`.
- */
-function resolveFTSPath(workDir: string, config: EpisodicMemoryConfig): string {
-  return config.fts?.path ?? joinPath(workDir, '.kova', 'episode-fts.db');
-}
-
-/**
- * Whether the FTS5 sidecar is enabled. Default is on (treat `fts === undefined`
- * as enabled) — explicit opt-out via `fts: { enabled: false }`.
- */
-function ftsEnabled(config: EpisodicMemoryConfig): boolean {
-  if (config.fts === undefined) return true;
-  return config.fts.enabled !== false;
-}
-
-/**
- * Mirror an `EpisodeRecord` into the FTS5 index. Best-effort: open/write
- * failures are logged and swallowed so they never break the existing
- * REST-based recordEpisode path.
- *
- * Note: the search-side `queryFTSEpisodes` + `ftsRecordToContext` helpers
- * moved to `./context/episodic-provider.ts` as part of issue #431; only the
- * write-side mirror remains here in fix.ts.
- */
-function upsertEpisodeFTS(
-  workDir: string,
-  config: EpisodicMemoryConfig,
-  episode: EpisodeRecord,
-  logger: { warn: (msg: string) => void },
-): void {
-  if (!ftsEnabled(config)) return;
-  const dbPath = resolveFTSPath(workDir, config);
-  let store: EpisodeFTSStore | null = null;
-  try {
-    store = new EpisodeFTSStore(dbPath);
-    store.upsertEpisode({
-      issue_number: episode.issue_number,
-      repo: episode.repo,
-      issue_title: episode.issue_title,
-      approach: episode.approach,
-      files_changed: episode.files_changed,
-      outcome: episode.outcome,
-      timestamp: episode.timestamp,
-      ...(episode.learnings != null && { learnings: episode.learnings }),
-      ...(episode.error_message != null && { error_message: episode.error_message }),
-    });
-  } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    logger.warn(`[episode-fts] Failed to upsert episode: ${msg}`);
-  } finally {
-    store?.close();
-  }
-}
-
-/* ================================================================== */
-/*  Pattern aggregation (#267) — helpers                               */
-/* ================================================================== */
-
-/**
- * Resolve the on-disk path for the local pattern aggregation DB. Defaults to
- * `{workDir}/.kova/patterns.db` — co-located with the FTS index for cleanup.
- */
-function resolvePatternStorePath(workDir: string): string {
-  return joinPath(workDir, '.kova', 'patterns.db');
-}
-
-/**
- * Aggregate the completed episode into the pattern store. Best-effort: open or
- * upsert failures are logged and swallowed so they never break the existing
- * recordEpisode path.
- *
- * Note: the search-side `queryPatternContext` helper moved to
- * `./context/pattern-provider.ts` as part of issue #431; only the write-side
- * mirror remains here in fix.ts.
- */
-function upsertEpisodePattern(
-  workDir: string,
-  config: EpisodicMemoryConfig,
-  episode: EpisodeRecord,
-  logger: { warn: (msg: string) => void },
-): void {
-  if (!config.enabled) return;
-  let store: PatternStore | null = null;
-  try {
-    store = new PatternStore(resolvePatternStorePath(workDir));
-    upsertPatternFromEpisode(store, episode);
-  } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    logger.warn(`[pattern-store] Failed to upsert pattern: ${msg}`);
-  } finally {
-    store?.close();
   }
 }
