@@ -686,6 +686,168 @@ describe('claudeCliRuntime — cost computation', () => {
   });
 });
 
+// ── P3b: cacheRetention forwarding to priceUsage (#416) ───────────────────────
+//
+// #390 plumbed `cacheRetention` from `wave-executor.ts:toTokenUsage` into
+// `priceUsage` for the pi-agent-core runtime path. #416 closes the same leak
+// for the claude-cli runtime: when wave-executor passes `cacheRetention:
+// 'long'` through `runtimeFactory.create(...)`, the runtime's `priceTurn`
+// must forward that to `priceUsage` so cacheWrite tokens bill at the 1h rate
+// (~2.0× input) instead of silently defaulting to 5m (~1.25× input).
+//
+// 100k cacheWrite tokens on sonnet 4.6 → $0.375 at 5m vs $0.600 at 1h.
+
+describe('claudeCliRuntime — cacheRetention forwarding to priceUsage (#416)', () => {
+  it('bills cacheWrite tokens at the 1h rate when config.cacheRetention === "long"', async () => {
+    const { claudeCliRuntimeFactory } = await import('./claude-cli-runtime.js');
+    const rt = claudeCliRuntimeFactory.create({
+      systemPrompt: 'sp',
+      model: { id: 'claude-sonnet-4-6', provider: 'anthropic', contextWindow: 200_000 } as never,
+      tools: [],
+      getApiKey: () => 'k',
+      cwd: '/tmp',
+      cacheRetention: 'long',
+    } as never);
+
+    const events: Array<{ type: string; message?: { usage?: { cost?: { total?: number } } } }> = [];
+    rt.subscribe((e) => events.push(e as { type: string; message?: { usage?: { cost?: { total?: number } } } }));
+    const promptPromise = rt.prompt('go');
+    if (lastSpawnedChild) {
+      emitStdoutLines(lastSpawnedChild, [
+        systemInit({ sessionId: 's', model: 'claude-sonnet-4-6' }),
+        // 100k cacheWrite tokens only — isolates the cache rate so the
+        // 5m-vs-1h gap is the dominant signal.
+        assistantTurn({
+          sessionId: 's',
+          text: 'ok',
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheCreationTokens: 100_000,
+        }),
+        resultEvent({ sessionId: 's', totalCostUsd: 0 }),
+      ]);
+      emitExit(lastSpawnedChild, 0);
+    }
+    await flush();
+    await promptPromise;
+
+    const turn = events.find((e) => e.type === 'turn_end');
+    // sonnet 4.6: cacheWrite1h = $6/Mtok → 100k tokens = $0.60
+    // If retention were not forwarded, the default '5m' rate would bill
+    // $3.75/Mtok → $0.375 (40% lower) — this expectation pins the fix.
+    expect(turn?.message?.usage?.cost?.total).toBeCloseTo(0.6, 5);
+  });
+
+  it('bills cacheWrite tokens at the 5m rate when config.cacheRetention === "short"', async () => {
+    const { claudeCliRuntimeFactory } = await import('./claude-cli-runtime.js');
+    const rt = claudeCliRuntimeFactory.create({
+      systemPrompt: 'sp',
+      model: { id: 'claude-sonnet-4-6', provider: 'anthropic', contextWindow: 200_000 } as never,
+      tools: [],
+      getApiKey: () => 'k',
+      cwd: '/tmp',
+      cacheRetention: 'short',
+    } as never);
+
+    const events: Array<{ type: string; message?: { usage?: { cost?: { total?: number } } } }> = [];
+    rt.subscribe((e) => events.push(e as { type: string; message?: { usage?: { cost?: { total?: number } } } }));
+    const promptPromise = rt.prompt('go');
+    if (lastSpawnedChild) {
+      emitStdoutLines(lastSpawnedChild, [
+        systemInit({ sessionId: 's', model: 'claude-sonnet-4-6' }),
+        assistantTurn({
+          sessionId: 's',
+          text: 'ok',
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheCreationTokens: 100_000,
+        }),
+        resultEvent({ sessionId: 's', totalCostUsd: 0 }),
+      ]);
+      emitExit(lastSpawnedChild, 0);
+    }
+    await flush();
+    await promptPromise;
+
+    const turn = events.find((e) => e.type === 'turn_end');
+    // sonnet 4.6: cacheWrite5m = $3.75/Mtok → 100k tokens = $0.375
+    expect(turn?.message?.usage?.cost?.total).toBeCloseTo(0.375, 5);
+  });
+
+  it('bills cacheWrite tokens at the 5m rate when config.cacheRetention === "none" (caching disabled but value mapped explicitly)', async () => {
+    const { claudeCliRuntimeFactory } = await import('./claude-cli-runtime.js');
+    const rt = claudeCliRuntimeFactory.create({
+      systemPrompt: 'sp',
+      model: { id: 'claude-sonnet-4-6', provider: 'anthropic', contextWindow: 200_000 } as never,
+      tools: [],
+      getApiKey: () => 'k',
+      cwd: '/tmp',
+      cacheRetention: 'none',
+    } as never);
+
+    const events: Array<{ type: string; message?: { usage?: { cost?: { total?: number } } } }> = [];
+    rt.subscribe((e) => events.push(e as { type: string; message?: { usage?: { cost?: { total?: number } } } }));
+    const promptPromise = rt.prompt('go');
+    if (lastSpawnedChild) {
+      emitStdoutLines(lastSpawnedChild, [
+        systemInit({ sessionId: 's', model: 'claude-sonnet-4-6' }),
+        assistantTurn({
+          sessionId: 's',
+          text: 'ok',
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheCreationTokens: 100_000,
+        }),
+        resultEvent({ sessionId: 's', totalCostUsd: 0 }),
+      ]);
+      emitExit(lastSpawnedChild, 0);
+    }
+    await flush();
+    await promptPromise;
+
+    const turn = events.find((e) => e.type === 'turn_end');
+    // 'none' maps to '5m' per pricing.ts:cacheRetentionToPricingTtl — keeps
+    // the type narrow even though caching is disabled at the runtime layer.
+    expect(turn?.message?.usage?.cost?.total).toBeCloseTo(0.375, 5);
+  });
+
+  it('falls back to priceUsage default ("5m") when config.cacheRetention is undefined', async () => {
+    const { claudeCliRuntimeFactory } = await import('./claude-cli-runtime.js');
+    const rt = claudeCliRuntimeFactory.create({
+      systemPrompt: 'sp',
+      model: { id: 'claude-sonnet-4-6', provider: 'anthropic', contextWindow: 200_000 } as never,
+      tools: [],
+      getApiKey: () => 'k',
+      cwd: '/tmp',
+      // cacheRetention intentionally omitted
+    } as never);
+
+    const events: Array<{ type: string; message?: { usage?: { cost?: { total?: number } } } }> = [];
+    rt.subscribe((e) => events.push(e as { type: string; message?: { usage?: { cost?: { total?: number } } } }));
+    const promptPromise = rt.prompt('go');
+    if (lastSpawnedChild) {
+      emitStdoutLines(lastSpawnedChild, [
+        systemInit({ sessionId: 's', model: 'claude-sonnet-4-6' }),
+        assistantTurn({
+          sessionId: 's',
+          text: 'ok',
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheCreationTokens: 100_000,
+        }),
+        resultEvent({ sessionId: 's', totalCostUsd: 0 }),
+      ]);
+      emitExit(lastSpawnedChild, 0);
+    }
+    await flush();
+    await promptPromise;
+
+    const turn = events.find((e) => e.type === 'turn_end');
+    // No retention threaded → priceUsage applies its '5m' default → $0.375.
+    expect(turn?.message?.usage?.cost?.total).toBeCloseTo(0.375, 5);
+  });
+});
+
 // ── P5: tool allowlist + MCP config bridge ───────────────────────────────────
 
 describe('claudeCliRuntime — tool + MCP wiring', () => {

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { getPricing, type ModelPricing, priceUsage, type TokenUsage } from './pricing.js';
+import { cacheRetentionToPricingTtl, getPricing, type ModelPricing, priceUsage, type TokenUsage } from './pricing.js';
 
 // We use pi-ai's calculateCost as the regression reference for at least one
 // known model. The table values themselves come from
@@ -162,5 +162,26 @@ describe('priceUsage — local providers bypass the table', () => {
     );
     expect(unknownWarnings).toHaveLength(0);
     warnSpy.mockRestore();
+  });
+});
+
+// cacheRetentionToPricingTtl lives in pricing.ts (relocated from
+// wave-executor.ts in #416 so claude-cli-runtime can import it without
+// creating a wave-executor → runtime → wave-executor cycle).
+describe('cacheRetentionToPricingTtl — wave-level → pricing-level mapping', () => {
+  it('maps "long" → "1h"', () => {
+    expect(cacheRetentionToPricingTtl('long')).toBe('1h');
+  });
+
+  it('maps "short" → "5m"', () => {
+    expect(cacheRetentionToPricingTtl('short')).toBe('5m');
+  });
+
+  it('maps "none" → "5m" (caching disabled but the value stays narrow)', () => {
+    expect(cacheRetentionToPricingTtl('none')).toBe('5m');
+  });
+
+  it('maps undefined → undefined (so priceUsage applies its own default)', () => {
+    expect(cacheRetentionToPricingTtl(undefined)).toBeUndefined();
   });
 });
