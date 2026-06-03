@@ -246,6 +246,7 @@ describe('resolveThinkingLevel', () => {
       brainstorm: 'large',
     },
     isolation: 'worktree',
+    runtime: 'pi',
   };
 
   it('returns default thinking level when no thinking config is set', () => {

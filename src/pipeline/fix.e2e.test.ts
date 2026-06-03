@@ -271,6 +271,7 @@ function makeConfig(overrides?: Partial<RepoConfig>): RepoConfig {
       brainstorm: 'large',
     },
     isolation: 'none',
+    runtime: 'pi',
     ...overrides,
   };
 }

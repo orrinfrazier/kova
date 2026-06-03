@@ -332,6 +332,7 @@ describe('findRepoByName', () => {
           brainstorm: 'large' as const,
         },
         isolation: 'worktree' as const,
+        runtime: 'pi' as const,
       },
       kova: {
         path: '/home/user/dev/kova',
@@ -353,6 +354,7 @@ describe('findRepoByName', () => {
           brainstorm: 'large' as const,
         },
         isolation: 'worktree' as const,
+        runtime: 'pi' as const,
       },
     },
   });

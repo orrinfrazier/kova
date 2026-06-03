@@ -65,6 +65,7 @@ function makeConfig(): RepoConfig {
       brainstorm: 'large',
     },
     isolation: 'none',
+    runtime: 'pi',
   };
 }
 

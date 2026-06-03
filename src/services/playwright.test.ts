@@ -43,6 +43,7 @@ function makeConfig(overrides: Partial<RepoConfig> = {}): RepoConfig {
       brainstorm: 'large',
     },
     isolation: 'worktree',
+    runtime: 'pi',
     ...overrides,
   };
 }

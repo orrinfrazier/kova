@@ -67,6 +67,7 @@ const DEFAULT_CONFIG: RepoConfig = {
     brainstorm: 'large',
   },
   isolation: 'worktree',
+  runtime: 'pi',
 };
 
 const SAMPLE_ISSUES = [

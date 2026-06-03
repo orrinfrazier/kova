@@ -459,6 +459,7 @@ describe('models', () => {
             brainstorm: 'large',
           },
           isolation: 'worktree',
+          runtime: 'pi',
         }),
       ).not.toThrow();
       delete process.env.ANTHROPIC_API_KEY;
@@ -489,6 +490,7 @@ describe('models', () => {
             brainstorm: 'large',
           },
           isolation: 'worktree',
+          runtime: 'pi',
         }),
       ).toThrow(/API key/i);
     });
@@ -518,6 +520,7 @@ describe('models', () => {
             brainstorm: 'ollama:llama3',
           },
           isolation: 'worktree',
+          runtime: 'pi',
         }),
       ).not.toThrow();
     });
@@ -546,6 +549,7 @@ describe('models', () => {
             brainstorm: 'large',
           },
           isolation: 'worktree',
+          runtime: 'pi',
         }),
       ).toThrow(/Unknown model/i);
     });
@@ -583,6 +587,7 @@ describe('models', () => {
             brainstorm: 'large',
           },
           isolation: 'worktree',
+          runtime: 'pi',
         }),
       ).not.toThrow();
       delete process.env.ANTHROPIC_API_KEY;
@@ -616,6 +621,7 @@ describe('models', () => {
             brainstorm: 'large',
           },
           isolation: 'worktree',
+          runtime: 'pi',
         }),
       ).not.toThrow();
       delete process.env.ANTHROPIC_API_KEY;
@@ -649,6 +655,7 @@ describe('models', () => {
             brainstorm: 'large',
           },
           isolation: 'worktree',
+          runtime: 'pi',
         }),
       ).toThrow(/spec.*google.*GEMINI_API_KEY.*GOOGLE_API_KEY/i);
       delete process.env.ANTHROPIC_API_KEY;
@@ -681,6 +688,7 @@ describe('models', () => {
             brainstorm: 'large',
           },
           isolation: 'worktree',
+          runtime: 'pi',
         }),
       ).not.toThrow();
       delete process.env.ANTHROPIC_API_KEY;
@@ -715,6 +723,7 @@ describe('models', () => {
             brainstorm: 'large',
           },
           isolation: 'worktree',
+          runtime: 'pi',
         }),
       ).toThrow(/review.*openai.*OPENAI_API_KEY/i);
       delete process.env.ANTHROPIC_API_KEY;
@@ -1040,6 +1049,7 @@ describe('models', () => {
             brainstorm: 'large',
           },
           isolation: 'worktree',
+          runtime: 'pi',
         }),
       ).not.toThrow();
       delete process.env.ANTHROPIC_API_KEY;
@@ -1075,6 +1085,7 @@ describe('models', () => {
             brainstorm: 'large',
           },
           isolation: 'worktree',
+          runtime: 'pi',
         }),
       ).toThrow(/review.*pool\[1\]|pool\[1\].*review/i);
       delete process.env.ANTHROPIC_API_KEY;
@@ -1109,6 +1120,7 @@ describe('models', () => {
             brainstorm: 'large',
           },
           isolation: 'worktree',
+          runtime: 'pi',
         }),
       ).toThrow(/review.*adjudicator|adjudicator.*review/i);
       delete process.env.ANTHROPIC_API_KEY;
@@ -1142,6 +1154,7 @@ describe('models', () => {
             brainstorm: 'large',
           },
           isolation: 'worktree',
+          runtime: 'pi',
         }),
       ).toThrow(/review.*pool\[1\]|Unknown model/i);
       delete process.env.ANTHROPIC_API_KEY;

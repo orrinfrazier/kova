@@ -89,6 +89,7 @@ function makeConfig(rules: Partial<RepoConfig['rules']> = {}): RepoConfig {
       brainstorm: 'large',
     },
     isolation: 'none',
+    runtime: 'pi',
   };
 }
 

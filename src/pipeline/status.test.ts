@@ -42,6 +42,7 @@ const SAMPLE_CONFIG: KovaConfig = {
         brainstorm: 'large',
       },
       isolation: 'worktree',
+      runtime: 'pi',
     },
     'my-lib': {
       path: '/home/user/dev/my-lib',
@@ -63,6 +64,7 @@ const SAMPLE_CONFIG: KovaConfig = {
         brainstorm: 'large',
       },
       isolation: 'worktree',
+      runtime: 'pi',
     },
   },
 };

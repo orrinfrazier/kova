@@ -97,6 +97,7 @@ function makeConfig(concurrency: number): RepoConfig {
       brainstorm: 'large',
     },
     isolation: 'none',
+    runtime: 'pi',
   };
 }
 
