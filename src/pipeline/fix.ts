@@ -497,13 +497,16 @@ export async function fix(options: FixOptions): Promise<FixResult> {
     }
   }
 
-  // MCP server startup: resolve config and start servers for tool augmentation
+  // MCP server startup: resolve config and start servers for tool augmentation.
+  // workDir threads through so per-fix path-sensitive servers (codegraph,
+  // language servers) point at the worktree, not the orchestrator's cwd
+  // (issue #270).
   let mcpHandles = new Map<string, MCPServerHandle>();
   try {
     const mcpServers = await resolveMCPServers(config.mcp);
     if (Object.keys(mcpServers).length > 0) {
-      mcpHandles = await startAllMCPServers(mcpServers);
-      flog.info(`[mcp] ${mcpHandles.size} MCP server(s) running`);
+      mcpHandles = await startAllMCPServers(mcpServers, workDir);
+      flog.info(`[mcp] ${mcpHandles.size} MCP server(s) running (cwd=${workDir})`);
     }
   } catch (error) {
     flog.warn(`[mcp] Failed to start MCP servers: ${error instanceof Error ? error.message : String(error)}`);
