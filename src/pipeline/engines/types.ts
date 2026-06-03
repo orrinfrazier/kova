@@ -16,7 +16,8 @@ import type { FixAIWaveName } from '../../ai/wave-tools.js';
 import type { SandboxContext } from '../../sandbox/dispatch.js';
 import type { ProjectContext } from '../../services/project-context.js';
 import type { WaveHandoff } from '../../types/handoffs.js';
-import type { RepoConfig, SkillWaveName } from '../../types/index.js';
+import type { Issue, RepoConfig, SkillWaveName, WaveName, WaveResult } from '../../types/index.js';
+import type { DiffRunner, TestRunner } from '../loops.js';
 
 /**
  * Cached per-run skills + enabled-wave list — mirrors `FixRunSkills` from `fix.ts`.
@@ -115,4 +116,40 @@ export interface WaveEngine<TInput, TOutput> {
 export interface EngineConfig {
   /** Structured-output format for the wave's response (Zod-derived). */
   outputFormat?: OutputFormat | undefined;
+}
+
+// --- TIEngine input (issue #355) ---
+//
+// Wave-specific input payload for the TIEngine. The engine merges these with
+// orchestrator-owned EngineContext fields (workDir, repoConfig, sandbox,
+// projectContext, cacheContext) before delegating to
+// `runParallelPieceTILoop`. Fields here mirror the loop's config minus the
+// ctx-shaped slots.
+
+export interface TIEngineInput {
+  issue: Issue;
+  /** Accumulated wave handoffs. Spec result is required for piece fan-out. */
+  waveResults: Partial<Record<WaveName, WaveResult>>;
+  maxConcurrent?: number | undefined;
+  testCommand?: string | undefined;
+  testRunner?: TestRunner | undefined;
+  diffRunner?: DiffRunner | undefined;
+  prContext?: string | undefined;
+  codebaseContext?: string | undefined;
+  /** Skip the test-writing wave per piece (pipeline-scope IMPL_ONLY/REFACTOR). */
+  skipTestPhase?: boolean | undefined;
+  /** Skip the impl wave per piece (pipeline-scope TEST_ONLY). */
+  skipImplPhase?: boolean | undefined;
+  /** Extra impl attempts per piece (issue #282 explore mode). */
+  extraImplAttempts?: number | undefined;
+}
+
+// --- QualityEngine input (issue #355) ---
+
+export interface QualityEngineInput {
+  issue: Issue;
+  /** Accumulated wave handoffs. Quality wave result is required for retry analysis. */
+  waveResults: Partial<Record<WaveName, WaveResult>>;
+  testRunner?: TestRunner | undefined;
+  testCommand?: string | undefined;
 }
