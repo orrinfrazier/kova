@@ -6,9 +6,10 @@
 // that routing.
 //
 // Callers (`src/pipeline/fix.ts`, `src/pipeline/loops.ts`) pass an optional
-// `SandboxContext`. When present, the dispatcher invokes
-// `execWaveInContainer` instead of `spawnWaveAgentWithFallback` /
-// `executeWaveWithRetry`. The return shapes are converted to match the
+// `SandboxContext`. When present, the dispatcher invokes either
+// `backend.execWave()` (preferred when `sandbox.backend` is set — see #379)
+// or the legacy `execWaveInContainer` (for Docker callers that pass only
+// `containerName`+`repoPath`). The return shapes are converted to match the
 // existing in-process callers so the rest of the pipeline is unchanged.
 
 import {
@@ -24,8 +25,9 @@ import {
 import { execWaveInContainer, type SandboxWaveInput } from '../services/sandbox.js';
 import type { WaveHandoff, WaveName } from '../types/index.js';
 import { log } from '../utils/logger.js';
+import type { SandboxBackend, SandboxBackendWaveInput } from './backend.js';
 
-/** Sandbox routing context — when present, dispatch routes through the docker container. */
+/** Sandbox routing context — when present, dispatch routes through the docker container or a SandboxBackend. */
 export interface SandboxContext {
   /** Container name to dispatch wave runs into via `docker exec`. */
   containerName: string;
@@ -33,6 +35,17 @@ export interface SandboxContext {
   repoPath: string;
   /** Override the docker CLI (for tests). */
   dockerCommand?: string;
+  /**
+   * Pluggable backend (issue #379). When set, dispatch routes wave execution
+   * through `backend.execWave()` instead of `execWaveInContainer`. This is how
+   * non-Docker backends (Daytona, Modal, Fly.io, e2b) own wave dispatch end-to-end
+   * rather than falling back to `docker exec` against a remote workspace name.
+   *
+   * Docker callers omit this field and keep the legacy `execWaveInContainer`
+   * path — bit-for-bit identical behavior. Both branches converge on the same
+   * `FallbackWaveHandoff` / `WaveExecutionResult` return shape.
+   */
+  backend?: SandboxBackend;
 }
 
 /**
@@ -63,23 +76,12 @@ export function resolveOutputSchemaName(wave: WaveName, hasOutputFormat: boolean
 }
 
 /**
- * Spawn a wave — either in-process on the host (default) or inside the
- * docker sandbox container when a `SandboxContext` is supplied.
- *
- * Mirrors the return contract of `spawnWaveAgentWithFallback` so callers can
- * substitute this for the direct call without further branching.
+ * Build the wire input passed to the sandbox executor (docker-exec or
+ * `backend.execWave()`). Centralized so both routing paths produce identical
+ * shapes — the runner inside the sandbox doesn't care which path the host took.
  */
-export async function dispatchSpawnWave<T = unknown>(
-  config: SpawnWithFallbackConfig,
-  sandbox?: SandboxContext | undefined,
-): Promise<FallbackWaveHandoff<T>> {
-  if (!sandbox) {
-    return spawnWaveAgentWithFallback<T>(config);
-  }
-
-  log.info(`[sandbox] Routing wave '${config.wave}' through container ${sandbox.containerName}`);
-
-  const input: SandboxWaveInput = {
+function buildSpawnInput(config: SpawnWithFallbackConfig): SandboxWaveInput {
+  return {
     wave: config.wave,
     model: config.model,
     systemPrompt: config.systemPrompt,
@@ -95,8 +97,38 @@ export async function dispatchSpawnWave<T = unknown>(
       outputSchemaName: resolveOutputSchemaName(config.wave, true),
     }),
   };
+}
 
-  const raw = await execWaveInContainer(sandbox.containerName, input, sandbox.repoPath, sandbox.dockerCommand);
+/**
+ * Spawn a wave — host (default), pluggable `SandboxBackend.execWave()` when
+ * `sandbox.backend` is supplied (issue #379), or legacy docker-exec when only
+ * `containerName`+`repoPath` are supplied.
+ *
+ * Mirrors the return contract of `spawnWaveAgentWithFallback` so callers can
+ * substitute this for the direct call without further branching.
+ */
+export async function dispatchSpawnWave<T = unknown>(
+  config: SpawnWithFallbackConfig,
+  sandbox?: SandboxContext | undefined,
+): Promise<FallbackWaveHandoff<T>> {
+  if (!sandbox) {
+    return spawnWaveAgentWithFallback<T>(config);
+  }
+
+  const input = buildSpawnInput(config);
+  let raw: unknown;
+
+  if (sandbox.backend != null) {
+    log.info(`[sandbox] Routing wave '${config.wave}' through backend.execWave (workspace ${sandbox.containerName})`);
+    // SandboxBackendWaveInput has the same runtime shape as SandboxWaveInput — the
+    // interface alias just keeps the backend abstraction independent of the
+    // services/sandbox.ts wire type. Pass the same object both paths see.
+    raw = await sandbox.backend.execWave(input as SandboxBackendWaveInput);
+  } else {
+    log.info(`[sandbox] Routing wave '${config.wave}' through container ${sandbox.containerName}`);
+    raw = await execWaveInContainer(sandbox.containerName, input, sandbox.repoPath, sandbox.dockerCommand);
+  }
+
   const handoff = raw as FallbackWaveHandoff<T>;
 
   // The in-container runner returns a `FallbackWaveHandoff` — preserve `fallback_used`
@@ -108,8 +140,9 @@ export async function dispatchSpawnWave<T = unknown>(
 }
 
 /**
- * Execute a wave with retry semantics — either in-process or routed through
- * the docker sandbox container.
+ * Execute a wave with retry semantics — host (default), pluggable
+ * `SandboxBackend.execWave()` when `sandbox.backend` is supplied (issue #379),
+ * or legacy docker-exec when only `containerName`+`repoPath` are supplied.
  *
  * Mirrors the return contract of `executeWaveWithRetry` so the loop
  * controllers can substitute this for the direct call.
@@ -127,7 +160,11 @@ export async function dispatchExecuteWave(
   const modelString = getModelString(model);
   const startTime = Date.now();
 
-  log.info(`[sandbox] Routing wave '${options.wave}' through container ${sandbox.containerName} (with retry)`);
+  const usingBackend = sandbox.backend != null;
+  const routeLabel = usingBackend
+    ? `backend.execWave (workspace ${sandbox.containerName})`
+    : `container ${sandbox.containerName}`;
+  log.info(`[sandbox] Routing wave '${options.wave}' through ${routeLabel} (with retry)`);
 
   let lastError: Error | undefined;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -144,7 +181,12 @@ export async function dispatchExecuteWave(
         }),
       };
 
-      const raw = await execWaveInContainer(sandbox.containerName, input, sandbox.repoPath, sandbox.dockerCommand);
+      const raw = usingBackend
+        ? // SandboxBackendWaveInput and SandboxWaveInput have identical runtime shape;
+          // the interface alias keeps the backend abstraction free of the docker-side
+          // services/sandbox.ts type.
+          await (sandbox.backend as SandboxBackend).execWave(input as SandboxBackendWaveInput)
+        : await execWaveInContainer(sandbox.containerName, input, sandbox.repoPath, sandbox.dockerCommand);
       const handoff = raw as WaveHandoff;
       const duration = Date.now() - startTime;
 
