@@ -4,12 +4,49 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+/* ------------------------------------------------------------------ */
+/*  MCP SDK module mocks — must be declared BEFORE `./mcp.js` import   */
+/*  so vi.mock hoists ahead of the import resolution.                  */
+/* ------------------------------------------------------------------ */
+
+const transportCtorCalls: Array<Record<string, unknown>> = [];
+const clientConnectCalls: Array<unknown> = [];
+
+vi.mock('@modelcontextprotocol/sdk/client/stdio.js', () => {
+  return {
+    StdioClientTransport: class {
+      constructor(params: Record<string, unknown>) {
+        transportCtorCalls.push(params);
+      }
+    },
+  };
+});
+
+vi.mock('@modelcontextprotocol/sdk/client/index.js', () => {
+  return {
+    Client: class {
+      async connect(transport: unknown): Promise<void> {
+        clientConnectCalls.push(transport);
+      }
+      async listTools(): Promise<{ tools: unknown[] }> {
+        return { tools: [] };
+      }
+      async close(): Promise<void> {
+        /* noop */
+      }
+    },
+  };
+});
+
 import {
   getMCPToolsForWave,
   loadMCPServersFromSettings,
   type MCPServerHandle,
   mcpToolToAgentTool,
   resolveMCPServers,
+  startAllMCPServers,
+  startMCPServer,
   WAVE_MCP_DEFAULTS,
 } from './mcp.js';
 import type { AIWaveName } from './wave-tools.js';
@@ -370,3 +407,107 @@ describe('getMCPToolsForWave', () => {
     expect(tools.map((t) => t.name)).toEqual(['mcp__repo-intel__search', 'mcp__repo-intel__context']);
   });
 });
+
+/* ------------------------------------------------------------------ */
+/*  startMCPServer — workDir threading (issue #270)                    */
+/*                                                                     */
+/*  Literal ${workspaceFolder} / ${cwd} tokens in the string literals  */
+/*  below are intentional — they're the fixtures the substitution      */
+/*  helper consumes. Biome's noTemplateCurlyInString check is disabled */
+/*  for this section to keep them readable as fixtures.                */
+/* ------------------------------------------------------------------ */
+
+// biome-ignore-start lint/suspicious/noTemplateCurlyInString: intentional template-token fixtures for substitution tests
+describe('startMCPServer — workDir threading', () => {
+  beforeEach(() => {
+    transportCtorCalls.length = 0;
+    clientConnectCalls.length = 0;
+  });
+
+  it('passes cwd to StdioClientTransport when workDir is provided', async () => {
+    await startMCPServer('codegraph', { command: 'codegraph', args: ['serve', '--mcp'] }, '/tmp/worktree-A');
+
+    expect(transportCtorCalls.length).toBe(1);
+    expect(transportCtorCalls[0]?.cwd).toBe('/tmp/worktree-A');
+  });
+
+  it('omits cwd from StdioClientTransport when workDir is undefined (backward compat)', async () => {
+    await startMCPServer('repo-intel', { command: 'npx', args: ['-y', 'repo-intel'] });
+
+    expect(transportCtorCalls.length).toBe(1);
+    expect(transportCtorCalls[0]?.cwd).toBeUndefined();
+  });
+
+  it('substitutes ${workspaceFolder} in args when workDir is provided', async () => {
+    await startMCPServer(
+      'codegraph',
+      { command: 'codegraph', args: ['serve', '--mcp', '--path', '${workspaceFolder}'] },
+      '/tmp/worktree-B',
+    );
+
+    expect(transportCtorCalls[0]?.args).toEqual(['serve', '--mcp', '--path', '/tmp/worktree-B']);
+  });
+
+  it('substitutes ${cwd} in args when workDir is provided', async () => {
+    await startMCPServer('svr', { command: 'node', args: ['index.js', '--root', '${cwd}'] }, '/tmp/worktree-C');
+
+    expect(transportCtorCalls[0]?.args).toEqual(['index.js', '--root', '/tmp/worktree-C']);
+  });
+
+  it('substitutes ${workspaceFolder} in env values when workDir is provided', async () => {
+    await startMCPServer(
+      'svr',
+      {
+        command: 'node',
+        args: ['index.js'],
+        env: { PROJECT_ROOT: '${workspaceFolder}', UNRELATED: 'static-value' },
+      },
+      '/tmp/worktree-D',
+    );
+
+    const params = transportCtorCalls[0] as { env: Record<string, string> };
+    expect(params.env.PROJECT_ROOT).toBe('/tmp/worktree-D');
+    expect(params.env.UNRELATED).toBe('static-value');
+  });
+
+  it('keeps tokens literal when workDir is undefined (no substitution)', async () => {
+    // Tokens stay literal — avoids silently swallowing intentional ${VAR} shell strings.
+    await startMCPServer('svr', {
+      command: 'node',
+      args: ['index.js', '--root', '${workspaceFolder}'],
+    });
+
+    expect(transportCtorCalls[0]?.args).toEqual(['index.js', '--root', '${workspaceFolder}']);
+  });
+
+  it('concurrent calls with different workDirs each pass their own cwd', async () => {
+    // Acceptance criterion: "Concurrent/multi-repo fixes each point at their own worktree"
+    await Promise.all([
+      startMCPServer('codegraph', { command: 'codegraph', args: ['serve'] }, '/tmp/wt-alpha'),
+      startMCPServer('codegraph', { command: 'codegraph', args: ['serve'] }, '/tmp/wt-beta'),
+    ]);
+
+    expect(transportCtorCalls.length).toBe(2);
+    const cwds = transportCtorCalls.map((p) => p.cwd).sort();
+    expect(cwds).toEqual(['/tmp/wt-alpha', '/tmp/wt-beta']);
+  });
+
+  it('startAllMCPServers forwards workDir to each StdioClientTransport', async () => {
+    await startAllMCPServers(
+      {
+        codegraph: { command: 'codegraph', args: ['serve', '--mcp', '--path', '${workspaceFolder}'] },
+        'repo-intel': { command: 'npx', args: ['-y', 'repo-intel'] },
+      },
+      '/tmp/worktree-E',
+    );
+
+    expect(transportCtorCalls.length).toBe(2);
+    for (const params of transportCtorCalls) {
+      expect(params.cwd).toBe('/tmp/worktree-E');
+    }
+    // codegraph args got templated
+    const codegraphCall = transportCtorCalls.find((p) => (p as { command: string }).command === 'codegraph');
+    expect(codegraphCall?.args).toEqual(['serve', '--mcp', '--path', '/tmp/worktree-E']);
+  });
+});
+// biome-ignore-end lint/suspicious/noTemplateCurlyInString: intentional template-token fixtures for substitution tests
