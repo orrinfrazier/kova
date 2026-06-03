@@ -626,6 +626,35 @@ program
   });
 
 program
+  .command('capture <fix-id>')
+  .description('Print the per-fix scrollback ring buffer (replay) from a running kova daemon')
+  .option(
+    '--wave <name>',
+    'Filter to events for a specific wave (assess|spec|test|impl|quality|review|brainstorm|ship)',
+  )
+  .option('--lines <n>', 'Keep only the last N events after filtering')
+  .option('--url <url>', 'Daemon base URL (default: $KOVA_CAPTURE_URL or http://localhost:3000)')
+  .action(async (fixId: string, opts: { wave?: string; lines?: string; url?: string }) => {
+    const { runCapture } = await import('./capture.js');
+    const lines = opts.lines != null ? Number.parseInt(opts.lines, 10) : undefined;
+    if (opts.lines != null && (lines === undefined || Number.isNaN(lines) || lines < 0)) {
+      console.error(`Invalid --lines value: ${opts.lines}. Expected a non-negative integer.`);
+      process.exit(1);
+    }
+    try {
+      const captureOptions: { wave?: string; lines?: number; url?: string } = {};
+      if (opts.wave) captureOptions.wave = opts.wave;
+      if (lines !== undefined) captureOptions.lines = lines;
+      if (opts.url) captureOptions.url = opts.url;
+      await runCapture(fixId, captureOptions);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`kova capture: ${msg}`);
+      process.exit(1);
+    }
+  });
+
+program
   .command('merge')
   .description('Merge kova PRs in dependency order')
   .option('--pr <number>', 'Merge a specific PR')

@@ -2,6 +2,7 @@
 // Uses node:http (no external deps).
 
 import http from 'node:http';
+import { filterCaptureEvents } from '../cli/capture.js';
 import { log } from '../utils/logger.js';
 import type { EventBus } from './event-bus/bus.js';
 import { handleSseRequest } from './event-bus/sse.js';
@@ -83,6 +84,40 @@ export function createWebhookServer(options: WebhookServerOptions): WebhookServe
         return;
       }
       handleSseRequest(req, res, eventBus);
+      return;
+    }
+
+    // GET /capture?fixId=<id>[&wave=<w>][&lines=<n>] — per-fix scrollback (kova#295)
+    if (url.startsWith('/capture') && method === 'GET') {
+      if (!eventBus) {
+        jsonResponse(res, 404, { error: 'Event bus not enabled' });
+        return;
+      }
+      const parsed = new URL(url, 'http://localhost');
+      const fixId = parsed.searchParams.get('fixId') ?? '';
+      if (!fixId) {
+        jsonResponse(res, 400, { error: 'fixId query parameter is required' });
+        return;
+      }
+      const wave = parsed.searchParams.get('wave') ?? undefined;
+      const linesParam = parsed.searchParams.get('lines');
+      let lines: number | undefined;
+      if (linesParam !== null) {
+        const n = Number.parseInt(linesParam, 10);
+        if (Number.isNaN(n) || n < 0) {
+          jsonResponse(res, 400, { error: `Invalid lines parameter: ${linesParam}` });
+          return;
+        }
+        lines = n;
+      }
+      const snapshot = eventBus.snapshot(fixId);
+      const filterArg: { wave?: string; lines?: number } = {};
+      if (wave) filterArg.wave = wave;
+      if (lines !== undefined) filterArg.lines = lines;
+      const filtered = filterCaptureEvents(snapshot, filterArg);
+      const body = JSON.stringify(filtered);
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(body);
       return;
     }
 
