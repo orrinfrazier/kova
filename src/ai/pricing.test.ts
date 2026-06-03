@@ -1,10 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import {
-  getPricing,
-  type ModelPricing,
-  priceUsage,
-  type TokenUsage,
-} from './pricing.js';
+import { getPricing, type ModelPricing, priceUsage, type TokenUsage } from './pricing.js';
 
 // We use pi-ai's calculateCost as the regression reference for at least one
 // known model. The table values themselves come from
@@ -77,10 +72,7 @@ describe('priceUsage — pi-ai compatibility', () => {
       cacheWrite: 200,
     };
     const expected =
-      (3 / 1_000_000) * 12_000 +
-      (15 / 1_000_000) * 3_500 +
-      (0.3 / 1_000_000) * 800 +
-      (3.75 / 1_000_000) * 200;
+      (3 / 1_000_000) * 12_000 + (15 / 1_000_000) * 3_500 + (0.3 / 1_000_000) * 800 + (3.75 / 1_000_000) * 200;
     const actual = priceUsage('claude-sonnet-4-6', usage);
     expect(actual).toBeCloseTo(expected, 10);
   });
