@@ -1,13 +1,31 @@
-// Playbook REST client + clustering / synthesis primitives (#299) — closes
-// the learning loop. Successful episodes cluster by (label ∩, language =,
-// file ∩), get distilled by an injected synth fn into a PlaybookRecord,
-// and persist to the playbooks endpoint for later spec-wave injection.
+// Playbook client + clustering / synthesis primitives (#299, migrated to
+// sqlite-vec in #433). Successful episodes cluster by (label ∩, language =,
+// file ∩), get distilled by an injected synth fn into a PlaybookRecord, and
+// persist to the local sqlite-vec-backed `PlaybookStore` for later spec-wave
+// injection. Filename retained as `*-rest.ts` for the duration of #433 →
+// #434 to keep the patch minimal; #434's mass rename will fold this in.
 
+import { join as joinPath } from 'node:path';
 import type { PlaybooksConfig } from '../../types/config.js';
 import type { EpisodeForCluster, PlaybookRecord, SynthesizeFn } from '../../types/memory.js';
 import { log } from '../../utils/logger.js';
+import { PlaybookStore } from './playbook-store.js';
 
 export type { EpisodeForCluster, PlaybookRecord, SynthesizeFn } from '../../types/memory.js';
+
+function resolvePlaybookDbPath(workDir: string): string {
+  return joinPath(workDir, '.kova', 'playbooks-vec.db');
+}
+
+function openPlaybookStore(workDir: string): PlaybookStore | null {
+  try {
+    return new PlaybookStore(resolvePlaybookDbPath(workDir));
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    log.warn(`[playbooks] Failed to open local sqlite-vec store: ${msg}`);
+    return null;
+  }
+}
 
 /**
  * Group successful episodes into clusters that share enough context to be
@@ -174,83 +192,66 @@ export function formatPlaybook(playbook: PlaybookRecord | null): string {
 }
 
 /**
- * Query the playbooks endpoint for a playbook matching the given query
- * (issue title + body, typically). Returns null on disabled, missing
- * endpoint, network error, non-200, or malformed response.
- *
- * The endpoint contract: POST `{query, repo?, language?}`, returns
- * `{playbook: PlaybookRecord | null}`.
+ * Query the local sqlite-vec playbook store for the best-matching playbook.
+ * Returns null on disabled, missing workDir, or no sufficiently similar match.
  */
 export async function queryPlaybook(
   config: PlaybooksConfig,
   query: string,
   options?: { repo?: string | undefined; language?: string | undefined },
+  workDir?: string,
 ): Promise<PlaybookRecord | null> {
   if (!config.enabled) return null;
-  if (!config.endpoint) {
-    log.warn('[playbooks] Enabled but no endpoint configured — skipping');
+  if (!workDir) {
+    log.warn('[playbooks] Enabled but no workDir provided — skipping playbook injection');
     return null;
   }
 
+  const store = openPlaybookStore(workDir);
+  if (!store) return null;
+
   try {
-    const body: Record<string, unknown> = { query };
-    if (options?.repo) body.repo = options.repo;
-    if (options?.language) body.language = options.language;
-
-    const response = await fetch(config.endpoint, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-
-    if (!response.ok) {
-      log.warn(`[playbooks] Endpoint returned ${response.status} — skipping playbook injection`);
-      return null;
+    const playbook = store.queryPlaybook(query, options?.repo, options?.language);
+    if (playbook) {
+      log.info(`[playbooks] Retrieved playbook (${playbook.synthesized_from_count} source episodes)`);
     }
-
-    const data = (await response.json()) as { playbook?: PlaybookRecord | null };
-    if (!data || !('playbook' in data) || !data.playbook) {
-      return null;
-    }
-
-    log.info(`[playbooks] Retrieved playbook (${data.playbook.synthesized_from_count} source episodes)`);
-    return data.playbook;
+    return playbook;
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
-    log.warn(`[playbooks] Failed to query endpoint: ${msg} — skipping playbook injection`);
+    log.warn(`[playbooks] Failed to query local store: ${msg} — skipping playbook injection`);
     return null;
+  } finally {
+    store.close();
   }
 }
 
 /**
- * Persist a PlaybookRecord to the playbooks endpoint. Returns true on
- * 200-class response, false on any failure mode (disabled, missing
- * endpoint, network error, non-200). Never throws.
+ * Persist a PlaybookRecord to the local sqlite-vec playbook store. Returns
+ * true on success, false on any failure mode. Never throws.
  */
-export async function recordPlaybook(config: PlaybooksConfig, playbook: PlaybookRecord): Promise<boolean> {
+export async function recordPlaybook(
+  config: PlaybooksConfig,
+  playbook: PlaybookRecord,
+  workDir?: string,
+): Promise<boolean> {
   if (!config.enabled) return false;
-  if (!config.endpoint) {
-    log.warn('[playbooks] Enabled but no endpoint configured — playbook not saved');
+  if (!workDir) {
+    log.warn('[playbooks] Enabled but no workDir provided — playbook not saved');
     return false;
   }
 
+  const store = openPlaybookStore(workDir);
+  if (!store) return false;
+
   try {
-    const response = await fetch(config.endpoint, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(playbook),
-    });
-
-    if (!response.ok) {
-      log.warn(`[playbooks] Recording endpoint returned ${response.status} — playbook not saved`);
-      return false;
-    }
-
+    store.recordPlaybook(playbook);
     log.info(`[playbooks] Recorded playbook (${playbook.synthesized_from_count} source episodes)`);
     return true;
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     log.warn(`[playbooks] Failed to record playbook: ${msg}`);
     return false;
+  } finally {
+    store.close();
   }
 }
