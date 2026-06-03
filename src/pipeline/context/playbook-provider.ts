@@ -5,7 +5,7 @@
 // spec wave. Default off; gated by `config.playbooks?.enabled`. Graceful
 // degradation — never blocks the fix on failure.
 
-import { formatPlaybook, queryPlaybook } from '../../services/vectordb.js';
+import { formatPlaybook, queryPlaybook } from '../../services/memory/playbook-rest.js';
 import type { ContextProvider, ContextProviderInput } from './types.js';
 
 export const playbookProvider: ContextProvider = {

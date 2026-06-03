@@ -24,7 +24,7 @@
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import Database, { type Database as DbHandle } from 'better-sqlite3';
-import type { EpisodeContext } from './vectordb.js';
+import type { EpisodeContext } from '../types/memory.js';
 
 const SCHEMA = `
 CREATE VIRTUAL TABLE IF NOT EXISTS episodes_fts USING fts5(

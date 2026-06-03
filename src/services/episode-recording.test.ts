@@ -6,7 +6,7 @@ import {
   type WaveName,
   type WaveResult,
 } from '../types/config.js';
-import { buildEpisodeRecord, type EpisodeRecord, recordEpisode } from './vectordb.js';
+import { buildEpisodeRecord, type EpisodeRecord, recordEpisode } from './memory/episode-rest.js';
 
 /* ------------------------------------------------------------------ */
 /*  Mock fetch                                                         */

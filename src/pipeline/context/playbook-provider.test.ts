@@ -2,12 +2,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { playbookProvider } from './playbook-provider.js';
 import { makeConfig, makeCtx } from './test-helpers.js';
 
-vi.mock('../../services/vectordb.js', () => ({
+vi.mock('../../services/memory/playbook-rest.js', () => ({
   queryPlaybook: vi.fn(async () => null),
   formatPlaybook: vi.fn(() => 'PLAYBOOK'),
 }));
 
-import { formatPlaybook, queryPlaybook } from '../../services/vectordb.js';
+import { formatPlaybook, queryPlaybook } from '../../services/memory/playbook-rest.js';
 
 describe('playbookProvider', () => {
   beforeEach(() => vi.clearAllMocks());

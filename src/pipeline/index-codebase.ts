@@ -14,7 +14,7 @@ import {
   getLastIndexedSha,
   saveLastIndexedSha,
 } from '../services/git-diff.js';
-import { upsertChunks } from '../services/vectordb.js';
+import { upsertChunks } from '../services/memory/code-rest.js';
 import type { VectorDBConfig } from '../types/config.js';
 import { log } from '../utils/logger.js';
 

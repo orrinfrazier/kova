@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('../services/vectordb.js', () => ({
+vi.mock('../services/memory/code-rest.js', () => ({
   upsertChunks: vi.fn().mockResolvedValue(undefined),
 }));
 

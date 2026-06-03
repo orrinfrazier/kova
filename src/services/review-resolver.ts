@@ -22,7 +22,7 @@ import type { EpisodicMemoryConfig } from '../types/config.js';
 import { log } from '../utils/logger.js';
 import { collectPRFeedback } from './feedback-collector.js';
 import { fetchPRReviewState, type KovaPR, type PRReviewThread, replyToReviewComment } from './github.js';
-import { classifyFeedback } from './vectordb.js';
+import { classifyFeedback } from './memory/review-feedback-rest.js';
 
 /** Default feedback types treated as non-actionable (surface, do not auto-resolve). */
 export const DEFAULT_NON_ACTIONABLE_TYPES: readonly string[] = [

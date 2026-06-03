@@ -9,9 +9,9 @@
 
 import { join as joinPath } from 'node:path';
 import { type EpisodeFTSRecord, EpisodeFTSStore } from '../../services/episode-fts.js';
-import type { EpisodeContext } from '../../services/vectordb.js';
-import { formatEpisodes, formatFailedEpisodes, queryEpisodeContext } from '../../services/vectordb.js';
+import { formatEpisodes, formatFailedEpisodes, queryEpisodeContext } from '../../services/memory/episode-rest.js';
 import type { EpisodicMemoryConfig } from '../../types/config.js';
+import type { EpisodeContext } from '../../types/memory.js';
 import type { ContextProvider, ContextProviderInput, MultiContextOutput } from './types.js';
 
 export const episodicProvider: ContextProvider = {
