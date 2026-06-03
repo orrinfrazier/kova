@@ -15,6 +15,7 @@ import {
   syncCodegraph,
 } from '../ai/codegraph.js';
 import {
+  type AgentRuntimeFactory,
   buildWaveSessionId,
   type FixAIWaveName,
   getApiFallbackModelString,
@@ -25,6 +26,7 @@ import {
   isLocalModel,
   type MCPServerHandle,
   type OutputFormat,
+  type RuntimeKind,
   resolveMCPServers,
   resolveThinkingLevel,
   resolveWaveModel,
@@ -133,6 +135,7 @@ import {
 } from './loops.js';
 import { applyPipelineMode, autoSelectMode, describeAutoSelection, MODE_EXTRA_IMPL_ATTEMPTS } from './mode.js';
 import { loadPrompt, resolvePromptsDir } from './prompts.js';
+import { buildRuntimeFactory, resolveRuntimeKind } from './runtime-select.js';
 import { loadWaveSkills } from './skills-loader.js';
 import {
   formatOverlapFeedback,
@@ -175,6 +178,17 @@ export interface FixOptions {
    * never altered by the publish path.
    */
   eventBus?: EventBus | undefined;
+  /**
+   * Per-invocation runtime selector (issue #407). Overrides `config.runtime`.
+   * When undefined, falls back to `config.runtime` (default `'pi'`). When
+   * `'claude-cli'`, the kova-resolved MCP server map is merged into the
+   * claude-cli runtime config so MCP-backed tools work end-to-end under the
+   * CLI subprocess. In-process `AgentTool[]` implementations supplied to
+   * `spawnWaveAgent` are pi-mono-only — the claude-cli runtime only sees the
+   * static allowlist + MCP servers (documented in CLAUDE.md "Runtime
+   * selection").
+   */
+  runtime?: RuntimeKind | undefined;
 }
 
 export interface FixResult {
@@ -277,6 +291,13 @@ async function spawnWave<T>(
   runSkills?: FixRunSkills | undefined,
   cacheContext?: { repo: string; issue: string | number },
   eventContext?: { eventBus: EventBus; runId: string; repoId: string; fixId: string },
+  /**
+   * Issue #407 — pre-resolved `AgentRuntimeFactory`. When undefined, spawnWaveAgent
+   * applies its own `defaultAgentRuntimeFactory` default (pi-mono).  Caller `fix()`
+   * resolves precedence (option > config.runtime > 'pi') once and threads the
+   * factory into every wave so the runtime choice is consistent across S/T/I/Q/R.
+   */
+  runtimeFactory?: AgentRuntimeFactory | undefined,
 ): Promise<{ handoff: WaveHandoff<T>; promptHash: string }> {
   const model = resolveWaveModel(config.model[wave]);
   const mcpTools =
@@ -335,6 +356,7 @@ async function spawnWave<T>(
             eventContext: { runId: eventContext.runId, repoId: eventContext.repoId, fixId: eventContext.fixId },
           }
         : {}),
+      ...(runtimeFactory != null ? { runtimeFactory } : {}),
     },
     sandbox,
   );
@@ -683,14 +705,31 @@ export async function fix(options: FixOptions): Promise<FixResult> {
   // (issue #270). `codegraphWithholdList` suppresses the codegraph server entry
   // when its index is empty/uninitialized (issue #271).
   let mcpHandles = new Map<string, MCPServerHandle>();
+  let resolvedMcpServers: Record<string, import('../types/index.js').MCPServerConfig> = {};
   try {
-    const mcpServers = await resolveMCPServers(config.mcp);
-    if (Object.keys(mcpServers).length > 0) {
-      mcpHandles = await startAllMCPServers(mcpServers, workDir, codegraphWithholdList);
+    resolvedMcpServers = await resolveMCPServers(config.mcp);
+    if (Object.keys(resolvedMcpServers).length > 0) {
+      mcpHandles = await startAllMCPServers(resolvedMcpServers, workDir, codegraphWithholdList);
       flog.info(`[mcp] ${mcpHandles.size} MCP server(s) running (cwd=${workDir})`);
     }
   } catch (error) {
     flog.warn(`[mcp] Failed to start MCP servers: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  // Issue #407 — runtime selection. Resolve precedence (option > config.runtime
+  // > 'pi') ONCE here and build the factory; thread it through every
+  // spawnWave() call so the runtime choice is consistent across S/T/I/Q/R.
+  // For the claude-cli path we merge the kova-resolved MCP map into the
+  // factory wrapper so MCP-backed tools work end-to-end under the CLI
+  // subprocess. The pi path ignores `resolvedMcpServers` — pi-mono consumes
+  // live `MCPServerHandle` objects via the tools array, not a static map.
+  const resolvedRuntimeKindRaw = options.runtime ?? config.runtime;
+  const resolvedRuntimeFactory: AgentRuntimeFactory | undefined =
+    resolvedRuntimeKindRaw != null
+      ? buildRuntimeFactory(resolveRuntimeKind(options.runtime, config.runtime), resolvedMcpServers)
+      : undefined;
+  if (resolvedRuntimeKindRaw != null) {
+    flog.info(`[runtime] Using ${resolveRuntimeKind(options.runtime, config.runtime)} runtime`);
   }
 
   if (fresh) {
@@ -891,6 +930,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         runSkills,
         cacheContext,
         eventDispatchContext,
+        resolvedRuntimeFactory,
       );
       await saveHandoff(workDir, handoff);
       promptHashes.assess = promptHash;
@@ -1037,6 +1077,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         runSkills,
         cacheContext,
         eventDispatchContext,
+        resolvedRuntimeFactory,
       );
       await saveHandoff(workDir, handoff);
       promptHashes.spec = promptHash;
@@ -1129,6 +1170,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           runSkills,
           cacheContext,
           eventDispatchContext,
+          resolvedRuntimeFactory,
         );
 
         await saveHandoff(workDir, retryHandoff);
@@ -1232,6 +1274,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           runSkills,
           cacheContext,
           eventDispatchContext,
+          resolvedRuntimeFactory,
         );
 
         await saveHandoff(workDir, emptyRetryHandoff);
@@ -1358,6 +1401,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           runSkills,
           cacheContext,
           eventDispatchContext,
+          resolvedRuntimeFactory,
         );
         await saveHandoff(workDir, specHandoff);
         promptHashes.spec = specPromptHash;
@@ -1425,6 +1469,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         runSkills,
         cacheContext,
         eventDispatchContext,
+        resolvedRuntimeFactory,
       );
       await saveHandoff(workDir, handoff);
       promptHashes.quality = promptHash;

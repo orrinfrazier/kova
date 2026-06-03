@@ -3,6 +3,7 @@
 
 import { confirm, intro, isCancel, note, outro } from '@clack/prompts';
 import { fs, path } from 'zx';
+import type { RuntimeKind } from '../ai/runtime/index.js';
 import { approveIssues } from '../services/approval.js';
 import { resolveBrainstormDependencies } from '../services/brainstorm-deps.js';
 import { createIssue, fetchIssues } from '../services/github.js';
@@ -22,6 +23,8 @@ export interface SupervisedOptions {
   yes?: boolean;
   budgetUsd?: number;
   maxIssues?: number;
+  /** Issue #407 — runtime selector forwarded to brainstorm() + fixByNumbers(). */
+  runtime?: RuntimeKind | undefined;
 }
 
 export interface SupervisedResult {
@@ -97,6 +100,7 @@ export async function runSupervised(options: SupervisedOptions): Promise<Supervi
       config,
       ...(threshold !== undefined && { threshold }),
       ...(focus !== undefined && { focus }),
+      ...(options.runtime != null ? { runtime: options.runtime } : {}),
     });
 
     if (!brainstormResult.success) {
@@ -215,7 +219,14 @@ export async function runSupervised(options: SupervisedOptions): Promise<Supervi
   }
 
   // Fix phase
-  const fixResult = await fixByNumbers({ repoPath, repoName, config, issueNumbers, budgetUsd });
+  const fixResult = await fixByNumbers({
+    repoPath,
+    repoName,
+    config,
+    issueNumbers,
+    budgetUsd,
+    ...(options.runtime != null ? { runtime: options.runtime } : {}),
+  });
 
   // Clear session after successful fix
   await clearSupervisedSession(repoPath);

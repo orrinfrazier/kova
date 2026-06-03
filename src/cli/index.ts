@@ -12,7 +12,7 @@
 
 import { resolve } from 'node:path';
 import { Command } from 'commander';
-import { validateModelConfig } from '../ai/index.js';
+import { RUNTIME_KINDS, type RuntimeKind, validateModelConfig } from '../ai/index.js';
 import { runAuto, runAutoMultiRepo, runAutoMultiRepoParallel } from '../pipeline/auto.js';
 import { runBabysit } from '../pipeline/babysit.js';
 import { makeRunReviewLoopDispatch, previewDispatch } from '../pipeline/babysit-dispatch.js';
@@ -68,6 +68,18 @@ function parsePipelineMode(value: string | undefined): PipelineMode | undefined 
     return value as PipelineMode;
   }
   console.error(`Invalid --mode value: "${value}". Expected one of: ${PIPELINE_MODES.join(', ')}.`);
+  process.exit(1);
+}
+
+/** Parse the `--runtime` flag into a `RuntimeKind`, exiting on invalid input
+ *  (issue #407). Returns `undefined` when the flag is absent — the pipeline
+ *  layer then falls back to `config.runtime` (default `'pi'`). */
+function parseRuntimeKind(value: string | undefined): RuntimeKind | undefined {
+  if (value == null) return undefined;
+  if ((RUNTIME_KINDS as readonly string[]).includes(value)) {
+    return value as RuntimeKind;
+  }
+  console.error(`Invalid --runtime value: "${value}". Expected one of: ${RUNTIME_KINDS.join(', ')}.`);
   process.exit(1);
 }
 
@@ -138,6 +150,10 @@ program
     '--mode <mode>',
     'Pipeline mode: simple | standard | economy | explore. When omitted, auto-selected from the WAVE A grade.',
   )
+  .option(
+    '--runtime <runtime>',
+    `Agent runtime: ${RUNTIME_KINDS.join(' | ')}. Overrides per-repo config.runtime (default 'pi'). (#407)`,
+  )
   .option('--no-comment', 'Suppress GitHub comment on grade D/F skip')
   .action(
     async (
@@ -153,12 +169,16 @@ program
         force?: boolean;
         comment?: boolean;
         mode?: string;
+        runtime?: string;
       },
     ) => {
       const kovaConfig = await tryLoadConfig(program.opts().config);
       const { repoPath, repoName, config } = resolveRepo(opts.repo ?? '.', kovaConfig);
       initMetrics(config.metrics);
       registerOllamaProvidersFromConfig(config);
+
+      // Issue #407: parse --runtime once, forward to fix() / fixLoop() below.
+      const runtime = parseRuntimeKind(opts.runtime);
 
       if (opts.all) {
         // Loop mode: fix all open issues
@@ -173,6 +193,7 @@ program
           maxIssues: Number.parseInt(opts.max ?? '10', 10),
           budgetUsd: opts.budget ? Number.parseFloat(opts.budget) : undefined,
           force: opts.force,
+          ...(runtime != null ? { runtime } : {}),
         });
         shutdownMetrics();
         removeSignalHandlers();
@@ -223,6 +244,7 @@ program
         fresh: opts.fresh,
         noComment: opts.comment === false,
         mode: opts.mode != null ? mode : undefined,
+        ...(runtime != null ? { runtime } : {}),
       });
 
       shutdownMetrics();
@@ -245,6 +267,10 @@ program
   .option('--repo <name-or-path>', 'Single repository name or path (skip multi-repo)')
   .option('--parallel-repos', 'Process repos concurrently (default: sequential)')
   .option('--budget <usd>', 'Shared budget cap across all repos (USD)')
+  .option(
+    '--runtime <runtime>',
+    `Agent runtime: ${RUNTIME_KINDS.join(' | ')}. Forwarded into every per-repo fix loop. (#407)`,
+  )
   .action(
     async (opts: {
       filter?: string;
@@ -254,8 +280,10 @@ program
       repo?: string;
       parallelRepos?: boolean;
       budget?: string;
+      runtime?: string;
     }) => {
       const kovaConfig = await tryLoadConfig(program.opts().config);
+      const runtime = parseRuntimeKind(opts.runtime);
 
       installSignalHandlers();
 
@@ -272,6 +300,7 @@ program
           ...(opts.milestone !== undefined ? { milestone: opts.milestone } : {}),
           max: opts.max ? Number.parseInt(opts.max, 10) : undefined,
           force: opts.force,
+          ...(runtime != null ? { runtime } : {}),
         });
         shutdownMetrics();
         removeSignalHandlers();
@@ -301,6 +330,7 @@ program
           max: opts.max ? Number.parseInt(opts.max, 10) : undefined,
           force: opts.force,
           budgetUsd: opts.budget ? Number.parseFloat(opts.budget) : undefined,
+          ...(runtime != null ? { runtime } : {}),
         });
         shutdownMetrics();
         removeSignalHandlers();
@@ -318,6 +348,7 @@ program
         ...(opts.milestone !== undefined ? { milestone: opts.milestone } : {}),
         max: opts.max ? Number.parseInt(opts.max, 10) : undefined,
         force: opts.force,
+        ...(runtime != null ? { runtime } : {}),
       });
       shutdownMetrics();
       removeSignalHandlers();
@@ -336,7 +367,8 @@ program
   .option('--threshold <n>', 'Minimum confidence score (0.0-1.0)', '0.7')
   .option('--focus <areas>', 'Comma-separated focus areas (e.g., "security,performance")')
   .option('--yes', 'Auto-approve all issues (no interactive prompts)')
-  .action(async (opts: { repo?: string; threshold?: string; focus?: string; yes?: boolean }) => {
+  .option('--runtime <runtime>', `Agent runtime: ${RUNTIME_KINDS.join(' | ')}. (#407)`)
+  .action(async (opts: { repo?: string; threshold?: string; focus?: string; yes?: boolean; runtime?: string }) => {
     const kovaConfig = await tryLoadConfig(program.opts().config);
     const { repoPath, config } = resolveRepo(opts.repo ?? '.', kovaConfig);
     registerOllamaProvidersFromConfig(config);
@@ -346,9 +378,17 @@ program
       process.exit(1);
     }
     const focus = opts.focus ? opts.focus.split(',').map((s) => s.trim()) : undefined;
+    const runtime = parseRuntimeKind(opts.runtime);
 
     log.info('Brainstorming issues...');
-    const result = await brainstorm({ repoPath, config, threshold, focus, kovaConfig });
+    const result = await brainstorm({
+      repoPath,
+      config,
+      threshold,
+      focus,
+      kovaConfig,
+      ...(runtime != null ? { runtime } : {}),
+    });
     printBrainstormPreview(result);
 
     if (!result.success) {
@@ -391,6 +431,7 @@ program
   .option('--yes', 'Auto-approve all issues (no interactive prompts)')
   .option('--budget <usd>', 'Maximum USD budget for fix loop')
   .option('--max <n>', 'Maximum issues to fix', '10')
+  .option('--runtime <runtime>', `Agent runtime: ${RUNTIME_KINDS.join(' | ')}. (#407)`)
   .action(
     async (opts: {
       skipBrainstorm?: boolean;
@@ -400,6 +441,7 @@ program
       yes?: boolean;
       budget?: string;
       max?: string;
+      runtime?: string;
     }) => {
       const repoPath = resolve(opts.repo ?? '.');
       const repoName = detectRepoName(repoPath);
@@ -410,6 +452,7 @@ program
       const threshold = opts.threshold ? Number.parseFloat(opts.threshold) : undefined;
       const focus = opts.focus ? opts.focus.split(',').map((s) => s.trim()) : undefined;
       const budgetUsd = opts.budget ? Number.parseFloat(opts.budget) : undefined;
+      const runtime = parseRuntimeKind(opts.runtime);
 
       installSignalHandlers();
       let success = false;
@@ -423,6 +466,7 @@ program
           ...(focus !== undefined && { focus }),
           ...(opts.yes && { yes: true }),
           ...(budgetUsd !== undefined && { budgetUsd }),
+          ...(runtime != null ? { runtime } : {}),
         });
         success = result.success;
       } catch (error) {
