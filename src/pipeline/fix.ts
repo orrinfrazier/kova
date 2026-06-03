@@ -6,6 +6,8 @@ import { join as joinPath } from 'node:path';
 import { z } from 'zod';
 import { $ } from 'zx';
 import {
+  extractSymbolCandidates,
+  formatCodegraphContext,
   initCodegraph,
   isCodegraphOnPath,
   probeCodegraphStatus,
@@ -33,6 +35,7 @@ import { getSandboxBackend, type SandboxBackend } from '../sandbox/backend.js';
 import { dispatchSpawnWave, type SandboxContext } from '../sandbox/dispatch.js';
 import { selectVariants, type VariantSelection } from '../services/ab-test.js';
 import { clearCheckpoint, loadCheckpoint, saveCheckpoint } from '../services/checkpoint.js';
+import { openCodegraph } from '../services/codegraph/index.js';
 import { checkForConflicts } from '../services/conflict-check.js';
 import { resolveConflicts } from '../services/conflict-resolver.js';
 import { type EpisodeFTSRecord, EpisodeFTSStore } from '../services/episode-fts.js';
@@ -904,6 +907,35 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       }
     }
 
+    // Issue #273 — Codegraph: exact definition spans + callers/callees + call
+    // paths for symbols named in the issue. Sits ABOVE the fuzzy codebase chunks
+    // (see context.ts ordering). Graceful degradation: any failure here leaves
+    // codegraphContext undefined and the spec/impl waves proceed with only the
+    // fuzzy codebaseContext (today's behavior).
+    let codegraphContext: string | undefined;
+    try {
+      const symbolNames = extractSymbolCandidates(`${issue.title}\n\n${issue.body}`);
+      if (symbolNames.length > 0) {
+        const dbPath = joinPath(repoPath, '.kova', 'codegraph.db');
+        const cg = openCodegraph(dbPath);
+        try {
+          const formatted = formatCodegraphContext({ graph: cg, symbolNames });
+          if (formatted.length > 0) {
+            codegraphContext = formatted;
+            flog.info(
+              `[codegraph-context] injected (${symbolNames.length} candidate symbols, ${formatted.length} chars)`,
+            );
+          }
+        } finally {
+          cg.close();
+        }
+      }
+    } catch (err) {
+      flog.warn(
+        `[codegraph-context] degraded — proceeding without graph context: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
     // repo-intel: query for similar implementations (before spec wave)
     let repoSearchText: string | undefined;
     if (config.repo_intel?.enabled && ownerRepo) {
@@ -940,6 +972,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           prContext,
           ...(failedEpisodicContext != null && { episodicContext: failedEpisodicContext }),
           ...(playbookContext != null && { playbookContext }),
+          ...(codegraphContext != null && { codegraphContext }),
           ...(codebaseContext != null && { codebaseContext }),
           ...(repoSearchText != null && { repoSearchText }),
           ...(patternContext != null && { patternContext }),
@@ -1025,6 +1058,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         const specContext = buildWaveContext('spec', issue, state.waveResults, {
           prContext,
           ...(failedEpisodicContext != null && { episodicContext: failedEpisodicContext }),
+          ...(codegraphContext != null && { codegraphContext }),
           ...(codebaseContext != null && { codebaseContext }),
           ...(repoSearchText != null && { repoSearchText }),
         });
@@ -1127,6 +1161,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         const emptyRetryContext = buildWaveContext('spec', issue, state.waveResults, {
           prContext,
           ...(failedEpisodicContext != null && { episodicContext: failedEpisodicContext }),
+          ...(codegraphContext != null && { codegraphContext }),
           ...(codebaseContext != null && { codebaseContext }),
           ...(repoSearchText != null && { repoSearchText }),
         });
@@ -1181,6 +1216,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
         waveResults: state.waveResults,
         prContext,
         codebaseContext,
+        codegraphContext,
         projectContext,
         ...(testRunner != null && { testRunner }),
         ...(serialFallback && { maxConcurrent: 1 }),
@@ -1229,6 +1265,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           buildWaveContext('spec', issue, state.waveResults, {
             prContext,
             ...(failedEpisodicContext != null && { episodicContext: failedEpisodicContext }),
+            ...(codegraphContext != null && { codegraphContext }),
             ...(codebaseContext != null && { codebaseContext }),
             ...(repoSearchText != null && { repoSearchText }),
             escalationHint: respecContext,
@@ -1255,6 +1292,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
           waveResults: state.waveResults,
           prContext,
           codebaseContext,
+          codegraphContext,
           projectContext,
           ...(testRunner != null && { testRunner }),
           ...(sandboxContext != null && { sandbox: sandboxContext }),
@@ -1465,6 +1503,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
             waveResults: state.waveResults,
             prContext,
             codebaseContext: [codebaseContext, conflictHint].filter(Boolean).join('\n\n'),
+            codegraphContext,
             projectContext,
             ...(testRunner != null && { testRunner }),
             ...(sandboxContext != null && { sandbox: sandboxContext }),

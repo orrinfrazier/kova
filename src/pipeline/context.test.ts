@@ -341,6 +341,78 @@ describe('buildWaveContext', () => {
     });
   });
 
+  // ---- Issue #273 — codegraphContext injection -----------------------------
+
+  describe('codegraph context (issue #273)', () => {
+    const codegraphContext =
+      '## Code graph context\n\n### formatCodeChunks (function)\n`src/services/vectordb.ts:L76-L89` — function formatCodeChunks(chunks)\n\n**Callers:** queryCodeContext (src/services/vectordb.ts:L34)\n**Callees:** none\n';
+    const codebaseContext = '## Relevant code from the codebase\n\n### src/services/vectordb.ts\n```\n// chunk\n```';
+
+    it('injects codegraph context into spec wave', () => {
+      const handoffs: Partial<Record<string, WaveResult>> = {
+        assess: makeWaveResult('assess', assessArtifact),
+      };
+      const ctx = buildWaveContext('spec', makeIssue(), handoffs, { codegraphContext });
+      expect(ctx).toContain('## Code graph context');
+      expect(ctx).toContain('formatCodeChunks');
+    });
+
+    it('injects codegraph context into impl wave', () => {
+      const handoffs: Partial<Record<string, WaveResult>> = {
+        spec: makeWaveResult('spec', specArtifact),
+      };
+      const ctx = buildWaveContext('impl', makeIssue(), handoffs, { codegraphContext });
+      expect(ctx).toContain('## Code graph context');
+    });
+
+    it('places codegraph context ABOVE the fuzzy codebase context in spec wave', () => {
+      const handoffs: Partial<Record<string, WaveResult>> = {
+        assess: makeWaveResult('assess', assessArtifact),
+      };
+      const ctx = buildWaveContext('spec', makeIssue(), handoffs, { codegraphContext, codebaseContext });
+      const codegraphIdx = ctx.indexOf('## Code graph context');
+      const codebaseIdx = ctx.indexOf('## Relevant code from the codebase');
+      expect(codegraphIdx).toBeGreaterThanOrEqual(0);
+      expect(codebaseIdx).toBeGreaterThanOrEqual(0);
+      expect(codegraphIdx).toBeLessThan(codebaseIdx);
+    });
+
+    it('places codegraph context ABOVE the fuzzy codebase context in impl wave', () => {
+      const handoffs: Partial<Record<string, WaveResult>> = {
+        spec: makeWaveResult('spec', specArtifact),
+      };
+      const ctx = buildWaveContext('impl', makeIssue(), handoffs, { codegraphContext, codebaseContext });
+      const codegraphIdx = ctx.indexOf('## Code graph context');
+      const codebaseIdx = ctx.indexOf('## Relevant code from the codebase');
+      expect(codegraphIdx).toBeGreaterThanOrEqual(0);
+      expect(codebaseIdx).toBeGreaterThanOrEqual(0);
+      expect(codegraphIdx).toBeLessThan(codebaseIdx);
+    });
+
+    it('omits codegraph section when not provided', () => {
+      const handoffs: Partial<Record<string, WaveResult>> = {
+        assess: makeWaveResult('assess', assessArtifact),
+      };
+      const ctx = buildWaveContext('spec', makeIssue(), handoffs);
+      expect(ctx).not.toContain('## Code graph context');
+    });
+
+    it('does NOT inject codegraph context into quality wave', () => {
+      const handoffs: Partial<Record<string, WaveResult>> = {};
+      const ctx = buildWaveContext('quality', makeIssue(), handoffs, { codegraphContext });
+      expect(ctx).not.toContain('## Code graph context');
+    });
+
+    it('does NOT inject codegraph context into review wave', () => {
+      const handoffs: Partial<Record<string, WaveResult>> = {
+        spec: makeWaveResult('spec', specArtifact),
+        quality: makeWaveResult('quality', qualityArtifact),
+      };
+      const ctx = buildWaveContext('review', makeIssue(), handoffs, { codegraphContext });
+      expect(ctx).not.toContain('## Code graph context');
+    });
+  });
+
   describe('episodic context (past learnings)', () => {
     const episodicContext =
       '## Learnings from similar past issues\n\n### #10: Fix token expiry handling\n- **Approach:** Added TTL check\n- **Outcome:** success\n- **Learning:** Token refresh must happen before the API call';

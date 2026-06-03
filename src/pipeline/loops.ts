@@ -70,6 +70,8 @@ export interface TILoopConfig {
   testCommand?: string;
   prContext?: string;
   codebaseContext?: string;
+  /** Issue #273 — exact graph spans + callers/callees for issue-named symbols. */
+  codegraphContext?: string;
   projectContext?: ProjectContext | undefined;
   testRunner?: TestRunner;
   diffRunner?: DiffRunner;
@@ -248,6 +250,8 @@ export interface ParallelPieceTILoopConfig {
   diffRunner?: DiffRunner | undefined;
   prContext?: string | undefined;
   codebaseContext?: string | undefined;
+  /** Issue #273 — exact graph spans + callers/callees for issue-named symbols. */
+  codegraphContext?: string | undefined;
   projectContext?: ProjectContext | undefined;
   /** Route every wave through the docker sandbox container when set. */
   sandbox?: SandboxContext | undefined;
@@ -714,6 +718,7 @@ export async function runTILoop(config: TILoopConfig): Promise<TILoopResult> {
     waveResults,
     prContext,
     codebaseContext,
+    codegraphContext,
     projectContext,
     testRunner = defaultTestRunner,
     diffRunner = defaultDiffRunner,
@@ -854,6 +859,7 @@ export async function runTILoop(config: TILoopConfig): Promise<TILoopResult> {
     // Build impl context — fresh each time with spec + test failures only
     let implContext = buildWaveContext('impl', issue, updatedWaveResults, {
       ...(prContext != null && { prContext }),
+      ...(codegraphContext != null && { codegraphContext }),
       ...(codebaseContext != null && { codebaseContext }),
       ...(escalationHint != null && { escalationHint }),
     });
@@ -1173,6 +1179,7 @@ export async function runParallelPieceTILoop(config: ParallelPieceTILoopConfig):
     testRunner = defaultTestRunner,
     prContext,
     codebaseContext,
+    codegraphContext,
     projectContext,
     sandbox,
     cacheContext,
@@ -1201,6 +1208,7 @@ export async function runParallelPieceTILoop(config: ParallelPieceTILoopConfig):
       projectContext,
       ...(prContext != null && { prContext }),
       ...(codebaseContext != null && { codebaseContext }),
+      ...(codegraphContext != null && { codegraphContext }),
       ...(config.diffRunner != null && { diffRunner: config.diffRunner }),
       ...(config.testCommand != null && { testCommand: config.testCommand }),
       ...(sandbox != null && { sandbox }),
