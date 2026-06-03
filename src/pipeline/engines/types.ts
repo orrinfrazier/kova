@@ -16,7 +16,6 @@ import type { FixAIWaveName } from '../../ai/wave-tools.js';
 import type { SandboxContext } from '../../sandbox/dispatch.js';
 import type { EventBus } from '../../services/event-bus/index.js';
 import type { LiveFixRegistry } from '../../services/live-fix-registry.js';
-import type { ProjectContext } from '../../services/project-context.js';
 import type { WaveHandoff } from '../../types/handoffs.js';
 import type {
   Issue,
@@ -28,6 +27,7 @@ import type {
   WaveResult,
 } from '../../types/index.js';
 import type { DiffRunner, FileWriter, PrescanRunner, TestRunner } from '../loops.js';
+import type { ProjectContext } from '../project-context.js';
 
 /**
  * Cached per-run skills + enabled-wave list — mirrors `FixRunSkills` from `fix.ts`.

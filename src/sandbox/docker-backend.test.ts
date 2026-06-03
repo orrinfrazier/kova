@@ -4,8 +4,8 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('../services/sandbox.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../services/sandbox.js')>();
+vi.mock('./sandbox.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./sandbox.js')>();
   return {
     ...actual,
     startSandboxContainer: vi.fn(),
@@ -15,8 +15,8 @@ vi.mock('../services/sandbox.js', async (importOriginal) => {
   };
 });
 
-import { execWaveInContainer, getContainerStats, killContainer, startSandboxContainer } from '../services/sandbox.js';
 import { DockerBackend } from './docker-backend.js';
+import { execWaveInContainer, getContainerStats, killContainer, startSandboxContainer } from './sandbox.js';
 
 const mockStart = vi.mocked(startSandboxContainer);
 const mockExec = vi.mocked(execWaveInContainer);

@@ -2,18 +2,11 @@
 // SandboxBackend so the pipeline can switch to other backends (Daytona, Modal,
 // Fly.io, e2b) via `repos.yaml`'s `sandbox.backend` field.
 //
-// This is a thin facade over the existing helpers in `src/services/sandbox.ts`
+// This is a thin facade over the existing helpers in `src/sandbox/sandbox.ts`
 // — no behavior changes vs the pre-extraction direct calls. The pre-existing
 // `startSandboxContainer` / `execWaveInContainer` / `killContainer` /
 // `getContainerStats` helpers stay exported for legacy callers and tests.
 
-import {
-  execWaveInContainer,
-  getContainerStats,
-  killContainer,
-  type SandboxWaveInput,
-  startSandboxContainer,
-} from '../services/sandbox.js';
 import type {
   SandboxBackend,
   SandboxBackendWaveInput,
@@ -21,6 +14,13 @@ import type {
   SandboxStartOpts,
   SandboxStats,
 } from './backend.js';
+import {
+  execWaveInContainer,
+  getContainerStats,
+  killContainer,
+  type SandboxWaveInput,
+  startSandboxContainer,
+} from './sandbox.js';
 
 /**
  * Docker-backed sandbox. Mirrors the in-tree behavior from before issue #301:

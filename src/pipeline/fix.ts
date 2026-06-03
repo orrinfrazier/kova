@@ -43,6 +43,14 @@ import {
 } from '../ai/index.js';
 import { getSandboxBackend, type SandboxBackend } from '../sandbox/backend.js';
 import { dispatchSpawnWave, type SandboxContext } from '../sandbox/dispatch.js';
+import {
+  buildSandboxImage,
+  DEFAULT_SANDBOX_LIMITS,
+  getContainerStats,
+  killContainer,
+  parseTimeout,
+  startSandboxContainer,
+} from '../sandbox/sandbox.js';
 import { selectVariants, type VariantSelection } from '../services/ab-test.js';
 import { clearCheckpoint, loadCheckpoint, saveCheckpoint } from '../services/checkpoint.js';
 import { openCodegraph } from '../services/codegraph/index.js';
@@ -62,7 +70,6 @@ import { applyScopeToState, detectScope, formatScopeLogLine } from '../services/
 import { ensureScreenshotsDir, isPlaywrightEnabled, resolvePlaywrightEnv } from '../services/playwright.js';
 import { formatPRContext, type OpenPR } from '../services/pr-context.js';
 import { ProgressTracker } from '../services/progress.js';
-import { loadProjectContext, type ProjectContext } from '../services/project-context.js';
 import { type ABTestVariantStats, correlateByABTestVariant } from '../services/prompt-correlation.js';
 import { detectPromptChange, hashPrompt, recordPromptVersion } from '../services/prompt-versions.js';
 import {
@@ -74,14 +81,6 @@ import {
   queryRepoStandards,
 } from '../services/repo-intel.js';
 import { registerRun, updateRun } from '../services/run-registry.js';
-import {
-  buildSandboxImage,
-  DEFAULT_SANDBOX_LIMITS,
-  getContainerStats,
-  killContainer,
-  parseTimeout,
-  startSandboxContainer,
-} from '../services/sandbox.js';
 import { shutdownRequested } from '../services/shutdown.js';
 import type { EpisodeContext, EpisodeRecord } from '../services/vectordb.js';
 import {
@@ -148,6 +147,7 @@ import {
 } from './engines/index.js';
 import { detectThrashing, type TestRunner } from './loops.js';
 import { applyPipelineMode, autoSelectMode, describeAutoSelection, MODE_EXTRA_IMPL_ATTEMPTS } from './mode.js';
+import { loadProjectContext, type ProjectContext } from './project-context.js';
 import { loadPrompt, resolvePromptsDir } from './prompts.js';
 import { formatRegressionSurface } from './regression-surface.js';
 import { buildRuntimeFactory, resolveRuntimeKind } from './runtime-select.js';

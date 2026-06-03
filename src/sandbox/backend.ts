@@ -33,7 +33,7 @@ export interface SandboxHandle {
   containerName: string;
 }
 
-/** Wave input passed through to the backend's exec channel. Mirrors `SandboxWaveInput` in `services/sandbox.ts`. */
+/** Wave input passed through to the backend's exec channel. Mirrors `SandboxWaveInput` in `sandbox/sandbox.ts`. */
 export interface SandboxBackendWaveInput {
   wave: string;
   model: string;
