@@ -2926,3 +2926,173 @@ describe('tool-call telemetry (issue #278)', () => {
     expect(handoff.toolCallCounts?.byTool).toEqual({});
   });
 });
+
+// Issue #390: the wave's resolved `cacheRetention` must flow from the executor
+// into `priceUsage` via `toTokenUsage` so cache-write tokens are billed at the
+// correct rate. Without this, long-retention waves (impl/test) under-count
+// cache-write cost by ~60% because pricing defaults to the 5m rate.
+//
+// Sonnet 4-x cacheWrite rates: 5m=$3.75/Mtok, 1h=$6.00/Mtok (ratio 1.6×).
+// For 1M cacheWrite tokens:
+//   short/none → 1.0 * 3.75 = $3.75
+//   long       → 1.0 * 6.00 = $6.00
+// The test asserts the wave's reported cost reflects the 'long' rate when the
+// impl-wave default kicks in, and the 'short' rate when explicitly overridden.
+describe('spawnWaveAgent cacheRetention → priceUsage (issue #390)', () => {
+  let subscribeCb: ((event: unknown) => void) | undefined;
+  let cacheState = { messages: [] as unknown[], errorMessage: undefined as string | undefined };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env.ANTHROPIC_API_KEY = 'test-key';
+    subscribeCb = undefined;
+    cacheState = { messages: [], errorMessage: undefined };
+    mockSubscribe.mockImplementation((cb: (event: unknown) => void) => {
+      subscribeCb = cb;
+      return vi.fn();
+    });
+    mockAgentState = cacheState as typeof mockAgentState;
+  });
+
+  afterEach(() => {
+    delete process.env.ANTHROPIC_API_KEY;
+  });
+
+  function simulateCacheWriteTurn(cacheWriteTokens: number): void {
+    mockPrompt.mockImplementation(async () => {
+      const msg = {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'done' }],
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: cacheWriteTokens,
+        },
+      };
+      cacheState.messages.push(msg);
+      subscribeCb?.({ type: 'turn_end', message: msg });
+    });
+  }
+
+  // 1M cacheWrite tokens → easy-to-reason-about cost figures.
+  const ONE_M = 1_000_000;
+  const SONNET_CW_5M = 3.75;
+  const SONNET_CW_1H = 6.0;
+
+  it('prices cacheWrite at the 1h rate when impl wave runs at default (cacheRetention="long")', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+    simulateCacheWriteTurn(ONE_M);
+
+    const result = await spawnWaveAgent({
+      wave: 'impl',
+      model: 'claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Message.',
+      cwd: '/tmp/test',
+    });
+
+    // Per-turn priced cost AND final tally are both routed through priceUsage,
+    // so collectState re-prices the same turn. handoff.cost reflects the
+    // re-priced total. Expect 1.0 * 6.00 = $6.00, NOT 1.0 * 3.75.
+    expect(result.cost).toBeCloseTo(SONNET_CW_1H, 5);
+  });
+
+  it('prices cacheWrite at the 5m rate when assess wave runs at default (no retention)', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+    simulateCacheWriteTurn(ONE_M);
+
+    const result = await spawnWaveAgent({
+      wave: 'assess',
+      model: 'claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Message.',
+      cwd: '/tmp/test',
+    });
+
+    expect(result.cost).toBeCloseTo(SONNET_CW_5M, 5);
+  });
+
+  it('prices cacheWrite at the 5m rate when impl is overridden to cacheRetention="short"', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+    simulateCacheWriteTurn(ONE_M);
+
+    const result = await spawnWaveAgent({
+      wave: 'impl',
+      model: 'claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Message.',
+      cwd: '/tmp/test',
+      cacheRetention: 'short',
+    });
+
+    expect(result.cost).toBeCloseTo(SONNET_CW_5M, 5);
+  });
+
+  it('prices cacheWrite at the 5m rate when cacheRetention="none" (cache disabled, pricing default doesn\'t matter)', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+    simulateCacheWriteTurn(ONE_M);
+
+    const result = await spawnWaveAgent({
+      wave: 'impl',
+      model: 'claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Message.',
+      cwd: '/tmp/test',
+      cacheRetention: 'none',
+    });
+
+    // 'none' maps to '5m' per issue body — when cache is disabled this is
+    // moot because cacheWrite=0 in practice, but we honor the documented
+    // mapping for cost predictability.
+    expect(result.cost).toBeCloseTo(SONNET_CW_5M, 5);
+  });
+
+  it('long-retention cost is exactly 1.6× short-retention cost on sonnet 4.x', async () => {
+    const { spawnWaveAgent } = await import('./wave-executor.js');
+
+    // First call: 'long' (impl default).
+    simulateCacheWriteTurn(ONE_M);
+    const longResult = await spawnWaveAgent({
+      wave: 'impl',
+      model: 'claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Message.',
+      cwd: '/tmp/test',
+    });
+
+    // Reset and call again: 'short' override.
+    vi.clearAllMocks();
+    subscribeCb = undefined;
+    cacheState = { messages: [], errorMessage: undefined };
+    mockSubscribe.mockImplementation((cb: (event: unknown) => void) => {
+      subscribeCb = cb;
+      return vi.fn();
+    });
+    mockAgentState = cacheState as typeof mockAgentState;
+    simulateCacheWriteTurn(ONE_M);
+    const shortResult = await spawnWaveAgent({
+      wave: 'impl',
+      model: 'claude-sonnet-4-6',
+      tools: [],
+      systemPrompt: 'Prompt.',
+      handoffContext: '',
+      userMessage: 'Message.',
+      cwd: '/tmp/test',
+      cacheRetention: 'short',
+    });
+
+    // 6.00 / 3.75 = 1.6
+    expect(longResult.cost / shortResult.cost).toBeCloseTo(1.6, 5);
+  });
+});
