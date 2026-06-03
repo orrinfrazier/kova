@@ -5,12 +5,40 @@
 // runtime dependency. The CLI lazy-imports this so a `--dry-run` or a
 // future stub-fixApply mode never pulls in the agent stack.
 
+import { type RepoConfig, RepoConfigSchema } from '../src/types/index.js';
 import type { FixApply, FixApplyResult, WaveRecord } from './types.js';
+
+/**
+ * Build a defaulted in-memory `RepoConfig` for bench fixtures.
+ *
+ * Bench fixture seed repos under `bench/fixtures/<id>/repo/` are
+ * intentionally minimal and do NOT ship a `repos.yaml` — see issue
+ * #373. This builder produces a fully-defaulted `RepoConfig` (Zod
+ * fills in `rules`, `model`, `isolation`) without touching the
+ * filesystem, so `npm run bench` works against bare fixture repos.
+ *
+ * Pass a `configOverride` to override any field. The `path` argument
+ * is used unless overridden explicitly.
+ *
+ * Note: the default config implies that any provider not configured
+ * (no `providers.ollama` in the override) will fall back to the
+ * Anthropic API. `ANTHROPIC_API_KEY` must be set for `npm run bench`
+ * unless you pass an override that pins models to a local provider.
+ */
+export function buildDefaultBenchConfig(workdir: string, configOverride?: Partial<RepoConfig>): RepoConfig {
+  const base = { path: workdir, ...(configOverride ?? {}) };
+  return RepoConfigSchema.parse(base);
+}
 
 /**
  * Build a `FixApply` that drives kova's real `fix()` end-to-end inside
  * the bench workdir. Each call mints an in-memory `Issue` (number 0,
  * url '', labels []) from the fixture's title+body.
+ *
+ * The optional `configOverride` is merged on top of
+ * `buildDefaultBenchConfig` — useful for pinning the bench to a local
+ * model provider or tweaking rules (coverage, concurrency) per run.
+ * When omitted, the fully-defaulted bench config is used.
  *
  * The returned FixApply ALWAYS resolves — even on `fix()` failure — so
  * the harness scores the run as failed via the acceptance command,
@@ -18,15 +46,14 @@ import type { FixApply, FixApplyResult, WaveRecord } from './types.js';
  * try/catch, but emitting a structured result here makes the per-wave
  * cost/timing breakdown available even on failure.)
  */
-export function createRealFixApply(repoName: string): FixApply {
+export function createRealFixApply(repoName: string, configOverride?: Partial<RepoConfig>): FixApply {
   return async ({ workdir, issue, fixtureId }): Promise<FixApplyResult> => {
     // Lazy import keeps `import('./fixApply.js')` from pulling in the
     // entire kova runtime when the harness is only running self-tests.
     const { fix } = await import('../src/pipeline/fix.js');
-    const { resolveRepoConfig } = await import('../src/services/config.js');
 
     const startedAt = Date.now();
-    const config = resolveRepoConfig(workdir);
+    const config = buildDefaultBenchConfig(workdir, configOverride);
     const issuePayload = {
       number: 0,
       title: issue.title,
