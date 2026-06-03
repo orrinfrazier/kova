@@ -35,6 +35,13 @@ const SECRET_PATTERNS: SecretPattern[] = [
   // Catches inline hardcoded credentials in committed code. Mirrors
   // prompts/quality.md Gate 6.
   { type: 'Password literal', regex: /password\s*[:=]\s*["'][^"']{8,}["']/i },
+  // Slack tokens: bot (xoxb), user (xoxp), app (xoxa), refresh (xoxr),
+  // workspace (xoxs). Source: Slack auth docs. Issue #368.
+  { type: 'Slack token', regex: /xox[abprs]-[A-Za-z0-9-]{10,}/ },
+  // Stripe secret (sk_live_) and restricted (rk_live_) live keys. Test
+  // keys (sk_test_) are intentionally excluded — non-secret per Stripe.
+  // Issue #368.
+  { type: 'Stripe live key', regex: /(?:sk|rk)_live_[A-Za-z0-9]{24,}/ },
 ];
 
 function isPatternReference(line: string, match: string): boolean {
