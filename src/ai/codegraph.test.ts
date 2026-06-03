@@ -8,6 +8,8 @@ import type { SymbolNode } from '../types/codegraph.js';
 import {
   type CodegraphLookup,
   extractSymbolCandidates,
+  findSymbolDefinitions,
+  findSymbolReferences,
   formatCodegraphContext,
   initCodegraph,
   isCodegraphOnPath,
@@ -165,6 +167,120 @@ describe('syncCodegraph', () => {
     const r = await syncCodegraph('/work', exec);
     expect(r.ok).toBe(false);
     expect(r.reason).toContain('exec-failed');
+  });
+});
+
+describe('findSymbolDefinitions', () => {
+  it('parses JSON array of symbol hits on success', async () => {
+    const exec = makeExec({
+      'codegraph find-symbol queryCodeContext --json --cwd /work': {
+        stdout: JSON.stringify([
+          {
+            symbol: 'queryCodeContext',
+            file: 'src/services/vectordb.ts',
+            startLine: 34,
+            endLine: 70,
+            kind: 'function',
+          },
+        ]),
+        stderr: '',
+        code: 0,
+      },
+    });
+    const hits = await findSymbolDefinitions('/work', 'queryCodeContext', exec);
+    expect(hits).toHaveLength(1);
+    expect(hits[0]).toMatchObject({
+      symbol: 'queryCodeContext',
+      file: 'src/services/vectordb.ts',
+      startLine: 34,
+      endLine: 70,
+      kind: 'function',
+    });
+  });
+
+  it('returns empty array when codegraph not on path', async () => {
+    const exec = makeExec({});
+    const hits = await findSymbolDefinitions('/work', 'AnySymbol', exec);
+    expect(hits).toEqual([]);
+  });
+
+  it('returns empty array on exec failure (graceful degrade)', async () => {
+    const exec = makeExec({
+      'codegraph find-symbol Missing --json --cwd /work': { stdout: '', stderr: 'not found', code: 1 },
+    });
+    const hits = await findSymbolDefinitions('/work', 'Missing', exec);
+    expect(hits).toEqual([]);
+  });
+
+  it('returns empty array on malformed JSON', async () => {
+    const exec = makeExec({
+      'codegraph find-symbol Broken --json --cwd /work': { stdout: 'not-json', stderr: '', code: 0 },
+    });
+    const hits = await findSymbolDefinitions('/work', 'Broken', exec);
+    expect(hits).toEqual([]);
+  });
+
+  it('filters non-object entries from result array', async () => {
+    const exec = makeExec({
+      'codegraph find-symbol Mixed --json --cwd /work': {
+        stdout: JSON.stringify([
+          { symbol: 'Mixed', file: 'a.ts', startLine: 1, endLine: 2, kind: 'class' },
+          null,
+          'garbage',
+          { not_a_hit: true },
+        ]),
+        stderr: '',
+        code: 0,
+      },
+    });
+    const hits = await findSymbolDefinitions('/work', 'Mixed', exec);
+    expect(hits).toHaveLength(1);
+    expect(hits[0]?.file).toBe('a.ts');
+  });
+
+  it('NEVER throws on unexpected errors', async () => {
+    const exec: FakeExec = async () => {
+      throw new Error('unexpected');
+    };
+    const hits = await findSymbolDefinitions('/work', 'X', exec);
+    expect(hits).toEqual([]);
+  });
+});
+
+describe('findSymbolReferences', () => {
+  it('parses JSON array of reference hits (1-hop callers/callees)', async () => {
+    const exec = makeExec({
+      'codegraph callers queryCodeContext --json --cwd /work': {
+        stdout: JSON.stringify([
+          { symbol: 'fix', file: 'src/pipeline/fix.ts', startLine: 901, endLine: 901, kind: 'caller' },
+        ]),
+        stderr: '',
+        code: 0,
+      },
+    });
+    const refs = await findSymbolReferences('/work', 'queryCodeContext', exec);
+    expect(refs).toHaveLength(1);
+    expect(refs[0]?.file).toBe('src/pipeline/fix.ts');
+    expect(refs[0]?.kind).toBe('caller');
+  });
+
+  it('returns empty array when codegraph not on path', async () => {
+    const exec = makeExec({});
+    expect(await findSymbolReferences('/work', 'X', exec)).toEqual([]);
+  });
+
+  it('returns empty array on exec failure', async () => {
+    const exec = makeExec({
+      'codegraph callers Missing --json --cwd /work': { stdout: '', stderr: 'not found', code: 1 },
+    });
+    expect(await findSymbolReferences('/work', 'Missing', exec)).toEqual([]);
+  });
+
+  it('NEVER throws', async () => {
+    const exec: FakeExec = async () => {
+      throw new Error('weird');
+    };
+    expect(await findSymbolReferences('/work', 'X', exec)).toEqual([]);
   });
 });
 

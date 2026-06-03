@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import type { SymbolHit } from '../ai/codegraph.js';
+import type { CodeChunk } from '../services/vectordb.js';
 import type {
   AssessResult,
   Issue,
@@ -9,7 +11,16 @@ import type {
   SpecResult,
   WaveResult,
 } from '../types/index.js';
-import { buildPieceContext, buildWaveContext, estimateTokens, truncateToTokenBudget } from './context.js';
+import {
+  buildPieceContext,
+  buildWaveContext,
+  estimateTokens,
+  extractCandidateSymbols,
+  formatGraphContext,
+  mergeGraphAndVectorContext,
+  queryCodeGraphContext,
+  truncateToTokenBudget,
+} from './context.js';
 
 function makeIssue(overrides?: Partial<Issue>): Issue {
   return {
@@ -949,5 +960,262 @@ describe('review wave — QualityRemediation structured output', () => {
     expect(ctx).toContain('lint: pass');
     expect(ctx).toContain('coverage: 85%');
     expect(ctx).toContain('all passing: true');
+  });
+});
+
+// --- Hybrid graph+vector retrieval (Issue #274) ---
+
+describe('extractCandidateSymbols', () => {
+  it('extracts CamelCase identifiers', () => {
+    const symbols = extractCandidateSymbols('UserService and AuthMiddleware should be refactored');
+    expect(symbols).toContain('UserService');
+    expect(symbols).toContain('AuthMiddleware');
+  });
+
+  it('extracts camelCase function-style identifiers', () => {
+    const symbols = extractCandidateSymbols('Fix queryCodeContext and refactor formatCodeChunks');
+    expect(symbols).toContain('queryCodeContext');
+    expect(symbols).toContain('formatCodeChunks');
+  });
+
+  it('extracts identifiers from inline code snippets (backticks)', () => {
+    const symbols = extractCandidateSymbols('See `findRelevantContext` (context/index.ts:394)');
+    expect(symbols).toContain('findRelevantContext');
+  });
+
+  it('does NOT pick up plain English words (lowercase singletons)', () => {
+    const symbols = extractCandidateSymbols('the issue describes a bug in the login flow');
+    expect(symbols).not.toContain('the');
+    expect(symbols).not.toContain('issue');
+    expect(symbols).not.toContain('bug');
+  });
+
+  it('filters known common-word false-positives (Issue, Should, This, etc.)', () => {
+    const symbols = extractCandidateSymbols('Issue should not match. This either. Add new symbol.');
+    expect(symbols).not.toContain('Issue');
+    expect(symbols).not.toContain('Should');
+    expect(symbols).not.toContain('This');
+  });
+
+  it('deduplicates repeated identifiers', () => {
+    const symbols = extractCandidateSymbols('queryCodeContext queryCodeContext queryCodeContext');
+    const occurrences = symbols.filter((s) => s === 'queryCodeContext').length;
+    expect(occurrences).toBe(1);
+  });
+
+  it('returns an empty array for empty input', () => {
+    expect(extractCandidateSymbols('')).toEqual([]);
+    expect(extractCandidateSymbols('   ')).toEqual([]);
+  });
+
+  it('caps the number of returned symbols (avoids unbounded growth)', () => {
+    const longText = Array.from({ length: 200 }, (_, i) => `Symbol${i}Name`).join(' ');
+    const symbols = extractCandidateSymbols(longText);
+    expect(symbols.length).toBeLessThanOrEqual(50);
+  });
+});
+
+describe('queryCodeGraphContext', () => {
+  type ExecResult = { stdout: string; stderr: string; code: number };
+  const makeExec = (map: Record<string, ExecResult | Error>) => {
+    return async (cmd: string, args: string[]) => {
+      const key = `${cmd} ${args.join(' ')}`.trim();
+      const v = map[key];
+      if (v === undefined) {
+        throw Object.assign(new Error(`command not found: ${cmd}`), { code: 'ENOENT' });
+      }
+      if (v instanceof Error) throw v;
+      if (v.code !== 0) {
+        throw Object.assign(new Error(`exit ${v.code}: ${v.stderr || v.stdout}`), {
+          code: v.code,
+          stdout: v.stdout,
+          stderr: v.stderr,
+        });
+      }
+      return v;
+    };
+  };
+
+  it('returns empty result when no candidate symbols in issue text', async () => {
+    const exec = makeExec({});
+    const result = await queryCodeGraphContext('/work', 'fix the bug please', { exec });
+    expect(result.resolvedSymbols).toEqual([]);
+    expect(result.unresolvedQueries).toEqual([]);
+  });
+
+  it('resolves a single symbol via find-symbol + adds 1-hop callers', async () => {
+    const exec = makeExec({
+      'codegraph find-symbol queryCodeContext --json --cwd /work': {
+        stdout: JSON.stringify([
+          {
+            symbol: 'queryCodeContext',
+            file: 'src/services/vectordb.ts',
+            startLine: 34,
+            endLine: 70,
+            kind: 'function',
+          },
+        ]),
+        stderr: '',
+        code: 0,
+      },
+      'codegraph callers queryCodeContext --json --cwd /work': {
+        stdout: JSON.stringify([
+          { symbol: 'fix', file: 'src/pipeline/fix.ts', startLine: 901, endLine: 901, kind: 'caller' },
+        ]),
+        stderr: '',
+        code: 0,
+      },
+    });
+
+    const result = await queryCodeGraphContext('/work', 'Add queryCodeContext hybrid mode', { exec });
+    expect(result.resolvedSymbols).toHaveLength(2);
+    expect(result.resolvedSymbols.map((s) => s.symbol)).toContain('queryCodeContext');
+    expect(result.resolvedSymbols.map((s) => s.symbol)).toContain('fix');
+    expect(result.unresolvedQueries).toEqual([]);
+  });
+
+  it('tracks unresolved symbols (no definition AND no callers found)', async () => {
+    const exec = makeExec({
+      'codegraph find-symbol NeverDefined --json --cwd /work': {
+        stdout: JSON.stringify([]),
+        stderr: '',
+        code: 0,
+      },
+    });
+    const result = await queryCodeGraphContext('/work', 'investigate NeverDefined function', { exec });
+    expect(result.resolvedSymbols).toEqual([]);
+    expect(result.unresolvedQueries).toContain('NeverDefined');
+  });
+
+  it('degrades to empty result when codegraph is not on path (graceful)', async () => {
+    const exec = makeExec({});
+    const result = await queryCodeGraphContext('/work', 'lookup someFunc here', { exec });
+    expect(result.resolvedSymbols).toEqual([]);
+    // Symbols still extracted but all unresolved — caller (fix.ts) will fall back to pure-vector.
+    expect(result.unresolvedQueries).toContain('someFunc');
+  });
+
+  it('deduplicates hits across definitions and callers by file:startLine', async () => {
+    const exec = makeExec({
+      'codegraph find-symbol fooBar --json --cwd /work': {
+        stdout: JSON.stringify([{ symbol: 'fooBar', file: 'a.ts', startLine: 10, endLine: 20, kind: 'function' }]),
+        stderr: '',
+        code: 0,
+      },
+      'codegraph callers fooBar --json --cwd /work': {
+        stdout: JSON.stringify([
+          // Same file:startLine as above — should be deduped
+          { symbol: 'fooBar', file: 'a.ts', startLine: 10, endLine: 20, kind: 'caller' },
+          { symbol: 'fooBar', file: 'b.ts', startLine: 5, endLine: 8, kind: 'caller' },
+        ]),
+        stderr: '',
+        code: 0,
+      },
+    });
+    const result = await queryCodeGraphContext('/work', 'check fooBar behavior', { exec });
+    expect(result.resolvedSymbols).toHaveLength(2);
+    const keys = result.resolvedSymbols.map((s) => `${s.file}:${s.startLine}`);
+    expect(new Set(keys).size).toBe(2);
+  });
+});
+
+describe('formatGraphContext', () => {
+  it('renders a markdown section with file:line headers and kinds', () => {
+    const hits: SymbolHit[] = [
+      { symbol: 'queryCodeContext', file: 'src/services/vectordb.ts', startLine: 34, endLine: 70, kind: 'function' },
+      { symbol: 'fix', file: 'src/pipeline/fix.ts', startLine: 901, endLine: 901, kind: 'caller' },
+    ];
+    const out = formatGraphContext(hits);
+    expect(out).toContain('Graph');
+    expect(out).toContain('queryCodeContext');
+    expect(out).toContain('src/services/vectordb.ts');
+    expect(out).toContain('L34');
+    expect(out).toContain('function');
+    expect(out).toContain('caller');
+  });
+
+  it('returns empty string when no hits', () => {
+    expect(formatGraphContext([])).toBe('');
+  });
+});
+
+describe('mergeGraphAndVectorContext', () => {
+  it('returns graph context first, then vector context for unresolved-only symbols', () => {
+    const graphResult = {
+      resolvedSymbols: [
+        {
+          symbol: 'foo',
+          file: 'src/foo.ts',
+          startLine: 10,
+          endLine: 20,
+          kind: 'function' as const,
+        } satisfies SymbolHit,
+      ],
+      unresolvedQueries: ['BarMissing'],
+    };
+    const vectorChunks: CodeChunk[] = [
+      { file: 'src/bar.ts', content: 'BarMissing definition', score: 0.8, startLine: 1, endLine: 5 },
+    ];
+
+    const merged = mergeGraphAndVectorContext(graphResult, vectorChunks);
+    expect(merged).toContain('Graph');
+    expect(merged).toContain('foo');
+    expect(merged).toContain('BarMissing definition');
+    // Graph section must precede vector section
+    const graphIdx = merged.indexOf('Graph');
+    const vectorIdx = merged.indexOf('BarMissing definition');
+    expect(graphIdx).toBeGreaterThanOrEqual(0);
+    expect(vectorIdx).toBeGreaterThan(graphIdx);
+  });
+
+  it('dedupes vector chunks that overlap a resolved graph hit (file:startLine match)', () => {
+    const graphResult = {
+      resolvedSymbols: [
+        {
+          symbol: 'foo',
+          file: 'src/foo.ts',
+          startLine: 10,
+          endLine: 20,
+          kind: 'function' as const,
+        } satisfies SymbolHit,
+      ],
+      unresolvedQueries: [],
+    };
+    const vectorChunks: CodeChunk[] = [
+      // This chunk overlaps the graph hit (same file, startLine inside [10,20])
+      { file: 'src/foo.ts', content: 'redundant chunk text', score: 0.9, startLine: 12, endLine: 18 },
+      // This one is independent — should pass through
+      { file: 'src/baz.ts', content: 'unique chunk', score: 0.7, startLine: 1, endLine: 5 },
+    ];
+
+    const merged = mergeGraphAndVectorContext(graphResult, vectorChunks);
+    expect(merged).not.toContain('redundant chunk text');
+    expect(merged).toContain('unique chunk');
+  });
+
+  it('degrades to pure vector context when graph has no resolved symbols', () => {
+    const graphResult = { resolvedSymbols: [], unresolvedQueries: ['Missing'] };
+    const vectorChunks: CodeChunk[] = [
+      { file: 'src/a.ts', content: 'fallback chunk', score: 0.5, startLine: 1, endLine: 5 },
+    ];
+
+    const merged = mergeGraphAndVectorContext(graphResult, vectorChunks);
+    expect(merged).not.toContain('## Graph');
+    expect(merged).toContain('fallback chunk');
+  });
+
+  it('returns empty string when both graph and vector are empty', () => {
+    expect(mergeGraphAndVectorContext({ resolvedSymbols: [], unresolvedQueries: [] }, [])).toBe('');
+  });
+
+  it('dedupes vector chunks against themselves by file:startLine-endLine', () => {
+    const graphResult = { resolvedSymbols: [], unresolvedQueries: [] };
+    const vectorChunks: CodeChunk[] = [
+      { file: 'src/a.ts', content: 'first', score: 0.9, startLine: 1, endLine: 10 },
+      { file: 'src/a.ts', content: 'duplicate by key', score: 0.5, startLine: 1, endLine: 10 },
+    ];
+    const merged = mergeGraphAndVectorContext(graphResult, vectorChunks);
+    expect(merged).toContain('first');
+    expect(merged).not.toContain('duplicate by key');
   });
 });
