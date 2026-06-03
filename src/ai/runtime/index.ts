@@ -10,6 +10,8 @@
  * Successor: kova#310 (full PiAgentRuntime adapter)
  */
 
+export type { ClaudeCliRuntimeConfig } from './claude-cli-runtime.js';
+export { claudeCliRuntimeFactory } from './claude-cli-runtime.js';
 export { createPiAgentRuntime, defaultAgentRuntimeFactory } from './pi-agent-runtime.js';
 export type {
   AgentMessage,
