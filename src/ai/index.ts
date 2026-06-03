@@ -47,6 +47,15 @@ export {
   resolveOllamaApiKey,
 } from './ollama.js';
 export {
+  type ConsensusAgreement,
+  type ConsensusMetadata,
+  type ConsensusWaveHandoff,
+  type PoolMemberConfig,
+  type PoolMemberResult,
+  type SpawnConsensusWaveConfig,
+  spawnConsensusWave,
+} from './parallel-executor.js';
+export {
   getPricing,
   type ModelPricing,
   priceUsage,
