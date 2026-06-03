@@ -38,6 +38,25 @@ export interface CodegraphStatus {
   reason?: string;
 }
 
+/**
+ * One row returned by the codegraph symbol-lookup helpers
+ * (`findSymbolDefinitions` + `findSymbolReferences`). Mirrors the JSON shape
+ * emitted by `codegraph find-symbol --json` / `codegraph callers --json`.
+ *
+ * `kind` is left as a free-form string because the upstream codegraph CLI
+ * may emit `'function' | 'class' | 'method' | 'caller' | 'callee' | ...` and
+ * we don't want the typed surface to drift each time codegraph adds a new
+ * symbol kind. Callers that want a strict union should narrow at the
+ * consumption site.
+ */
+export interface SymbolHit {
+  symbol: string;
+  file: string;
+  startLine: number;
+  endLine: number;
+  kind: string;
+}
+
 /** Injection point for tests — runs a shell command and returns stdout/stderr/code.
  *  Real implementation is execFile from node:child_process. */
 export type ExecFn = (
@@ -111,6 +130,73 @@ export async function syncCodegraph(workDir: string, exec: ExecFn = defaultExec)
   } catch (err) {
     return { ok: false, reason: classifyExecError(err) };
   }
+}
+
+/**
+ * Run `codegraph find-symbol <name> --json --cwd <workDir>` and parse the
+ * resulting JSON array of hits. Best-effort: returns `[]` on any failure
+ * (not-on-path, non-zero exit, parse error). Never throws.
+ *
+ * Wraps the structural lookup half of the hybrid graph+vector retrieval
+ * (#274). The pipeline always treats an empty result as "graph could not
+ * resolve this symbol — fall back to vector neighbors".
+ */
+export async function findSymbolDefinitions(
+  workDir: string,
+  symbol: string,
+  exec: ExecFn = defaultExec,
+): Promise<SymbolHit[]> {
+  return runSymbolLookup(['find-symbol', symbol, '--json', '--cwd', workDir], exec);
+}
+
+/**
+ * Run `codegraph callers <name> --json --cwd <workDir>` to fetch 1-hop
+ * caller/callee references for an already-resolved symbol. Same best-effort
+ * contract as `findSymbolDefinitions` — empty array on any failure.
+ *
+ * Pairs with `findSymbolDefinitions` to provide the "callers + callees" hop
+ * that #274 references as the structural complement to vector retrieval.
+ */
+export async function findSymbolReferences(
+  workDir: string,
+  symbol: string,
+  exec: ExecFn = defaultExec,
+): Promise<SymbolHit[]> {
+  return runSymbolLookup(['callers', symbol, '--json', '--cwd', workDir], exec);
+}
+
+/** Shared executor for the two symbol-lookup helpers. */
+async function runSymbolLookup(args: string[], exec: ExecFn): Promise<SymbolHit[]> {
+  let stdout: string;
+  try {
+    const r = await exec('codegraph', args, { timeout: 30_000 });
+    if (r.code !== 0) return [];
+    stdout = r.stdout;
+  } catch {
+    // not-on-path, exec-failed, anything else — graceful degrade.
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(stdout) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(isSymbolHit);
+  } catch {
+    return [];
+  }
+}
+
+/** Runtime guard: the codegraph CLI returns loosely-typed JSON, so we
+ *  validate each row before accepting it into the typed pipeline. */
+function isSymbolHit(v: unknown): v is SymbolHit {
+  if (v == null || typeof v !== 'object') return false;
+  const o = v as Record<string, unknown>;
+  return (
+    typeof o.symbol === 'string' &&
+    typeof o.file === 'string' &&
+    typeof o.startLine === 'number' &&
+    typeof o.endLine === 'number' &&
+    typeof o.kind === 'string'
+  );
 }
 
 /** Decide whether to withhold codegraph MCP tools for the current run.
