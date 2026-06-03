@@ -41,6 +41,7 @@ import { resolveConflicts } from '../services/conflict-resolver.js';
 import { type EpisodeFTSRecord, EpisodeFTSStore } from '../services/episode-fts.js';
 import { type EventBus, getDefaultEventBus } from '../services/event-bus/index.js';
 import { collectPRFeedback } from '../services/feedback-collector.js';
+import { getCurrentHeadSha } from '../services/git-diff.js';
 import { commentOnIssue, createPR, listOpenPRs } from '../services/github.js';
 import { appendHistoryEntry, readHistory } from '../services/history.js';
 import { validateIsolation } from '../services/isolation.js';
@@ -120,6 +121,7 @@ import {
 } from '../types/index.js';
 import { closeFileLogger, initFileLogger, type Logger, log } from '../utils/logger.js';
 import { buildWaveContext } from './context.js';
+import { refreshCodebaseContext } from './context-refresh.js';
 import { buildCostReport, printRunSummary, writeCostReport } from './cost-report.js';
 import {
   detectThrashing,
@@ -1209,6 +1211,20 @@ export async function fix(options: FixOptions): Promise<FixResult> {
     // WAVE T + I: Parallel Piece TI Loop (fan-out per piece, backward compat for 1 piece)
     if (!(shouldSkip('test') && shouldSkip('impl'))) {
       const tiWaveStart = Date.now();
+
+      // Issue #277: capture the pre-impl HEAD SHA so `refreshCodebaseContext`
+      // can later list the affected-set via `git diff <sha> HEAD` and
+      // incrementally re-embed only those files. Failure to capture (e.g. a
+      // shallow worktree mid-rebase) degrades to `null` → refresh becomes a
+      // no-op rather than a full-repo reindex.
+      let preImplSha: string | null = null;
+      try {
+        preImplSha = await getCurrentHeadSha(workDir);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        flog.warn(`[context-refresh] Could not capture pre-impl SHA (${msg}) — context refresh will be a no-op`);
+      }
+
       const tiResult = await runParallelPieceTILoop({
         issue,
         workDir,
@@ -1252,6 +1268,20 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       metrics.recordWaveDuration('test', tiDuration);
       metrics.recordWaveCompleted('impl');
       metrics.recordWaveDuration('impl', tiDuration);
+
+      // Issue #277: refresh codebaseContext to reflect post-impl edits BEFORE
+      // any subsequent wave (re-spec / re-impl on shouldRespec, conflict
+      // resolution retry, etc) consumes it. No-op when vectordb is disabled,
+      // when no source files changed, or when the pre-impl SHA was not
+      // captured. Failures degrade to the stale (pre-impl) context — never
+      // crash the pipeline.
+      codebaseContext = await refreshCodebaseContext({
+        config,
+        workDir,
+        sinceSha: preImplSha,
+        issueQuery: `${issue.title}\n\n${issue.body}`,
+        currentContext: codebaseContext,
+      });
 
       // Escalation: shouldRespec → re-run spec + TI loop (max 1 re-spec)
       if (!tiResult.testsPassing && tiResult.shouldRespec) {
