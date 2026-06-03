@@ -16,10 +16,12 @@ import type { FixAIWaveName } from '../../ai/wave-tools.js';
 import type { SandboxContext } from '../../sandbox/dispatch.js';
 import type { EventBus } from '../../services/event-bus/index.js';
 import type { LiveFixRegistry } from '../../services/live-fix-registry.js';
+import type { FixState } from '../../types/config.js';
 import type { WaveHandoff } from '../../types/handoffs.js';
 import type {
   Issue,
   MCPServerConfig,
+  PipelineMode,
   RepoConfig,
   ReviewFinding,
   SkillWaveName,
@@ -133,12 +135,67 @@ export interface EngineContext {
 }
 
 /**
+ * Per-run state changes an engine may surface alongside its handoff (issue #432).
+ *
+ * The orchestrator merges these into `FixState` in one place after each engine
+ * call, so engines never reach into `FixState` directly. Every field is
+ * optional — omit a field to signal "no change to this slot".
+ *
+ * Convention:
+ *   - Set scalar fields (`diagnosis`, `thrashingSignal`, `retryAttempts`) to a
+ *     value to write it, or omit to leave the prior state untouched. Passing
+ *     `undefined` explicitly is treated as "no change" (use omission instead).
+ *   - `failedPieces` and `reviewKnownIssues` use REPLACE semantics — the loop
+ *     overwrites the FixState slot with whatever the engine returns. Engines
+ *     that want to append should include the prior values in the delta.
+ *   - `completedWaves` is owned by the orchestrator (it tracks which engine
+ *     just ran); engines do NOT surface it.
+ */
+export interface EngineStateDelta {
+  diagnosis?: FixState['diagnosis'];
+  thrashingSignal?: FixState['thrashingSignal'];
+  retryAttempts?: FixState['retryAttempts'];
+  failedPieces?: FixState['failedPieces'];
+  reviewKnownIssues?: FixState['reviewKnownIssues'];
+  mergeDependencies?: FixState['mergeDependencies'];
+}
+
+/**
+ * Per-run config changes an engine may surface (issue #432). Today only the
+ * AssessEngine uses this — it pre-resolves the pipeline mode and returns the
+ * tier-adjusted `config` so the orchestrator does not have to rebind `config`
+ * mid-pipeline. The orchestrator applies `config = configDelta.config ?? config`
+ * exactly once, in a single deterministic place, after Assess.
+ *
+ * `resolvedMode` is forwarded so callers can log which mode the engine picked
+ * without re-running the auto-selection branch. `extraImplAttempts` is the
+ * `MODE_EXTRA_IMPL_ATTEMPTS` lookup result for the resolved mode — surfaced
+ * here so the orchestrator does not have to re-derive it.
+ */
+export interface EngineConfigDelta {
+  /** Replacement RepoConfig — the orchestrator rebinds `config` to this. */
+  config?: RepoConfig;
+  /** Pre-resolved pipeline mode (for logging + downstream behavior). */
+  resolvedMode?: PipelineMode;
+  /** Extra impl attempts per piece for the resolved mode. */
+  extraImplAttempts?: number;
+}
+
+/**
  * What every engine returns. Mirrors the shape `spawnWave` returns today so
  * engines drop into the existing orchestrator call sites with no shape change.
+ *
+ * `stateDelta` (issue #432) lets engines surface FixState changes the loop
+ * applies after the call — no engine writes through shared mutable state.
+ * `configDelta` (issue #432) is reserved for AssessEngine's pipeline-mode
+ * pre-resolution. Both are optional; existing engines continue to compile
+ * without setting them.
  */
 export interface EngineResult<T> {
   handoff: WaveHandoff<T>;
   promptHash: string;
+  stateDelta?: EngineStateDelta;
+  configDelta?: EngineConfigDelta;
 }
 
 /**
@@ -326,4 +383,32 @@ export type ShipEngineResult =
 export interface ShipEngine {
   readonly name: 'ship';
   run(ctx: ShipEngineContext, input: ShipEngineInput): Promise<ShipEngineResult>;
+}
+
+/**
+ * Pure helper that applies an `EngineStateDelta` onto a `FixState`, returning
+ * a NEW state object (issue #432). The orchestrator calls this after every
+ * engine run so the per-wave assignments scattered across `fix.ts` collapse
+ * into a single application point.
+ *
+ * Semantics (mirrors the doc on `EngineStateDelta`):
+ *   - Omitted fields → state slot unchanged.
+ *   - `failedPieces` / `reviewKnownIssues` → REPLACE the slot. Engines that
+ *     want to append must include the prior values themselves.
+ *   - `completedWaves` is NOT in the delta — the orchestrator owns that field.
+ *
+ * Returning a new object (rather than mutating) keeps engines from holding
+ * stale references and matches the "config bound exactly once" guarantee on
+ * `RepoConfig` (issue #432 AC).
+ */
+export function applyEngineStateDelta(state: FixState, delta: EngineStateDelta | undefined): FixState {
+  if (delta == null) return state;
+  const next: FixState = { ...state };
+  if ('diagnosis' in delta) next.diagnosis = delta.diagnosis;
+  if ('thrashingSignal' in delta) next.thrashingSignal = delta.thrashingSignal;
+  if ('retryAttempts' in delta) next.retryAttempts = delta.retryAttempts;
+  if ('failedPieces' in delta) next.failedPieces = delta.failedPieces;
+  if ('reviewKnownIssues' in delta) next.reviewKnownIssues = delta.reviewKnownIssues;
+  if ('mergeDependencies' in delta) next.mergeDependencies = delta.mergeDependencies;
+  return next;
 }

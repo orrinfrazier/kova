@@ -222,6 +222,11 @@ export const SpecEngine: SpecEngineType = {
       serialFallback,
       ...(mergeDependencies != null && { mergeDependencies }),
       retried,
+      // Issue #432 — also surface mergeDependencies via stateDelta so the
+      // orchestrator's loop can apply it through the unified application point
+      // alongside other FixState changes. The top-level `mergeDependencies`
+      // field is preserved for back-compat with existing callers/tests.
+      ...(mergeDependencies != null && mergeDependencies.length > 0 && { stateDelta: { mergeDependencies } }),
     };
   },
 };

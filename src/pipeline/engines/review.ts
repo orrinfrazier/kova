@@ -16,7 +16,7 @@
 
 import type { ReviewLoopConfig, ReviewLoopResult } from '../loops.js';
 import { runReviewLoop } from '../loops.js';
-import type { EngineContext, EngineResult, ReviewEngineInput, WaveEngine } from './types.js';
+import type { EngineContext, EngineResult, EngineStateDelta, ReviewEngineInput, WaveEngine } from './types.js';
 
 /**
  * Build the `runReviewLoop` config from the engine ctx + input.
@@ -59,12 +59,33 @@ export function buildReviewLoopConfig(ctx: EngineContext, input: ReviewEngineInp
 }
 
 /**
+ * Build the `EngineStateDelta` for review-wave findings (issue #432). When the
+ * loop leaves `knownIssues` unresolved, surface them as `reviewKnownIssues` so
+ * the orchestrator's loop applies them through the unified application point
+ * (no inline `state.reviewKnownIssues = ...` at fix.ts:1700-1707). Empty
+ * `knownIssues` → no delta (leave the slot untouched, matching prior behavior
+ * where the assignment was guarded by `length > 0`). Exported for testing.
+ */
+export function buildReviewStateDelta(result: ReviewLoopResult): EngineStateDelta | undefined {
+  if (result.knownIssues.length === 0) return undefined;
+  return {
+    reviewKnownIssues: result.knownIssues.map((f) => ({
+      category: f.category,
+      file: f.file,
+      description: f.description,
+      severity: f.severity,
+    })),
+  };
+}
+
+/**
  * Map a `ReviewLoopResult` to an `EngineResult` carrying a typed `WaveHandoff`.
  * Confidence reflects whether known issues remain after the loop's max
  * iterations — high when clean, medium when leftovers survive into the PR body.
  */
 function toEngineResult(result: ReviewLoopResult): EngineResult<ReviewLoopResult> {
   const model = result.reviewWaveResult.model ?? 'unknown';
+  const stateDelta = buildReviewStateDelta(result);
   return {
     handoff: {
       wave: 'review',
@@ -80,6 +101,7 @@ function toEngineResult(result: ReviewLoopResult): EngineResult<ReviewLoopResult
     // dispatches across iterations, each with its own prompt hash. The
     // aggregate handoff intentionally elides it.
     promptHash: '',
+    ...(stateDelta != null && { stateDelta }),
   };
 }
 
