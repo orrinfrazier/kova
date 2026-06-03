@@ -6,6 +6,13 @@ import { join as joinPath } from 'node:path';
 import { z } from 'zod';
 import { $ } from 'zx';
 import {
+  initCodegraph,
+  isCodegraphOnPath,
+  probeCodegraphStatus,
+  shouldWithholdCodegraphTools,
+  syncCodegraph,
+} from '../ai/codegraph.js';
+import {
   buildWaveSessionId,
   type FixAIWaveName,
   getApiFallbackModelString,
@@ -581,15 +588,52 @@ export async function fix(options: FixOptions): Promise<FixResult> {
     }
   }
 
+  // Issue #271 — codegraph init+probe gate.
+  //
+  // The external `codegraph` CLI (consumed via stdio MCP as `codegraph serve --mcp`)
+  // only returns useful results after `codegraph init <workDir> --index`. A fresh
+  // worktree has no index, so without this gate the MCP server answers empty-but-
+  // successfully and the agent silently gets no graph. Sequence:
+  //   1. probe `command -v codegraph` (skip everything if not installed — pipeline unchanged)
+  //   2. run `codegraph init <workDir> --index` best-effort
+  //   3. probe status; if uninitialized OR zero nodes -> withhold codegraph from MCP startup
+  //   4. log warning exactly once on the withhold path
+  // `syncCodegraph` runs between WAVE I and WAVE R (further down).
+  const codegraphWithholdList: string[] = [];
+  let codegraphAvailable = false;
+  try {
+    codegraphAvailable = await isCodegraphOnPath();
+    if (codegraphAvailable) {
+      const initResult = await initCodegraph(workDir);
+      if (!initResult.ok) {
+        flog.warn(`[codegraph] init failed (${initResult.reason}) — proceeding; status probe may still pass`);
+      }
+      const probe = await probeCodegraphStatus(workDir);
+      if (shouldWithholdCodegraphTools(probe)) {
+        flog.warn(
+          `[codegraph] withholding tools — index empty/uninitialized (initialized=${probe.initialized}, nodes=${probe.nodeCount}${probe.reason ? `, reason=${probe.reason}` : ''})`,
+        );
+        codegraphWithholdList.push('codegraph');
+      } else {
+        flog.info(`[codegraph] index ready — ${probe.nodeCount} nodes`);
+      }
+    }
+  } catch (err) {
+    // Defensive: any unexpected failure means treat codegraph as unavailable.
+    flog.warn(`[codegraph] gate threw — treating as unavailable: ${err instanceof Error ? err.message : String(err)}`);
+    codegraphWithholdList.push('codegraph');
+  }
+
   // MCP server startup: resolve config and start servers for tool augmentation.
   // workDir threads through so per-fix path-sensitive servers (codegraph,
   // language servers) point at the worktree, not the orchestrator's cwd
-  // (issue #270).
+  // (issue #270). `codegraphWithholdList` suppresses the codegraph server entry
+  // when its index is empty/uninitialized (issue #271).
   let mcpHandles = new Map<string, MCPServerHandle>();
   try {
     const mcpServers = await resolveMCPServers(config.mcp);
     if (Object.keys(mcpServers).length > 0) {
-      mcpHandles = await startAllMCPServers(mcpServers, workDir);
+      mcpHandles = await startAllMCPServers(mcpServers, workDir, codegraphWithholdList);
       flog.info(`[mcp] ${mcpHandles.size} MCP server(s) running (cwd=${workDir})`);
     }
   } catch (error) {
@@ -1298,6 +1342,19 @@ export async function fix(options: FixOptions): Promise<FixResult> {
 
     // WAVE R: Review Loop
     if (!shouldSkip('review')) {
+      // Issue #271 — sync the codegraph so impact/callers/callees reflect
+      // WAVE-I edits before the review wave consults the graph. Only runs when
+      // codegraph is on PATH AND was not withheld for empty index — otherwise
+      // there is nothing to sync.
+      if (codegraphAvailable && codegraphWithholdList.length === 0) {
+        const syncResult = await syncCodegraph(workDir);
+        if (!syncResult.ok) {
+          flog.warn(`[codegraph] pre-review sync failed (${syncResult.reason}) — review will use stale graph`);
+        } else {
+          flog.info('[codegraph] pre-review sync complete');
+        }
+      }
+
       const waveStart = Date.now();
       // Query past review feedback for injection into review wave
       let reviewFeedbackContext: string | undefined;
