@@ -173,6 +173,17 @@ export function truncateToTokenBudget(text: string, tokenBudget: number): string
 }
 
 // --- Type guards for runtime safety ---
+//
+// NOTE (issue #307): these guards validate artifacts that already live in the
+// in-memory `handoffs: Handoffs` map (where `WaveResult.artifact: unknown`
+// flows in from earlier-wave dispatch sites). For the disk-read path — i.e.
+// "I just loaded a handoff and need its typed artifact" — prefer the per-wave
+// typed loaders in `src/types/handoffs.ts` (`loadAssessHandoff`,
+// `loadSpecHandoff`, `loadQualityHandoff`, `loadReviewHandoff`, …). Those
+// run the full Zod schema, not just a structural-presence check, and log a
+// warning on mismatch. These guards remain valid for the in-memory dispatch
+// because they only need to distinguish wave artifact shapes already produced
+// by typed agents inside the current process.
 
 function isAssessResult(v: unknown): v is AssessResult {
   return v != null && typeof v === 'object' && 'grade' in v && 'surface_area' in v;

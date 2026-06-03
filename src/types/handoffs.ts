@@ -5,6 +5,24 @@
 import { z } from 'zod';
 import { fs, path } from 'zx';
 import { log } from '../utils/logger.js';
+import {
+  type AssessResult,
+  AssessResultSchema,
+  type BrainstormResult,
+  BrainstormResultSchema,
+  type ImplResult,
+  ImplResultSchema,
+  type QualityRemediation,
+  QualityRemediationSchema,
+  type QualityResult,
+  QualityResultSchema,
+  type ReviewResult,
+  ReviewResultSchema,
+  type SpecResult,
+  SpecResultSchema,
+  type TestResult,
+  TestResultSchema,
+} from './waves.js';
 
 const WaveNameSchema = z.enum(['assess', 'spec', 'test', 'impl', 'quality', 'review', 'ship', 'brainstorm']);
 
@@ -188,4 +206,111 @@ export async function loadAllHandoffs(workDir: string): Promise<WaveHandoff[]> {
     if (handoff) handoffs.push(handoff);
   }
   return handoffs;
+}
+
+// --- Per-wave typed loaders (issue #307) ---
+//
+// `loadHandoff<T>` returns a typed `WaveHandoff<T>`, but the generic `T` is
+// unchecked at runtime — the implementation casts `artifact: unknown` to `T`.
+// A caller asking for `loadHandoff<AssessResult>(workDir, 'spec')` would get a
+// `SpecResult` back, typed as `AssessResult`, with no warning.
+//
+// The loaders below validate `artifact` against the matching wave schema at
+// read time. They are the source of truth for "is this artifact actually
+// shaped like an X" when loading from disk. On schema mismatch (and only on
+// schema mismatch — `loadHandoff` already handles missing files and invalid
+// JSON), they log a warning and return `null`.
+//
+// Producers (`saveHandoff` callers) and `WaveHandoffSchema.artifact: z.unknown()`
+// are intentionally unchanged — the write side stays loose; the read side is
+// where we pay for safety.
+
+/**
+ * Internal helper: lift a Zod schema for a wave artifact to a loader.
+ *
+ * Reads the raw handoff via {@link loadHandoff}, then re-validates `artifact`
+ * against `schema`. Returns the loaded handoff with a narrowed `artifact`
+ * type on success, or `null` on any of:
+ *   - no handoff file on disk
+ *   - JSON parse failure
+ *   - {@link WaveHandoffSchema} validation failure
+ *   - `artifact` does not match `schema`
+ *
+ * Schema-mismatch failures (the new case) emit a `log.warn` so the pipeline
+ * leaves a breadcrumb when a typed read silently misses.
+ */
+async function loadTypedHandoff<T>(
+  workDir: string,
+  wave: string,
+  schema: z.ZodType<T>,
+): Promise<WaveHandoff<T> | null> {
+  const raw = await loadHandoff(workDir, wave);
+  if (!raw) return null;
+  const parsed = schema.safeParse(raw.artifact);
+  if (!parsed.success) {
+    log.warn(`Handoff for wave '${wave}' has invalid artifact shape: ${parsed.error.message}`);
+    return null;
+  }
+  return { ...raw, artifact: parsed.data };
+}
+
+/** Read-time-validated loader for the assess wave's typed artifact. */
+export function loadAssessHandoff(workDir: string): Promise<WaveHandoff<AssessResult> | null> {
+  return loadTypedHandoff(workDir, 'assess', AssessResultSchema);
+}
+
+/** Read-time-validated loader for the spec wave's typed artifact. */
+export function loadSpecHandoff(workDir: string): Promise<WaveHandoff<SpecResult> | null> {
+  return loadTypedHandoff(workDir, 'spec', SpecResultSchema);
+}
+
+/** Read-time-validated loader for the test wave's typed artifact. */
+export function loadTestHandoff(workDir: string): Promise<WaveHandoff<TestResult> | null> {
+  return loadTypedHandoff(workDir, 'test', TestResultSchema);
+}
+
+/** Read-time-validated loader for the impl wave's typed artifact. */
+export function loadImplHandoff(workDir: string): Promise<WaveHandoff<ImplResult> | null> {
+  return loadTypedHandoff(workDir, 'impl', ImplResultSchema);
+}
+
+/**
+ * Read-time-validated loader for the quality wave's typed artifact.
+ *
+ * The quality wave emits two distinct artifact shapes depending on the
+ * pipeline path: {@link QualityRemediationSchema} when the orchestrator
+ * captured per-gate remediation detail, and {@link QualityResultSchema}
+ * when it captured a flat pass/fail summary. The loader tries
+ * remediation first (the richer shape), then result, matching the
+ * dispatch order in `src/pipeline/context.ts:buildReviewContext`.
+ * Returns `null` only if neither schema matches.
+ */
+export async function loadQualityHandoff(
+  workDir: string,
+): Promise<WaveHandoff<QualityResult | QualityRemediation> | null> {
+  const raw = await loadHandoff(workDir, 'quality');
+  if (!raw) return null;
+
+  const remediation = QualityRemediationSchema.safeParse(raw.artifact);
+  if (remediation.success) {
+    return { ...raw, artifact: remediation.data };
+  }
+
+  const result = QualityResultSchema.safeParse(raw.artifact);
+  if (result.success) {
+    return { ...raw, artifact: result.data };
+  }
+
+  log.warn(`Handoff for wave 'quality' matches neither QualityRemediation nor QualityResult: ${result.error.message}`);
+  return null;
+}
+
+/** Read-time-validated loader for the review wave's typed artifact. */
+export function loadReviewHandoff(workDir: string): Promise<WaveHandoff<ReviewResult> | null> {
+  return loadTypedHandoff(workDir, 'review', ReviewResultSchema);
+}
+
+/** Read-time-validated loader for the brainstorm wave's typed artifact. */
+export function loadBrainstormHandoff(workDir: string): Promise<WaveHandoff<BrainstormResult> | null> {
+  return loadTypedHandoff(workDir, 'brainstorm', BrainstormResultSchema);
 }
