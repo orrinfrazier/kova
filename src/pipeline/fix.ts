@@ -9,13 +9,10 @@
 // dispatch still uses the local `spawnWave` helper inline — the QualityEngine
 // docs flag the initial-dispatch fold as a follow-up.
 
-import { readFileSync } from 'node:fs';
-import { isAbsolute, join as joinPath } from 'node:path';
+import { join as joinPath } from 'node:path';
 import { z } from 'zod';
 import { $ } from 'zx';
 import {
-  extractSymbolCandidates,
-  formatCodegraphContext,
   initCodegraph,
   isCodegraphOnPath,
   probeCodegraphStatus,
@@ -47,7 +44,7 @@ import { selectVariants, type VariantSelection } from '../services/ab-test.js';
 import { clearCheckpoint, loadCheckpoint, saveCheckpoint } from '../services/checkpoint.js';
 import { openCodegraph } from '../services/codegraph/index.js';
 import { checkForConflicts } from '../services/conflict-check.js';
-import { type EpisodeFTSRecord, EpisodeFTSStore } from '../services/episode-fts.js';
+import { EpisodeFTSStore } from '../services/episode-fts.js';
 import { type EventBus, getDefaultEventBus } from '../services/event-bus/index.js';
 import { collectPRFeedback } from '../services/feedback-collector.js';
 import { getCurrentHeadSha } from '../services/git-diff.js';
@@ -57,7 +54,7 @@ import { validateIsolation } from '../services/isolation.js';
 import { detectTooling } from '../services/language-detect.js';
 import { buildLiveHandleSink, defaultLiveFixRegistry, type LiveFixRegistry } from '../services/live-fix-registry.js';
 import * as metrics from '../services/metrics.js';
-import { formatPatterns, PatternStore, upsertPatternFromEpisode } from '../services/pattern-store.js';
+import { PatternStore, upsertPatternFromEpisode } from '../services/pattern-store.js';
 import { applyScopeToState, detectScope, formatScopeLogLine } from '../services/pipeline-scope.js';
 import { ensureScreenshotsDir, isPlaywrightEnabled, resolvePlaywrightEnv } from '../services/playwright.js';
 import { formatPRContext, type OpenPR } from '../services/pr-context.js';
@@ -65,14 +62,7 @@ import { ProgressTracker } from '../services/progress.js';
 import { loadProjectContext, type ProjectContext } from '../services/project-context.js';
 import { type ABTestVariantStats, correlateByABTestVariant } from '../services/prompt-correlation.js';
 import { detectPromptChange, hashPrompt, recordPromptVersion } from '../services/prompt-versions.js';
-import {
-  formatRepoContext,
-  formatRepoSearch,
-  formatRepoStandards,
-  queryRepoContext,
-  queryRepoSearch,
-  queryRepoStandards,
-} from '../services/repo-intel.js';
+import { formatRepoStandards, queryRepoStandards } from '../services/repo-intel.js';
 import { registerRun, updateRun } from '../services/run-registry.js';
 import {
   buildSandboxImage,
@@ -83,17 +73,10 @@ import {
   startSandboxContainer,
 } from '../services/sandbox.js';
 import { shutdownRequested } from '../services/shutdown.js';
-import type { EpisodeContext, EpisodeRecord } from '../services/vectordb.js';
+import type { EpisodeRecord } from '../services/vectordb.js';
 import {
   buildEpisodeRecord,
-  formatCodeChunks,
-  formatEpisodes,
-  formatFailedEpisodes,
-  formatPlaybook,
   formatReviewFeedback,
-  queryCodeContext,
-  queryEpisodeContext,
-  queryPlaybook,
   queryReviewFeedbackContext,
   recordEpisode,
 } from '../services/vectordb.js';
@@ -129,8 +112,13 @@ import {
   saveHandoff,
 } from '../types/index.js';
 import { closeFileLogger, initFileLogger, type Logger, log } from '../utils/logger.js';
-import { resolveCallPaths } from './call-path-context.js';
 import { applyConsensusToConfig, formatConsensusActivationLog } from './consensus-flags.js';
+import {
+  type ContextProviderInput,
+  gatherContext,
+  POST_ASSESS_CONTEXT_PROVIDERS,
+  PRE_ASSESS_CONTEXT_PROVIDERS,
+} from './context/index.js';
 import { buildWaveContext } from './context.js';
 import { refreshCodebaseContext } from './context-refresh.js';
 import { buildCostReport, printRunSummary, writeCostReport } from './cost-report.js';
@@ -1017,64 +1005,26 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       flog.info(`Playwright MCP enabled — screenshots dir: ${pwEnv.PLAYWRIGHT_SCREENSHOTS_DIR}`);
     }
 
-    // Episodic memory: query for past learnings (before assess/spec waves)
-    let episodicContext: string | undefined;
-    let failedEpisodicContext: string | undefined;
-    if (config.episodes?.enabled) {
-      const query = `${issue.title}\n\n${issue.body}`;
-      const vectorEpisodes = await queryEpisodeContext(config.episodes, query, {
-        repo: repoName,
-        language: tooling.language !== 'unknown' ? tooling.language : undefined,
-      });
-
-      // FTS5 keyword recall (#302): complements vector neighbors with exact
-      // matches on error strings, symbols, paths. Local + optional — absent
-      // DB returns []; disabled in config skips the path entirely.
-      const ftsEpisodes = queryFTSEpisodes(workDir, config.episodes, query);
-      const ftsAsContext = ftsEpisodes.map(ftsRecordToContext);
-
-      // Merge: FTS hits first (exact tokens are higher-signal for recall),
-      // then non-duplicate vector neighbors. Dedup key = `${repo}:${issue_number}`.
-      const seenKeys = new Set<string>();
-      const merged: typeof vectorEpisodes = [];
-      for (const ep of ftsAsContext) {
-        const key = `${ep.repo ?? ''}:${ep.issue_number}`;
-        if (seenKeys.has(key)) continue;
-        seenKeys.add(key);
-        merged.push(ep);
-      }
-      for (const ep of vectorEpisodes) {
-        const key = `${ep.repo ?? ''}:${ep.issue_number}`;
-        if (seenKeys.has(key)) continue;
-        seenKeys.add(key);
-        merged.push(ep);
-      }
-
-      if (merged.length > 0) {
-        episodicContext = formatEpisodes(merged, repoName);
-        failedEpisodicContext = formatFailedEpisodes(merged, repoName) || undefined;
-      }
-    }
-
-    // repo-intel: query for repository context (before assess wave)
-    let repoContextText: string | undefined;
-    if (config.repo_intel?.enabled && ownerRepo) {
-      const raw = await queryRepoContext(config.repo_intel, ownerRepo, `${issue.title}\n\n${issue.body}`);
-      if (raw.length > 0) {
-        repoContextText = formatRepoContext(raw);
-      }
-    }
-
-    // Pattern aggregation (#267): query top recurring (diagnosis × module) patterns
-    // for this repo and inject into the assess/spec wave context. Best-effort —
-    // disabled when episodes is off; absent DB returns no patterns silently.
-    let patternContext: string | undefined;
-    if (config.episodes?.enabled) {
-      const patterns = queryPatternContext(workDir, config.episodes, repoName);
-      if (patterns.length > 0) {
-        patternContext = formatPatterns(patterns);
-      }
-    }
+    // Pre-WAVE-A context providers (issue #431): episodic memory, repo-intel,
+    // pattern aggregation. Each is independently testable and gracefully
+    // degrades to undefined on error — see `./context/` for per-provider
+    // implementations and the gather helper.
+    const contextProviderCtx: ContextProviderInput = {
+      issue,
+      config,
+      ownerRepo,
+      repoName,
+      repoPath,
+      workDir,
+      language: tooling.language,
+      assessResult: undefined,
+      logger: flog,
+    };
+    const preAssessCtx = await gatherContext(PRE_ASSESS_CONTEXT_PROVIDERS, contextProviderCtx);
+    const episodicContext = preAssessCtx.episodicContext;
+    const failedEpisodicContext = preAssessCtx.failedEpisodicContext;
+    const repoContextText = preAssessCtx.repoContextText;
+    const patternContext = preAssessCtx.patternContext;
 
     // WAVE A: Assess — delegated to AssessEngine (issue #357).
     if (!shouldSkip('assess')) {
@@ -1151,110 +1101,23 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       );
     }
 
-    // Vector DB: query for relevant codebase context (before spec/impl waves)
-    let codebaseContext: string | undefined;
-    if (config.vectordb?.enabled) {
-      const query = `${issue.title}\n\n${issue.body}`;
-      const chunks = await queryCodeContext(config.vectordb, query);
-      if (chunks.length > 0) {
-        codebaseContext = formatCodeChunks(chunks);
-      }
-    }
-
-    // Issue #273 — Codegraph: exact definition spans + callers/callees + call
-    // paths for symbols named in the issue. Sits ABOVE the fuzzy codebase chunks
-    // (see context.ts ordering). Graceful degradation: any failure here leaves
-    // codegraphContext undefined and the spec/impl waves proceed with only the
-    // fuzzy codebaseContext (today's behavior).
-    let codegraphContext: string | undefined;
-    try {
-      const symbolNames = extractSymbolCandidates(`${issue.title}\n\n${issue.body}`);
-      if (symbolNames.length > 0) {
-        const dbPath = joinPath(repoPath, '.kova', 'codegraph.db');
-        const cg = openCodegraph(dbPath);
-        try {
-          const formatted = formatCodegraphContext({ graph: cg, symbolNames });
-          if (formatted.length > 0) {
-            codegraphContext = formatted;
-            flog.info(
-              `[codegraph-context] injected (${symbolNames.length} candidate symbols, ${formatted.length} chars)`,
-            );
-          }
-        } finally {
-          cg.close();
-        }
-      }
-    } catch (err) {
-      flog.warn(
-        `[codegraph-context] degraded — proceeding without graph context: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
-
-    // Issue #275 — Framework-resolved call paths: scan the issue's surface-area
-    // files for HTTP route bindings (`app.get('/x', handler)`) and resolve each
-    // handler symbol against the same codegraph used above. Sits BELOW
-    // codegraphContext (symbol-level facts already most precise) and ABOVE
-    // codebaseContext (framework-resolved beats fuzzy vector neighbors).
-    //
-    // Graceful degradation contract (mirrors #273):
-    //  - No assess artifact / no surface_area files -> field omitted, waves proceed.
-    //  - No route bindings detected in any file -> field omitted, waves proceed.
-    //  - No handler resolves in the graph -> field omitted, waves proceed.
-    //  - Any unexpected error -> warn + field omitted, waves proceed.
-    let callPathContext: string | undefined;
-    try {
-      const callPathAssess = state.waveResults.assess?.artifact as AssessResult | undefined;
-      const assessFiles = callPathAssess?.surface_area.files ?? [];
-      if (assessFiles.length > 0) {
-        const dbPath = joinPath(repoPath, '.kova', 'codegraph.db');
-        const cg = openCodegraph(dbPath);
-        try {
-          const formatted = resolveCallPaths({
-            graph: cg,
-            files: assessFiles,
-            readSource: (relPath) => {
-              const abs = isAbsolute(relPath) ? relPath : joinPath(repoPath, relPath);
-              return readFileSync(abs, 'utf8');
-            },
-          });
-          if (formatted.length > 0) {
-            callPathContext = formatted;
-            const routeCount = (formatted.match(/^### /gm) ?? []).length;
-            flog.info(`[call-path-context] injected (${routeCount} routes, ${formatted.length} chars)`);
-          }
-        } finally {
-          cg.close();
-        }
-      }
-    } catch (err) {
-      flog.warn(
-        `[call-path-context] degraded — proceeding without call-path context: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
-
-    // repo-intel: query for similar implementations (before spec wave)
-    let repoSearchText: string | undefined;
-    if (config.repo_intel?.enabled && ownerRepo) {
-      const raw = await queryRepoSearch(config.repo_intel, ownerRepo, `${issue.title}\n\n${issue.body}`);
-      if (raw.length > 0) {
-        repoSearchText = formatRepoSearch(raw);
-      }
-    }
-
-    // Playbook synthesis (#299): query for a distilled playbook matching this
-    // issue. Default off; gated by playbooks.enabled. Graceful degradation —
-    // never blocks the fix on failure.
-    let playbookContext: string | undefined;
-    if (config.playbooks?.enabled) {
-      const query = `${issue.title}\n\n${issue.body}`;
-      const playbook = await queryPlaybook(config.playbooks, query, {
-        repo: repoName,
-        language: tooling.language !== 'unknown' ? tooling.language : undefined,
-      });
-      if (playbook) {
-        playbookContext = formatPlaybook(playbook);
-      }
-    }
+    // Post-WAVE-A context providers (issue #431): vector DB code chunks,
+    // codegraph symbol facts, framework-resolved call paths, repo-intel
+    // similar-implementation search, playbook synthesis. Order in
+    // `POST_ASSESS_CONTEXT_PROVIDERS` mirrors the original block; the assess
+    // artifact is now visible to providers that need it (call-path).
+    const postAssessProviderCtx: ContextProviderInput = {
+      ...contextProviderCtx,
+      assessResult: state.waveResults.assess?.artifact as AssessResult | undefined,
+    };
+    const postAssessCtx = await gatherContext(POST_ASSESS_CONTEXT_PROVIDERS, postAssessProviderCtx);
+    // `codebaseContext` is reassigned after WAVE I by `refreshCodebaseContext`
+    // (issue #277), so it stays `let`. The others are read-only.
+    let codebaseContext = postAssessCtx.codebaseContext;
+    const codegraphContext = postAssessCtx.codegraphContext;
+    const callPathContext = postAssessCtx.callPathContext;
+    const repoSearchText = postAssessCtx.repoSearchText;
+    const playbookContext = postAssessCtx.playbookContext;
 
     // WAVE S: Spec — delegated to SpecEngine (issue #357).
     // SpecEngine owns: initial dispatch + piece-to-piece validation (merge in place) +
@@ -2210,67 +2073,13 @@ function ftsEnabled(config: EpisodicMemoryConfig): boolean {
 }
 
 /**
- * Open the local FTS5 store, run `searchEpisodesFTS(query)`, return the rows.
- * Best-effort: any open/query failure returns []. Absent DB is the normal
- * first-run state and produces a silent empty result (no warning log).
- */
-function queryFTSEpisodes(workDir: string, config: EpisodicMemoryConfig, query: string): EpisodeFTSRecord[] {
-  if (!ftsEnabled(config)) return [];
-  const dbPath = resolveFTSPath(workDir, config);
-  let store: EpisodeFTSStore | null = null;
-  try {
-    store = new EpisodeFTSStore(dbPath);
-    return store.searchEpisodesFTS(query, config.max_episodes);
-  } catch {
-    return [];
-  } finally {
-    store?.close();
-  }
-}
-
-/**
- * Adapt an `EpisodeFTSRecord` into the `EpisodeContext` shape expected by
- * `formatEpisodes` / `formatFailedEpisodes`. Maps `outcome` to the EpisodeContext
- * union (`success` | `partial` | `failure`) using the same convention as
- * `buildEpisodeRecord`. Score is a synthetic constant so all FTS hits sort
- * after each other purely by insertion order (which is BM25 order from the
- * store).
- */
-function ftsRecordToContext(r: EpisodeFTSRecord): EpisodeContext {
-  let outcome: EpisodeContext['outcome'];
-  switch (r.outcome) {
-    case 'pr_created':
-      outcome = 'success';
-      break;
-    case 'failed':
-      outcome = 'failure';
-      break;
-    case 'skipped':
-      outcome = 'partial';
-      break;
-    case 'success':
-    case 'partial':
-    case 'failure':
-      outcome = r.outcome;
-      break;
-    default:
-      outcome = 'partial';
-  }
-  return {
-    issue_number: r.issue_number,
-    issue_title: r.issue_title,
-    approach: r.approach,
-    outcome,
-    learnings: r.learnings ?? '',
-    score: 1,
-    repo: r.repo,
-  };
-}
-
-/**
  * Mirror an `EpisodeRecord` into the FTS5 index. Best-effort: open/write
  * failures are logged and swallowed so they never break the existing
  * REST-based recordEpisode path.
+ *
+ * Note: the search-side `queryFTSEpisodes` + `ftsRecordToContext` helpers
+ * moved to `./context/episodic-provider.ts` as part of issue #431; only the
+ * write-side mirror remains here in fix.ts.
  */
 function upsertEpisodeFTS(
   workDir: string,
@@ -2315,31 +2124,13 @@ function resolvePatternStorePath(workDir: string): string {
 }
 
 /**
- * Open the local PatternStore, run `queryTopPatterns(repo)`, return the rows.
- * Best-effort: any open/query failure returns []. Absent DB is the normal
- * first-run state and produces a silent empty result.
- */
-function queryPatternContext(
-  workDir: string,
-  config: EpisodicMemoryConfig,
-  repo: string,
-): import('../services/pattern-store.js').PatternRecord[] {
-  if (!config.enabled) return [];
-  let store: PatternStore | null = null;
-  try {
-    store = new PatternStore(resolvePatternStorePath(workDir));
-    return store.queryTopPatterns(repo, { limit: config.max_episodes });
-  } catch {
-    return [];
-  } finally {
-    store?.close();
-  }
-}
-
-/**
  * Aggregate the completed episode into the pattern store. Best-effort: open or
  * upsert failures are logged and swallowed so they never break the existing
  * recordEpisode path.
+ *
+ * Note: the search-side `queryPatternContext` helper moved to
+ * `./context/pattern-provider.ts` as part of issue #431; only the write-side
+ * mirror remains here in fix.ts.
  */
 function upsertEpisodePattern(
   workDir: string,
