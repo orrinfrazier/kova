@@ -3,7 +3,7 @@
 // Consumers should import from this barrel rather than the internal files so
 // the schema/bus/sse split stays an implementation detail.
 
-export type { EventBusOptions, EventListener, Unsubscribe } from './bus.js';
+export type { EventBusOptions, EventListener, SubscribeOptions, Unsubscribe } from './bus.js';
 export { EventBus, getDefaultEventBus, setDefaultEventBus } from './bus.js';
 export type {
   AbortedEvent,
