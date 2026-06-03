@@ -1,45 +1,45 @@
-// afterToolCall hook — truncates large tool results to stay within a token budget.
-// Wired into spawnWaveAgent() via the pi-agent-core Agent constructor.
+// Tool-call hooks for pi-agent-core's runtime.
+//
+// Issue #315 — this module is a backward-compatibility shim. The pure
+// truncation primitives (`estimateTokens`, `truncateContent`, default
+// constants, `TruncationOptions`/`ToolHookOptions`) live in
+// `./tool-result-truncate.ts` and are re-exported below so existing imports
+// keep working.
+//
+// When swapping to claude-agent-sdk, the wrap-at-execute path
+// (`withTruncatedResult` in `./tool-result-truncate.ts`) keeps working;
+// `afterToolCall` does not — claude-agent-sdk's `PostToolUse` is
+// informational only and offers no output-side content-rewrite surface.
+// New code should call `withTruncatedResult(tool, opts)` at tool-creation
+// time instead of wiring `createAfterToolCallHook` into the runtime.
 
 import type { AfterToolCallContext, AfterToolCallResult } from '@earendil-works/pi-agent-core';
+import {
+  DEFAULT_HEAD_TOKENS,
+  DEFAULT_TAIL_TOKENS,
+  DEFAULT_TOKEN_BUDGET,
+  estimateTokens,
+  type TruncationOptions,
+  truncateContent,
+} from './tool-result-truncate.js';
 
-/** Default token budget for tool results. Results exceeding this are truncated. */
-export const DEFAULT_TOKEN_BUDGET = 8_000;
+// Re-export the pure primitives from their new home so existing imports of
+// `./tool-hooks` continue to work unchanged.
+export {
+  DEFAULT_HEAD_TOKENS,
+  DEFAULT_TAIL_TOKENS,
+  DEFAULT_TOKEN_BUDGET,
+  estimateTokens,
+  truncateContent,
+} from './tool-result-truncate.js';
 
-/** Default number of tokens to keep from the start of a truncated result. */
-export const DEFAULT_HEAD_TOKENS = 2_000;
-
-/** Default number of tokens to keep from the end of a truncated result. */
-export const DEFAULT_TAIL_TOKENS = 2_000;
-
-export interface ToolHookOptions {
-  /** Max tokens for a single tool result before truncation. Default: 8000 */
-  tokenBudget?: number;
-  /** Tokens to keep from the start of a truncated result. Default: 2000 */
-  headTokens?: number;
-  /** Tokens to keep from the end of a truncated result. Default: 2000 */
-  tailTokens?: number;
-}
-
-/** Rough token estimate: ~4 characters per token, rounded up. */
-export function estimateTokens(text: string): number {
-  if (text.length === 0) return 0;
-  return Math.ceil(text.length / 4);
-}
-
-/** Truncate text to head + tail tokens with a marker in the middle. */
-export function truncateContent(text: string, tokenBudget: number, headTokens: number, tailTokens: number): string {
-  if (estimateTokens(text) <= tokenBudget) return text;
-
-  const headChars = headTokens * 4;
-  const tailChars = tailTokens * 4;
-  const head = text.slice(0, headChars);
-  const tail = text.slice(-tailChars);
-  const removedChars = text.length - headChars - tailChars;
-  const removedTokens = Math.ceil(removedChars / 4);
-
-  return `${head}\n[middle truncated — ${removedTokens} tokens removed]\n${tail}`;
-}
+/**
+ * Tool-result truncation options.
+ *
+ * Alias of `TruncationOptions` (from `./tool-result-truncate.ts`) kept for
+ * backward compatibility. New code should prefer `TruncationOptions`.
+ */
+export type ToolHookOptions = TruncationOptions;
 
 /**
  * Create an `afterToolCall` hook that truncates large tool results.
@@ -48,6 +48,13 @@ export function truncateContent(text: string, tokenBudget: number, headTokens: n
  * - If over budget: keeps head + tail tokens with a truncation marker
  * - Error results (`isError: true`) are always preserved at full length
  * - Non-text content blocks (images) are passed through unchanged
+ *
+ * @deprecated Issue #315 — pi-agent-core's `afterToolCall` is not portable
+ * to claude-agent-sdk's hook model. Prefer `withTruncatedResult(tool, opts)`
+ * from `./tool-result-truncate.ts`, which wraps any `AgentTool`'s `execute()`
+ * and works across runtimes. Kept here for callers that still need a
+ * pi-mono-shaped hook (none inside kova as of #315 — wave-executor now wires
+ * truncation at the tool layer).
  */
 export function createAfterToolCallHook(
   options?: ToolHookOptions,

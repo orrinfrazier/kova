@@ -12,6 +12,7 @@ import type { Tool as MCPTool } from '@modelcontextprotocol/sdk/types.js';
 import { type TSchema, Type } from 'typebox';
 import type { MCPConfig, MCPServerConfig } from '../types/config.js';
 import { log } from '../utils/logger.js';
+import { type TruncationOptions, withTruncatedResult } from './tool-result-truncate.js';
 import type { AIWaveName } from './wave-tools.js';
 
 // biome-ignore lint/suspicious/noExplicitAny: pi-mono AgentTool uses any for tool parameter schemas
@@ -215,14 +216,24 @@ export async function stopAllMCPServers(handles: Map<string, MCPServerHandle>): 
 }
 
 /** Convert an MCP tool to a pi-agent-core AgentTool.
- *  Tool name is prefixed with server name to avoid collisions: mcp__<server>__<tool>. */
-export function mcpToolToAgentTool(serverName: string, mcpTool: MCPTool, client: Client): AnyTool {
+ *  Tool name is prefixed with server name to avoid collisions: mcp__<server>__<tool>.
+ *
+ *  Issue #315 — the returned tool is wrapped with `withTruncatedResult` so MCP
+ *  results respect the same token budget as built-in tools. Pass `false` to
+ *  disable truncation for this tool, or a `TruncationOptions` object to
+ *  override the defaults. Defaults to 8k/2k/2k (the canonical wave budget). */
+export function mcpToolToAgentTool(
+  serverName: string,
+  mcpTool: MCPTool,
+  client: Client,
+  truncation?: TruncationOptions | false,
+): AnyTool {
   const qualifiedName = `mcp__${serverName}__${mcpTool.name}`;
 
   // Wrap MCP JSON Schema as TypeBox schema using Type.Unsafe()
   const parameters = Type.Unsafe(mcpTool.inputSchema) as TSchema;
 
-  return {
+  const inner: AnyTool = {
     name: qualifiedName,
     description: mcpTool.description ?? mcpTool.name,
     label: `[MCP:${serverName}] ${mcpTool.name}`,
@@ -257,14 +268,22 @@ export function mcpToolToAgentTool(serverName: string, mcpTool: MCPTool, client:
       };
     },
   };
+
+  return withTruncatedResult(inner, truncation);
 }
 
 /** Get MCP-provided AgentTools for a given wave.
- *  Uses wave defaults or per-wave override from repo config. */
+ *  Uses wave defaults or per-wave override from repo config.
+ *
+ *  Issue #315 — `truncation` is forwarded to every wrapped MCP tool so MCP
+ *  results respect the wave's token budget. Omit (or pass `undefined`) for
+ *  the default 8k budget; pass `false` to disable truncation; pass a
+ *  `TruncationOptions` object to override head/tail/budget. */
 export function getMCPToolsForWave(
   wave: AIWaveName,
   handles: Map<string, MCPServerHandle>,
   waveOverrides?: Partial<Record<AIWaveName, string[]>>,
+  truncation?: TruncationOptions | false,
 ): AnyTool[] {
   const serverNames = waveOverrides?.[wave] ?? WAVE_MCP_DEFAULTS[wave];
   const tools: AnyTool[] = [];
@@ -273,7 +292,7 @@ export function getMCPToolsForWave(
     const handle = handles.get(serverName);
     if (!handle) continue;
     for (const mcpTool of handle.tools) {
-      tools.push(mcpToolToAgentTool(serverName, mcpTool, handle.client));
+      tools.push(mcpToolToAgentTool(serverName, mcpTool, handle.client, truncation));
     }
   }
 

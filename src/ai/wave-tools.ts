@@ -15,6 +15,7 @@ import {
 } from '@earendil-works/pi-coding-agent';
 import type { CustomTool, RepoConfig, WaveName } from '../types/index.js';
 import { createPipelineTool, type PipelineToolOptions } from './pipeline-tool.js';
+import { type TruncationOptions, withTruncatedResult } from './tool-result-truncate.js';
 
 type ToolName = 'read' | 'bash' | 'edit' | 'write' | 'grep' | 'find' | 'ls';
 
@@ -128,6 +129,19 @@ export interface WaveToolOptions {
    * Empty/undefined → no restriction (backward compat).
    */
   pieceFiles?: readonly string[] | undefined;
+  /**
+   * Tool-result truncation options (issue #315). Applied to every tool returned
+   * from `getWaveTools` — built-ins, custom tools, MCP tools, and the pipeline
+   * tool — so the token budget is enforced at the tool-execute boundary
+   * regardless of which runtime hosts the agent. The wrap-at-execute path
+   * keeps working when kova swaps to claude-agent-sdk; pi-agent-core's
+   * `afterToolCall` hook does not.
+   *
+   * - Omit (default) → 8k token budget, 2k head, 2k tail.
+   * - `false` → disable truncation for this wave.
+   * - object → override budget/head/tail.
+   */
+  toolResultTruncation?: TruncationOptions | false;
 }
 
 /** Waves where the piece-scope guard is applied (issue #250 — impl only). */
@@ -141,10 +155,18 @@ export function getWaveTools(wave: AIWaveName, cwd: string, options?: WaveToolOp
     allowedNames.push('bash');
   }
 
-  const tools = allowedNames.map((name) => toolCreators[name](cwd));
+  const truncation = options?.toolResultTruncation;
+
+  // Issue #315 — wrap every built-in and custom tool with `withTruncatedResult`
+  // so the token budget is enforced at the tool-execute boundary. MCP tools
+  // forwarded in via `options.mcpTools` are already wrapped at the call site
+  // (see `mcpToolToAgentTool` / `getMCPToolsForWave`), so we pass them through
+  // unchanged to avoid double-wrapping (which would still be correct but
+  // wastes an `estimateTokens` pass).
+  const tools = allowedNames.map((name) => withTruncatedResult(toolCreators[name](cwd), truncation));
 
   if (options?.customTools && options.customTools.length > 0 && CUSTOM_TOOL_WAVES.has(wave)) {
-    tools.push(...createCustomTools(options.customTools, cwd));
+    tools.push(...createCustomTools(options.customTools, cwd).map((t) => withTruncatedResult(t, truncation)));
   }
 
   if (options?.mcpTools && options.mcpTools.length > 0) {
@@ -153,9 +175,11 @@ export function getWaveTools(wave: AIWaveName, cwd: string, options?: WaveToolOp
 
   // Issue #300 — programmatic tool calling via execute_pipeline.
   // Only impl + quality waves get this RPC tool, and only when explicitly enabled.
+  // The pipeline tool is itself wrapped so its aggregated multi-tool results
+  // also respect the budget.
   if (options?.pipelineTool?.enabled === true && PIPELINE_TOOL_WAVES.has(wave)) {
     const { enabled: _enabled, ...limits } = options.pipelineTool;
-    tools.push(createPipelineTool(cwd, tools, limits));
+    tools.push(withTruncatedResult(createPipelineTool(cwd, tools, limits), truncation));
   }
 
   return tools;
