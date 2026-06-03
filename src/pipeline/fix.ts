@@ -62,6 +62,7 @@ import {
   queryRepoSearch,
   queryRepoStandards,
 } from '../services/repo-intel.js';
+import { registerRun, updateRun } from '../services/run-registry.js';
 import {
   buildSandboxImage,
   DEFAULT_SANDBOX_LIMITS,
@@ -410,10 +411,34 @@ export async function fix(options: FixOptions): Promise<FixResult> {
   const eventBus = options.eventBus ?? getDefaultEventBus();
   const fixId = runId;
   let publishedFixDone = false;
-  const publishFixDone = (
+
+  // Issue #293: register this fix in the on-disk RunRegistry and mirror
+  // wave-enter / fix-done into it so `kova ls` and `kova attach` can discover
+  // and follow the run. Registry writes are fire-and-forget (best-effort, log
+  // on failure) — a registry-disk problem must never alter fix outcomes.
+  const registerRunSafe = (run: Parameters<typeof registerRun>[1]): Promise<void> =>
+    registerRun(repoPath, run).catch((err) => {
+      flog.warn(`[run-registry] registerRun failed: ${err instanceof Error ? err.message : String(err)}`);
+    });
+  const updateRunSafe = (patch: Parameters<typeof updateRun>[2]): Promise<void> =>
+    updateRun(repoPath, runId, patch).catch((err) => {
+      flog.warn(`[run-registry] updateRun failed: ${err instanceof Error ? err.message : String(err)}`);
+    });
+  // Subscribe to wave-enter events on this fixId to write the currentWave
+  // field as the pipeline advances. Subscription is per-fixId, so other
+  // concurrent fixes on the same bus do not bleed into this run's registry
+  // entry. The unsubscribe is invoked from publishFixDone() so the bus does
+  // not retain a listener after the run terminates.
+  const unsubscribeWaveEnter = eventBus.subscribeForFix(fixId, (event) => {
+    if (event.type === 'wave-enter') {
+      void updateRunSafe({ currentWave: event.wave });
+    }
+  });
+
+  const publishFixDone = async (
     outcome: 'done' | 'failed' | 'done_with_known_issues',
     extras: { totalCostUsd: number; prNumber?: number; reason?: string },
-  ): void => {
+  ): Promise<void> => {
     if (publishedFixDone) return;
     publishedFixDone = true;
     try {
@@ -431,6 +456,19 @@ export async function fix(options: FixOptions): Promise<FixResult> {
       // Pure side-effect: a misbehaving bus must never alter fix outcomes.
       flog.warn(`[event-bus] fix-done publish failed: ${err instanceof Error ? err.message : String(err)}`);
     }
+    // Issue #293: mirror terminal status into the on-disk registry BEFORE
+    // returning so callers (and tests) observing the registry after fix()
+    // resolves see the terminal status, not the prior 'running'. We map
+    // 'done_with_known_issues' to 'done' — the registry's status field is
+    // the binary "is this still active?" signal that `kova ls` needs;
+    // outcome detail lives in the event stream.
+    const registryStatus = outcome === 'failed' ? 'failed' : 'done';
+    await updateRunSafe({
+      status: registryStatus,
+      completedAt: new Date().toISOString(),
+      ...(extras.prNumber != null ? { prNumber: extras.prNumber } : {}),
+    });
+    unsubscribeWaveEnter();
   };
 
   try {
@@ -444,6 +482,16 @@ export async function fix(options: FixOptions): Promise<FixResult> {
   } catch (err) {
     flog.warn(`[event-bus] fix-started publish failed: ${err instanceof Error ? err.message : String(err)}`);
   }
+  // Issue #293: register the run AFTER fix-started publishes so the on-disk
+  // entry is created exactly once per run lifecycle.
+  await registerRunSafe({
+    runId,
+    fixId,
+    repoId: repoName,
+    issueNumber: issue.number,
+    startedAt: new Date().toISOString(),
+    status: 'running',
+  });
 
   // Pre-flight: validate isolation mode is available
   const isolationCheck = await validateIsolation(config.isolation);
@@ -458,7 +506,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
     _activeFixes--;
     metrics.setActiveFixes(_activeFixes);
     closeFileLogger();
-    publishFixDone('failed', { totalCostUsd: 0, reason: errorMsg });
+    await publishFixDone('failed', { totalCostUsd: 0, reason: errorMsg });
     return { success: false, error: errorMsg, state };
   }
 
@@ -1674,7 +1722,7 @@ export async function fix(options: FixOptions): Promise<FixResult> {
             ? 'done_with_known_issues'
             : 'done'
           : 'failed';
-      publishFixDone(outcome, {
+      await publishFixDone(outcome, {
         totalCostUsd: totalCost,
         ...(prNumberForEvent != null ? { prNumber: prNumberForEvent } : {}),
         ...(state.error != null ? { reason: state.error } : {}),
