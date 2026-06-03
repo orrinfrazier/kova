@@ -28,6 +28,15 @@ npm run build          # Compile TypeScript
 - Precedence: CLI flag > per-repo `runtime:` > `'pi'`
 - **In-process `AgentTool[]` implementations are pi-mono-only.** Any custom `tools[]` passed to `spawnWaveAgent` (or registered via `getWaveTools`) executes only on the pi-mono runtime. The `claude-cli` subprocess sees only its built-in allowlist + the MCP server map kova forwards via `--mcp-config`. If you depend on a custom in-process tool, stay on `runtime: pi` or surface that tool via MCP. See `src/ai/runtime/claude-cli-runtime.ts` (top-of-file note) and `src/ai/runtime/resolver.ts` for the seam.
 
+## Consensus pool routing (#261)
+
+- Flags on `kova fix`: `--consensus [--pool <spec>] [--consensus-waves <waves>]`
+- `--pool` defaults to `'diverse'` (anthropic+openai+google); accepts `'diverse'` or a comma-separated `provider:model` list (2-5 members per `WaveConsensusConfigSchema`). Tier strings (`small|medium|large`) are also accepted as pool members.
+- `--consensus-waves` defaults to `assess,spec,review`; accepts any subset of `assess|spec|test|impl|quality|review`.
+- Effect: the named waves dispatch through `spawnConsensusWave` (3-way reviewer pool + adjudicator) instead of `dispatchSpawnWave` / `dispatchExecuteWave`. The adjudicator stays at the schema default (`'large'`, typically opus). Cost is ~Nx on the chosen waves where N = pool size.
+- Plumbing seam: `src/pipeline/consensus-flags.ts` (parsers + applier), `src/cli/index.ts` (flag declarations), `src/pipeline/fix.ts` (`FixOptions.consensusPool` + `FixOptions.consensusWaves` defense-in-depth), `src/pipeline/engines/{assess,spec}.ts` + `src/pipeline/loops.ts:dispatchReviewWave` (the `isConsensusPool` dispatch branch).
+- Telemetry: `WaveResult.consensus` (#262) carries pool ids, adjudicator id, agreement classification, rejected count, and degraded flag. Disagreement audit log lands at `.kova/consensus_disagreements.jsonl`.
+
 ## Key patterns
 
 - Waves are strictly sequential (no parallel waves)

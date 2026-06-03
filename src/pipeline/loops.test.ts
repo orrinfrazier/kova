@@ -7,6 +7,13 @@ vi.mock('../ai/index.js', async (importOriginal) => {
   return {
     executeWaveWithRetry: vi.fn(),
     resolveThinkingLevel: actual.resolveThinkingLevel,
+    // #261 — review-wave consensus branch needs these to resolve a single-model
+    // wave config back to the legacy path. Forwarded verbatim from the actual
+    // module so the predicate keeps the same shape behavior tests rely on.
+    isConsensusPool: actual.isConsensusPool,
+    resolveConsensusPool: actual.resolveConsensusPool,
+    getModelString: actual.getModelString,
+    buildWaveSessionId: actual.buildWaveSessionId,
   };
 });
 

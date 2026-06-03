@@ -8,8 +8,21 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { z } from 'zod';
-import { buildWaveSessionId, type OutputFormat, resolveThinkingLevel } from '../ai/index.js';
+import {
+  buildWaveSessionId,
+  getModelString,
+  isConsensusPool,
+  type OutputFormat,
+  resolveConsensusPool,
+  resolveThinkingLevel,
+} from '../ai/index.js';
+import {
+  type ConsensusWaveHandoff,
+  type SpawnConsensusWaveConfig,
+  spawnConsensusWave,
+} from '../ai/parallel-executor.js';
 import { dispatchExecuteWave, type SandboxContext } from '../sandbox/dispatch.js';
+import { appendConsensusDisagreement } from '../services/consensus-disagreements.js';
 import { detectTooling } from '../services/language-detect.js';
 import type { ProjectContext } from '../services/project-context.js';
 import { compareBaselineFailures } from '../services/review-baseline.js';
@@ -1446,6 +1459,99 @@ function applyClassifyInlineGate(knownIssues: ReviewFinding[], repoConfig: RepoC
 
 // --- Review Loop Controller ---
 
+/**
+ * Review-wave dispatcher (#261). Branches on `isConsensusPool(repoConfig.model.review)`:
+ *   - Single-model path: existing `dispatchExecuteWave` (unchanged contract).
+ *   - Consensus path: `spawnConsensusWave` with the same prompt, then convert
+ *     the resulting `ConsensusWaveHandoff` into the same shape `dispatchExecuteWave`
+ *     returns so the loop's downstream code (verdict propagation, override gate,
+ *     toWaveResult projection) stays oblivious to the routing.
+ *
+ * Disagreement-log callback writes `.kova/consensus_disagreements.jsonl` (#262).
+ */
+async function dispatchReviewWave(args: {
+  repoConfig: RepoConfig;
+  systemPrompt: string;
+  userMessage: string;
+  cwd: string;
+  sessionId?: string | undefined;
+  sandbox?: SandboxContext | undefined;
+  playwright?: { enabled: boolean } | undefined;
+}): Promise<{
+  result: string | null;
+  success: boolean;
+  duration: number;
+  cost: number;
+  turns: number;
+  model?: string | undefined;
+  provider?: string | undefined;
+  structuredOutput?: unknown;
+  consensus?: import('../types/index.js').WaveResultConsensus | undefined;
+}> {
+  const { repoConfig, systemPrompt, userMessage, cwd, sessionId, sandbox, playwright } = args;
+  const waveConfig = repoConfig.model.review;
+  const thinkingLevel = resolveThinkingLevel(repoConfig, 'review');
+
+  if (isConsensusPool(waveConfig)) {
+    const { pool, adjudicator } = resolveConsensusPool(waveConfig);
+    const poolModels = pool.map(getModelString);
+    const adjudicatorModel = getModelString(adjudicator);
+    const startedAt = Date.now();
+    const handoff = (await spawnConsensusWave({
+      wave: 'review',
+      poolModels,
+      adjudicatorModel,
+      tools: [],
+      systemPrompt,
+      handoffContext: '',
+      userMessage,
+      cwd,
+      ...(thinkingLevel != null && { thinkingLevel }),
+      outputFormat: reviewOutputFormat(),
+      ...(sessionId != null && { sessionId }),
+      appendDisagreement: (record) => appendConsensusDisagreement(repoConfig.path, record),
+    } satisfies SpawnConsensusWaveConfig)) as ConsensusWaveHandoff<ReviewResult>;
+
+    // Project ConsensusMetadata onto WaveResultConsensus so toWaveResult picks
+    // it up. Mirrors the projection fix.ts:431-450 performs (#262).
+    const consensus = {
+      pool: handoff.consensus.pool_results.map((r) => r.model),
+      adjudicator: handoff.consensus.adjudicator_model,
+      agreement: handoff.consensus.agreement,
+      rejected_count: handoff.consensus.pool_results.filter((r) => r.status === 'dropped').length,
+      degraded: handoff.consensus.degraded,
+    };
+
+    return {
+      result: typeof handoff.artifact === 'string' ? handoff.artifact : JSON.stringify(handoff.artifact),
+      success: true,
+      duration: Date.now() - startedAt,
+      cost: handoff.cost,
+      turns: handoff.turns,
+      model: handoff.model,
+      structuredOutput: handoff.artifact,
+      consensus,
+    };
+  }
+
+  // Single-model path: existing dispatchExecuteWave behavior.
+  return dispatchExecuteWave(
+    {
+      wave: 'review',
+      systemPrompt,
+      userMessage,
+      cwd,
+      modelTier: waveConfig,
+      outputFormat: reviewOutputFormat(),
+      thinkingLevel,
+      customTools: repoConfig.tools,
+      ...(playwright != null && { playwright }),
+      ...(sessionId != null && { sessionId }),
+    },
+    sandbox,
+  );
+}
+
 export async function runReviewLoop(config: ReviewLoopConfig): Promise<ReviewLoopResult> {
   const {
     issue,
@@ -1588,21 +1694,15 @@ export async function runReviewLoop(config: ReviewLoopConfig): Promise<ReviewLoo
       ...(regressionSurfaceContext != null && { regressionSurfaceContext }),
     });
     const reviewUserMessage = prescanContext != null ? `${prescanContext}\n\n${baseUserMessage}` : baseUserMessage;
-    const reviewExecResult = await dispatchExecuteWave(
-      {
-        wave: 'review',
-        systemPrompt: reviewSystemPrompt,
-        userMessage: reviewUserMessage,
-        cwd: workDir,
-        modelTier: repoConfig.model.review,
-        outputFormat: reviewOutputFormat(),
-        thinkingLevel: resolveThinkingLevel(repoConfig, 'review'),
-        customTools: repoConfig.tools,
-        playwright: config.playwright,
-        ...(reviewSessionId != null && { sessionId: reviewSessionId }),
-      },
+    const reviewExecResult = await dispatchReviewWave({
+      repoConfig,
+      systemPrompt: reviewSystemPrompt,
+      userMessage: reviewUserMessage,
+      cwd: workDir,
+      ...(reviewSessionId != null && { sessionId: reviewSessionId }),
       sandbox,
-    );
+      playwright: config.playwright,
+    });
 
     reviewWaveResult = toWaveResult('review', reviewExecResult);
     totalCost += reviewExecResult.cost;
