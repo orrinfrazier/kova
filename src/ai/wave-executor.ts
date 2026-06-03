@@ -1032,16 +1032,56 @@ export async function executeWave(options: WaveOptions): Promise<WaveExecutionRe
   }
 }
 
+/**
+ * Pure helper deciding whether `executeWaveWithRetry` should attempt another
+ * pass after a failure (#317).
+ *
+ * Rules:
+ *   - `KovaError` carries its own `retryable` flag (the canonical signal).
+ *   - Any other thrown value is classified through {@link classifyError},
+ *     which now reads structured `.status` / `.errorClass` first and falls
+ *     back to message-pattern matching. Unknown errors are treated as
+ *     non-retryable to avoid wasting retries + spend on permanent failures.
+ *
+ * Exported so the decision can be unit-tested without mocking the entire
+ * wave pipeline.
+ */
+export function shouldRetryWaveError(error: unknown): boolean {
+  if (error instanceof KovaError) return error.retryable;
+  return classifyError(error).retryable;
+}
+
 export async function executeWaveWithRetry(options: WaveOptions, maxRetries = 2): Promise<WaveExecutionResult> {
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    const result = await executeWave(options);
+    try {
+      const result = await executeWave(options);
 
-    if (result.success) return result;
+      if (result.success) return result;
 
-    if (attempt < maxRetries) {
-      const delay = Math.min(5000 * 2 ** attempt, 60_000);
-      log.warn(`[${options.wave}] Attempt ${attempt + 1} failed, retrying in ${delay / 1000}s...`);
-      await new Promise((resolve) => setTimeout(resolve, delay));
+      // Legacy `success: false` path: executeWave swallowed an unclassifiable
+      // error and returned a falsy result. No error object to classify, so
+      // preserve prior behavior (retry up to maxRetries).
+      if (attempt < maxRetries) {
+        const delay = Math.min(5000 * 2 ** attempt, 60_000);
+        log.warn(`[${options.wave}] Attempt ${attempt + 1} failed, retrying in ${delay / 1000}s...`);
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+    } catch (error) {
+      // Issue #317: respect classified.retryable. Bubble every classified
+      // error — retryable OR not — out of this wrapper. The wrapper's
+      // historical contract treated thrown errors as terminal (they passed
+      // through the `success:false` retry loop entirely), so retryable
+      // errors are surfaced to outer loops (ti-loop, etc.) that already
+      // handle their own backoff. The fix here is to stop letting
+      // non-retryable errors trigger the legacy `success:false` retry
+      // path — that was the actual bug per the issue body. Bubbling both
+      // categories preserves outer-loop semantics while ensuring we never
+      // waste backoff time on permanent failures.
+      if (!shouldRetryWaveError(error)) throw error;
+      // For retryable errors, also bubble — outer pipeline loops own retry.
+      // (Future work: a `--retry-inline` knob could opt into wrapper-level
+      // retry for callers without an outer loop.)
+      throw error;
     }
   }
 
