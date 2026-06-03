@@ -386,9 +386,18 @@ async function spawnWave<T>(
   return { handoff, promptHash };
 }
 
-/** Convert a WaveHandoff to WaveResult for checkpoint/cost-report compatibility. */
-function handoffToResult(handoff: WaveHandoff, provider?: string, promptHash?: string): WaveResult {
-  return {
+/** Convert a WaveHandoff to WaveResult for checkpoint/cost-report compatibility.
+ *
+ *  Exported for unit testing the consensus-telemetry propagation contract
+ *  (#262). Callers within this module use it directly.
+ *
+ *  When the handoff carries a `consensus` property (only emitted by
+ *  `spawnConsensusWave`), project it into `WaveResult.consensus` so the
+ *  multi-model telemetry survives the WaveResult round-trip. Single-model
+ *  handoffs leave `WaveResult.consensus` undefined — existing consumers are
+ *  unaffected. */
+export function handoffToResult(handoff: WaveHandoff, provider?: string, promptHash?: string): WaveResult {
+  const result: WaveResult = {
     wave: handoff.wave,
     success: true,
     artifact: handoff.artifact,
@@ -403,6 +412,31 @@ function handoffToResult(handoff: WaveHandoff, provider?: string, promptHash?: s
     structured_output_metrics: handoff.structured_output_metrics,
     toolCallCounts: handoff.toolCallCounts,
   };
+  // Structural check: ConsensusWaveHandoff extends WaveHandoff with a
+  // `consensus` member of shape `ConsensusMetadata`. We project the relevant
+  // fields onto the flattened `WaveResultConsensus` telemetry shape — pool
+  // becomes the list of pool model ids in input order, rejected_count is
+  // recomputed (not stored on ConsensusMetadata directly; see #262 spec).
+  const consensus = (handoff as unknown as { consensus?: import('../ai/parallel-executor.js').ConsensusMetadata })
+    .consensus;
+  if (consensus != null) {
+    result.consensus = {
+      pool: consensus.pool_results.map((r) => r.model),
+      adjudicator: consensus.adjudicator_model,
+      agreement: consensus.agreement,
+      // `rejected_count` is reported via the disagreement log record in
+      // `spawnConsensusWave` (which has access to the artifacts). At this
+      // mapping layer we don't have the raw artifacts anymore — but we DO
+      // know the answer when the handoff itself was produced by a consensus
+      // wave: the count is computed below the handoff layer. For now, default
+      // to 0 here; pipeline call sites that own the disagreement log can
+      // overwrite `result.consensus.rejected_count` when they construct the
+      // WaveResult. See the WaveResultConsensus jsdoc on config.ts.
+      rejected_count: 0,
+      degraded: consensus.degraded,
+    };
+  }
+  return result;
 }
 
 /** Convert a WaveResult to WaveHandoff for persistence. */

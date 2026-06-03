@@ -601,6 +601,25 @@ export interface StructuredOutputMetrics {
   zod_validation_failed?: boolean | undefined;
 }
 
+/**
+ * Per-wave consensus telemetry (issue #262). Populated only when the wave
+ * was run via `spawnConsensusWave` (3-way reviewer pool + adjudicator); absent
+ * for single-model waves so the existing single-model consumers stay
+ * unaffected. The shape is a flattened projection of `ConsensusMetadata`
+ * (parallel-executor.ts) tuned for telemetry — `pool` holds model ids in
+ * pool order, `adjudicator` is the round-trip `provider:id`, `agreement` is
+ * the classifier output, `rejected_count` is the number of surviving pool
+ * members whose artifacts diverged from the adjudicator, and `degraded` is
+ * true when any pool member dropped after retry.
+ */
+export interface WaveResultConsensus {
+  pool: string[];
+  adjudicator: string;
+  agreement: 'unanimous' | 'majority' | 'split';
+  rejected_count: number;
+  degraded: boolean;
+}
+
 export interface WaveResult {
   wave: WaveName;
   success: boolean;
@@ -625,6 +644,12 @@ export interface WaveResult {
    * context-on vs context-off delta.
    */
   toolCallCounts?: { total: number; reads: number; byTool: Record<string, number> } | undefined;
+  /**
+   * Per-wave consensus telemetry (issue #262). Populated only when the wave
+   * ran through a pool/adjudicator (`spawnConsensusWave`); absent for
+   * single-model waves so existing consumers keep working with no changes.
+   */
+  consensus?: WaveResultConsensus | undefined;
 }
 
 export interface FailedPiece {
