@@ -24,7 +24,6 @@ import {
 import { dispatchExecuteWave, type SandboxContext } from '../sandbox/dispatch.js';
 import { appendConsensusDisagreement } from '../services/consensus-disagreements.js';
 import { detectTooling } from '../services/language-detect.js';
-import type { ProjectContext } from '../services/project-context.js';
 import { compareBaselineFailures } from '../services/review-baseline.js';
 import { scanDiffForBlockingFindings } from '../services/review-prescan.js';
 import type {
@@ -43,6 +42,7 @@ import { ReviewResultSchema } from '../types/index.js';
 import { log } from '../utils/logger.js';
 import { executePiecesInBatches } from './batch-scheduler.js';
 import { buildPieceContext, buildWaveContext } from './context.js';
+import type { ProjectContext } from './project-context.js';
 import { loadPrompt, resolvePromptsDir } from './prompts.js';
 import { classifyReviewFindings } from './review-classifier.js';
 import { loadReviewPersonaPrompt, selectReviewerPersona } from './review-persona.js';

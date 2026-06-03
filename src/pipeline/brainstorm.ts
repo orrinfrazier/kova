@@ -26,10 +26,10 @@ import {
   formatSameRepoContext,
   type ProposalSkipEntry,
 } from '../services/cross-repo-issues.js';
-import { loadProjectContext } from '../services/project-context.js';
 import type { BrainstormIssue, BrainstormResult, CoverageEntry, RepoConfig } from '../types/index.js';
 import { BrainstormResultSchema } from '../types/index.js';
 import { log } from '../utils/logger.js';
+import { loadProjectContext } from './project-context.js';
 import { loadPrompt, resolvePromptsDir } from './prompts.js';
 import { buildRuntimeFactory, resolveRuntimeKind } from './runtime-select.js';
 import { loadWaveSkills } from './skills-loader.js';

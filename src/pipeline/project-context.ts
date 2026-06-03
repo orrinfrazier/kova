@@ -3,7 +3,7 @@
 
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { truncateToTokenBudget } from '../pipeline/context.js';
+import { truncateToTokenBudget } from './context.js';
 
 export interface ProjectContext {
   claudeMd: string;

@@ -15,8 +15,8 @@
 //   4. If neither matches, return 'generalist'.
 
 import { fs, path } from 'zx';
-import type { ProjectContext } from '../services/project-context.js';
 import type { CustomTool } from '../types/index.js';
+import type { ProjectContext } from './project-context.js';
 import { loadPrompt } from './prompts.js';
 
 export type ReviewerPersona = 'security' | 'performance' | 'architecture' | 'generalist';

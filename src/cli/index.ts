@@ -32,6 +32,7 @@ import { PIPELINE_MODES } from '../pipeline/mode.js';
 import { exportPrompts } from '../pipeline/prompts.js';
 import { gatherStatus, printStatusDashboard } from '../pipeline/status.js';
 import { runSupervised } from '../pipeline/supervised.js';
+import { buildSandboxImage } from '../sandbox/sandbox.js';
 import { approveIssues } from '../services/approval.js';
 import {
   detectRepoName,
@@ -51,7 +52,6 @@ import { createIssue, fetchIssue, hasExistingWork } from '../services/github.js'
 import { computeStats, formatHistoryTable, formatStatsTable, readHistory } from '../services/history.js';
 import { initMetrics, shutdownMetrics } from '../services/metrics.js';
 import { collectChangedFiles, reindexFiles } from '../services/reindex.js';
-import { buildSandboxImage } from '../services/sandbox.js';
 import {
   exitCodeForSignal,
   getShutdownSignal,

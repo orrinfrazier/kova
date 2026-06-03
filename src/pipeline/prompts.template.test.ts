@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { ProjectContext } from '../services/project-context.js';
 import type { CustomTool } from '../types/index.js';
+import type { ProjectContext } from './project-context.js';
 import { loadPrompt } from './prompts.js';
 
 const sampleContext: ProjectContext = {

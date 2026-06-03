@@ -22,10 +22,10 @@ import {
   type WaveExecutionResult,
   type WaveOptions,
 } from '../ai/index.js';
-import { execWaveInContainer, type SandboxWaveInput } from '../services/sandbox.js';
 import type { WaveHandoff, WaveName } from '../types/index.js';
 import { log } from '../utils/logger.js';
 import type { SandboxBackend, SandboxBackendWaveInput } from './backend.js';
+import { execWaveInContainer, type SandboxWaveInput } from './sandbox.js';
 
 /** Sandbox routing context — when present, dispatch routes through the docker container or a SandboxBackend. */
 export interface SandboxContext {
@@ -131,7 +131,7 @@ export async function dispatchSpawnWave<T = unknown>(
     log.info(`[sandbox] Routing wave '${config.wave}' through backend.execWave (workspace ${sandbox.containerName})`);
     // SandboxBackendWaveInput has the same runtime shape as SandboxWaveInput — the
     // interface alias just keeps the backend abstraction independent of the
-    // services/sandbox.ts wire type. Pass the same object both paths see.
+    // sandbox/sandbox.ts wire type. Pass the same object both paths see.
     raw = await sandbox.backend.execWave(input as SandboxBackendWaveInput);
   } else {
     log.info(`[sandbox] Routing wave '${config.wave}' through container ${sandbox.containerName}`);
@@ -200,7 +200,7 @@ export async function dispatchExecuteWave(
       const raw = usingBackend
         ? // SandboxBackendWaveInput and SandboxWaveInput have identical runtime shape;
           // the interface alias keeps the backend abstraction free of the docker-side
-          // services/sandbox.ts type.
+          // sandbox/sandbox.ts type.
           await (sandbox.backend as SandboxBackend).execWave(input as SandboxBackendWaveInput)
         : await execWaveInContainer(sandbox.containerName, input, sandbox.repoPath, sandbox.dockerCommand);
       const handoff = raw as WaveHandoff;
