@@ -43,13 +43,13 @@ vi.mock('@earendil-works/pi-coding-agent', async (importOriginal) => {
 const mockCreatePR = vi.fn().mockResolvedValue('https://github.com/test/repo/pull/99');
 const mockListOpenPRs = vi.fn().mockResolvedValue([]);
 const mockCommentOnIssue = vi.fn().mockResolvedValue(undefined);
-vi.mock('../services/github.js', () => ({
+vi.mock('../vcs/github.js', () => ({
   listOpenPRs: (...args: unknown[]) => mockListOpenPRs(...args),
   createPR: (...args: unknown[]) => mockCreatePR(...args),
   commentOnIssue: (...args: unknown[]) => mockCommentOnIssue(...args),
 }));
 
-vi.mock('../services/language-detect.js', () => ({
+vi.mock('../core/language-detect.js', () => ({
   detectTooling: vi.fn().mockResolvedValue({ language: 'typescript', testRunner: 'vitest', linter: 'biome' }),
   formatToolingContext: vi.fn().mockReturnValue('Language: typescript\nTest runner: vitest\nLinter: biome'),
 }));
@@ -61,8 +61,8 @@ const mockCommitAndPush = vi.fn().mockResolvedValue({
   filesStaged: ['src/validate.ts'],
   commitMessage: 'fix: Fix login bug (#42)',
 });
-vi.mock('../services/worktree.js', async (importOriginal) => {
-  const original = await importOriginal<typeof import('../services/worktree.js')>();
+vi.mock('../vcs/worktree.js', async (importOriginal) => {
+  const original = await importOriginal<typeof import('../vcs/worktree.js')>();
   return {
     ...original,
     createWorktree: (...args: unknown[]) => mockCreateWorktree(...args),
@@ -72,7 +72,7 @@ vi.mock('../services/worktree.js', async (importOriginal) => {
   };
 });
 
-vi.mock('../services/conflict-check.js', () => ({
+vi.mock('../vcs/conflict-check.js', () => ({
   checkForConflicts: vi.fn().mockResolvedValue({
     hasConflicts: false,
     conflictingFiles: [],
@@ -81,12 +81,12 @@ vi.mock('../services/conflict-check.js', () => ({
   }),
 }));
 
-vi.mock('../services/conflict-resolver.js', () => ({
+vi.mock('../vcs/conflict-resolver.js', () => ({
   resolveConflicts: vi.fn().mockResolvedValue({ resolved: true, filesResolved: [] }),
 }));
 
 const { fix } = await import('../pipeline/fix.js');
-const { loadCheckpoint } = await import('../services/checkpoint.js');
+const { loadCheckpoint } = await import('../pipeline/checkpoint.js');
 
 // ---------------------------------------------------------------------------
 // Integration test suite

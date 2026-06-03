@@ -10,10 +10,10 @@
 // the full STIR pipeline (Assess → Spec → ...) per review comment is wasteful.
 
 import { $ } from 'zx';
-import type { DispatchEdits, DispatchEditsInput, DispatchEditsResult } from '../services/review-resolver.js';
-import { getChangedFiles } from '../services/worktree.js';
 import type { Issue, RepoConfig } from '../types/index.js';
 import { log } from '../utils/logger.js';
+import { getChangedFiles } from '../vcs/worktree.js';
+import type { DispatchEdits, DispatchEditsInput, DispatchEditsResult } from './review-resolver.js';
 
 export interface BabysitDispatchOptions {
   config: RepoConfig;

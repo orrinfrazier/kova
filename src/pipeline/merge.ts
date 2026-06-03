@@ -1,6 +1,8 @@
 // Merge pipeline — process kova PR stack in dependency order.
 
-import { resolveNonOverlappingConflicts } from '../services/conflict-resolver.js';
+import type { RepoConfig } from '../types/config.js';
+import { log } from '../utils/logger.js';
+import { resolveNonOverlappingConflicts } from '../vcs/conflict-resolver.js';
 import {
   fetchKovaPRsWithStatus,
   fetchPRReviewState,
@@ -8,10 +10,8 @@ import {
   mergePR,
   type PRReviewState,
   rebasePROnDefault,
-} from '../services/github.js';
-import { detectDefaultBranch } from '../services/worktree.js';
-import type { RepoConfig } from '../types/config.js';
-import { log } from '../utils/logger.js';
+} from '../vcs/github.js';
+import { detectDefaultBranch } from '../vcs/worktree.js';
 
 /**
  * Optional callback for resolving outstanding review threads before merging.

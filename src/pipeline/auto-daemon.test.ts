@@ -7,9 +7,9 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { createDaemonServer, type DaemonServer } from '../services/daemon.js';
-import type { FixRequest } from '../services/fix-queue.js';
+import { createDaemonServer, type DaemonServer } from '../core/daemon.js';
 import { maybeSubmitToDaemon } from './auto-daemon.js';
+import type { FixRequest } from './fix-queue.js';
 
 describe('maybeSubmitToDaemon', () => {
   let homeDir: string;

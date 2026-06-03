@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import { extractPRFromResult, formatPRContext, type OpenPR } from '../services/pr-context.js';
 import type { Issue } from '../types/index.js';
+import { extractPRFromResult, formatPRContext, type OpenPR } from '../vcs/pr-context.js';
 
 // Test formatPRContext independently
 describe('formatPRContext', () => {
@@ -147,8 +147,8 @@ vi.mock('./loops.js', () => ({
 
 // Test that fix() passes PR context to spec and impl waves
 describe('fix — PR context injection', () => {
-  vi.mock('../services/github.js', async (importOriginal) => {
-    const original = await importOriginal<typeof import('../services/github.js')>();
+  vi.mock('../vcs/github.js', async (importOriginal) => {
+    const original = await importOriginal<typeof import('../vcs/github.js')>();
     return {
       ...original,
       listOpenPRs: vi.fn().mockResolvedValue([]),
@@ -157,13 +157,13 @@ describe('fix — PR context injection', () => {
     };
   });
 
-  vi.mock('../services/language-detect.js', () => ({
+  vi.mock('../core/language-detect.js', () => ({
     detectTooling: vi.fn().mockResolvedValue({ language: 'typescript', testRunner: 'vitest' }),
     formatToolingContext: vi.fn().mockReturnValue('Language: typescript'),
   }));
 
-  vi.mock('../services/worktree.js', async (importOriginal) => {
-    const original = await importOriginal<typeof import('../services/worktree.js')>();
+  vi.mock('../vcs/worktree.js', async (importOriginal) => {
+    const original = await importOriginal<typeof import('../vcs/worktree.js')>();
     return {
       ...original,
       createWorktree: vi.fn().mockImplementation((_repoPath: string, issueNumber: number) => ({

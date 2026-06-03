@@ -13,6 +13,17 @@
 import { resolve } from 'node:path';
 import { Command } from 'commander';
 import { RUNTIME_KINDS, type RuntimeKind, validateModelConfig } from '../ai/index.js';
+import { detectRepoName, findRepoByName, loadConfig, resolveConfigPath, resolveRepoConfig } from '../core/config.js';
+import {
+  exitCodeForSignal,
+  getShutdownSignal,
+  installSignalHandlers,
+  removeSignalHandlers,
+  shutdownRequested,
+} from '../core/shutdown.js';
+import { createWebhookServer } from '../core/webhook-server.js';
+import { collectChangedFiles, reindexFiles } from '../memory/reindex.js';
+import { approveIssues } from '../pipeline/approval.js';
 import { runAuto, runAutoMultiRepo, runAutoMultiRepoParallel } from '../pipeline/auto.js';
 import { runBabysit } from '../pipeline/babysit.js';
 import { makeRunReviewLoopDispatch, previewDispatch } from '../pipeline/babysit-dispatch.js';
@@ -24,6 +35,13 @@ import {
   parseConsensusWavesList,
   parsePoolSpec,
 } from '../pipeline/consensus-flags.js';
+import {
+  buildSchedulerConfig,
+  listSchedules,
+  runSchedulerForever,
+  type SchedulerJobInvocation,
+  type SchedulerJobRunner,
+} from '../pipeline/cron-scheduler.js';
 import { fix } from '../pipeline/fix.js';
 import { indexCodebase } from '../pipeline/index-codebase.js';
 import { fixLoop } from '../pipeline/loop.js';
@@ -33,35 +51,11 @@ import { exportPrompts } from '../pipeline/prompts.js';
 import { gatherStatus, printStatusDashboard } from '../pipeline/status.js';
 import { runSupervised } from '../pipeline/supervised.js';
 import { buildSandboxImage } from '../sandbox/sandbox.js';
-import { approveIssues } from '../services/approval.js';
-import {
-  detectRepoName,
-  findRepoByName,
-  loadConfig,
-  resolveConfigPath,
-  resolveRepoConfig,
-} from '../services/config.js';
-import {
-  buildSchedulerConfig,
-  listSchedules,
-  runSchedulerForever,
-  type SchedulerJobInvocation,
-  type SchedulerJobRunner,
-} from '../services/cron-scheduler.js';
-import { createIssue, fetchIssue, hasExistingWork } from '../services/github.js';
-import { computeStats, formatHistoryTable, formatStatsTable, readHistory } from '../services/history.js';
-import { initMetrics, shutdownMetrics } from '../services/metrics.js';
-import { collectChangedFiles, reindexFiles } from '../services/reindex.js';
-import {
-  exitCodeForSignal,
-  getShutdownSignal,
-  installSignalHandlers,
-  removeSignalHandlers,
-  shutdownRequested,
-} from '../services/shutdown.js';
-import { createWebhookServer } from '../services/webhook-server.js';
+import { computeStats, formatHistoryTable, formatStatsTable, readHistory } from '../telemetry/history.js';
+import { initMetrics, shutdownMetrics } from '../telemetry/metrics.js';
 import type { KovaConfig, PipelineMode, RepoConfig } from '../types/index.js';
 import { log, setLevel } from '../utils/logger.js';
+import { createIssue, fetchIssue, hasExistingWork } from '../vcs/github.js';
 import { attach, formatEventLine } from './attach.js';
 import { formatLsTable, gatherLs } from './ls.js';
 import { registerOllamaProvidersFromConfig } from './ollama-wiring.js';
@@ -730,7 +724,7 @@ program
     const port = Number.parseInt(opts.port ?? '3000', 10);
 
     // Build the fix queue + server
-    const { createFixQueue } = await import('../services/fix-queue.js');
+    const { createFixQueue } = await import('../pipeline/fix-queue.js');
     const queue = createFixQueue(async (request) => {
       try {
         const issue = await fetchIssue(repoPath, request.issueNumber);
@@ -767,7 +761,7 @@ program
     // clients can stream live events from this daemon. The bus is the same
     // one fix.ts publishes to (getDefaultEventBus), so there's no extra
     // wiring on the publisher side.
-    const { getDefaultEventBus } = await import('../services/event-bus/index.js');
+    const { getDefaultEventBus } = await import('../telemetry/event-bus/index.js');
     const server = createWebhookServer({
       secret,
       port,
@@ -875,7 +869,7 @@ program
       console.error('kova send: hint must be non-empty');
       process.exit(1);
     }
-    const { defaultSocketPath, isDaemonRunning, sendSteerToDaemon } = await import('../services/daemon-client.js');
+    const { defaultSocketPath, isDaemonRunning, sendSteerToDaemon } = await import('../core/daemon-client.js');
     const socketPath = defaultSocketPath();
     if (!(await isDaemonRunning(socketPath))) {
       console.error('kova send: daemon is not running (start it with `kova daemon start`)');
@@ -899,7 +893,7 @@ program
   .command('kill <fix-id>')
   .description('Abort a single live fix without affecting siblings (kova daemon must be running)')
   .action(async (fixId: string) => {
-    const { defaultSocketPath, isDaemonRunning, sendAbortToDaemon } = await import('../services/daemon-client.js');
+    const { defaultSocketPath, isDaemonRunning, sendAbortToDaemon } = await import('../core/daemon-client.js');
     const socketPath = defaultSocketPath();
     if (!(await isDaemonRunning(socketPath))) {
       console.error('kova kill: daemon is not running (start it with `kova daemon start`)');
@@ -1109,7 +1103,7 @@ program
   .option('--since <duration>', 'Only include runs newer than N (e.g. 7d, 24h, 2w, or ISO date)')
   .option('--json', 'Emit a single JSON object instead of a text report')
   .action(async (opts: { repo?: string; since?: string; json?: boolean }) => {
-    const { analyzeReflect, formatReflectReport, parseSinceFlag } = await import('../services/reflect.js');
+    const { analyzeReflect, formatReflectReport, parseSinceFlag } = await import('../pipeline/reflect.js');
 
     const kovaConfig = await tryLoadConfig(program.opts().config);
     const { repoPath } = resolveRepo(opts.repo ?? '.', kovaConfig);
@@ -1162,8 +1156,8 @@ prompts
     const kovaConfig = await tryLoadConfig(program.opts().config);
     const { repoPath } = resolveRepo(opts.repo ?? '.', kovaConfig);
 
-    const { getVersionHistory } = await import('../services/prompt-versions.js');
-    const { formatPromptHistory } = await import('../services/prompt-versions-display.js');
+    const { getVersionHistory } = await import('../memory/prompt-versions.js');
+    const { formatPromptHistory } = await import('../pipeline/prompt-versions-display.js');
     const versions = await getVersionHistory(repoPath, opts.wave);
     console.log(formatPromptHistory(versions));
   });
@@ -1176,7 +1170,7 @@ prompts
     const kovaConfig = await tryLoadConfig(program.opts().config);
     const { repoPath } = resolveRepo(opts.repo ?? '.', kovaConfig);
 
-    const { diffVersions } = await import('../services/prompt-versions.js');
+    const { diffVersions } = await import('../memory/prompt-versions.js');
     const diff = await diffVersions(repoPath, hash1, hash2);
 
     if (diff === null) {
@@ -1199,9 +1193,9 @@ prompts
     const kovaConfig = await tryLoadConfig(program.opts().config);
     const { repoPath } = resolveRepo(opts.repo ?? '.', kovaConfig);
 
-    const { readHistory } = await import('../services/history.js');
-    const { correlateByPromptVersion } = await import('../services/prompt-correlation.js');
-    const { formatPromptCorrelation } = await import('../services/prompt-versions-display.js');
+    const { readHistory } = await import('../telemetry/history.js');
+    const { correlateByPromptVersion } = await import('../telemetry/prompt-correlation.js');
+    const { formatPromptCorrelation } = await import('../pipeline/prompt-versions-display.js');
 
     const entries = await readHistory(repoPath);
     const stats = correlateByPromptVersion(entries);
@@ -1216,9 +1210,9 @@ prompts
     const kovaConfig = await tryLoadConfig(program.opts().config);
     const { repoPath } = resolveRepo(opts.repo ?? '.', kovaConfig);
 
-    const { readHistory } = await import('../services/history.js');
-    const { correlateByABTestVariant } = await import('../services/prompt-correlation.js');
-    const { formatABTestStats } = await import('../services/prompt-versions-display.js');
+    const { readHistory } = await import('../telemetry/history.js');
+    const { correlateByABTestVariant } = await import('../telemetry/prompt-correlation.js');
+    const { formatABTestStats } = await import('../pipeline/prompt-versions-display.js');
 
     const entries = await readHistory(repoPath);
     const stats = correlateByABTestVariant(entries);
@@ -1238,9 +1232,9 @@ evalCmd
     const kovaConfig = await tryLoadConfig(program.opts().config);
     const { repoPath, repoName } = resolveRepo(opts.repo ?? '.', kovaConfig);
 
-    const { readHistory } = await import('../services/history.js');
+    const { readHistory } = await import('../telemetry/history.js');
     const { computeContextArmDelta, formatContextArmDelta, groupEntriesByContextArm } = await import(
-      '../services/eval-context-arm.js'
+      '../pipeline/eval-context-arm.js'
     );
 
     const entries = await readHistory(repoPath, { repo: repoName });
@@ -1340,7 +1334,7 @@ schedule
 
     try {
       if (opts.once) {
-        const { runSchedulerTick } = await import('../services/cron-scheduler.js');
+        const { runSchedulerTick } = await import('../pipeline/cron-scheduler.js');
         const fired = await runSchedulerTick(scheduleCfg, runner);
         log.info(`[scheduler] tick fired ${fired.length} job(s) — exiting (--once)`);
       } else {

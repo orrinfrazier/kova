@@ -18,7 +18,7 @@ vi.mock('../ai/index.js', async (importOriginal) => {
 });
 
 // Mock language detection
-vi.mock('../services/language-detect.js', () => ({
+vi.mock('../core/language-detect.js', () => ({
   detectTooling: vi.fn().mockResolvedValue({
     language: 'typescript',
     testRunner: 'vitest',
@@ -47,7 +47,7 @@ const {
   applyMidLoopDiagnosis,
 } = await import('./loops.js');
 const { executeWaveWithRetry } = await import('../ai/index.js');
-const { detectTooling } = await import('../services/language-detect.js');
+const { detectTooling } = await import('../core/language-detect.js');
 
 type TestRunner = (command: string, workDir: string) => Promise<{ passed: boolean; output: string; exitCode: number }>;
 

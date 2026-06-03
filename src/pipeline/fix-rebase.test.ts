@@ -19,7 +19,7 @@ const mockRecordConflictDetected = vi.fn();
 const mockRecordConflictResolved = vi.fn();
 const mockRecordConflictFailed = vi.fn();
 
-vi.mock('../services/metrics.js', () => ({
+vi.mock('../telemetry/metrics.js', () => ({
   recordWaveCompleted: (...args: unknown[]) => mockRecordWaveCompleted(...args),
   recordWaveDuration: (...args: unknown[]) => mockRecordWaveDuration(...args),
   recordIssueFixed: (...args: unknown[]) => mockRecordIssueFixed(...args),
@@ -105,13 +105,13 @@ vi.mock('./loops.js', () => ({
   runReviewLoop: (...args: unknown[]) => mockRunReviewLoop(...args),
 }));
 
-vi.mock('../services/github.js', () => ({
+vi.mock('../vcs/github.js', () => ({
   listOpenPRs: vi.fn().mockResolvedValue([]),
   createPR: vi.fn().mockResolvedValue('https://github.com/test/repo/pull/1'),
   commentOnIssue: vi.fn().mockResolvedValue(undefined),
 }));
 
-vi.mock('../services/language-detect.js', () => ({
+vi.mock('../core/language-detect.js', () => ({
   detectTooling: vi.fn().mockResolvedValue({ language: 'typescript', testRunner: 'vitest' }),
   formatToolingContext: vi.fn().mockReturnValue('Language: typescript'),
 }));
@@ -120,8 +120,8 @@ vi.mock('../services/language-detect.js', () => ({
 const mockRebaseOnDefault = vi.fn();
 const mockCommitAndPush = vi.fn();
 
-vi.mock('../services/worktree.js', async (importOriginal) => {
-  const original = await importOriginal<typeof import('../services/worktree.js')>();
+vi.mock('../vcs/worktree.js', async (importOriginal) => {
+  const original = await importOriginal<typeof import('../vcs/worktree.js')>();
   return {
     ...original,
     createWorktree: vi.fn().mockImplementation((_repoPath: string, issueNumber: number) => ({
@@ -138,7 +138,7 @@ vi.mock('../services/worktree.js', async (importOriginal) => {
 // --- Conflict resolver mock ---
 const mockResolveConflicts = vi.fn();
 
-vi.mock('../services/conflict-check.js', () => ({
+vi.mock('../vcs/conflict-check.js', () => ({
   checkForConflicts: vi.fn().mockResolvedValue({
     hasConflicts: false,
     conflictingFiles: [],
@@ -147,7 +147,7 @@ vi.mock('../services/conflict-check.js', () => ({
   }),
 }));
 
-vi.mock('../services/conflict-resolver.js', () => ({
+vi.mock('../vcs/conflict-resolver.js', () => ({
   resolveConflicts: (...args: unknown[]) => mockResolveConflicts(...args),
 }));
 
@@ -157,7 +157,7 @@ const mockProgressWaveCompleted = vi.fn().mockResolvedValue(undefined);
 const mockProgressComplete = vi.fn().mockResolvedValue(undefined);
 const mockProgressFailed = vi.fn().mockResolvedValue(undefined);
 
-vi.mock('../services/progress.js', () => ({
+vi.mock('./progress.js', () => ({
   ProgressTracker: vi.fn().mockImplementation(() => ({
     start: mockProgressStart,
     waveCompleted: mockProgressWaveCompleted,

@@ -7,7 +7,7 @@ vi.mock('./run-report.js', () => ({
   writeRunReport: vi.fn().mockResolvedValue(undefined),
 }));
 
-vi.mock('../services/github.js', () => ({
+vi.mock('../vcs/github.js', () => ({
   fetchIssue: vi.fn().mockImplementation((_repoPath: string, issueNumber: number) =>
     Promise.resolve({
       number: issueNumber,
@@ -46,13 +46,13 @@ vi.mock('./fix.js', () => ({
   })),
 }));
 
-vi.mock('../services/pr-context.js', () => ({
+vi.mock('../vcs/pr-context.js', () => ({
   fetchOpenPRsDetailed: vi.fn().mockResolvedValue([]),
   extractPRFromResult: vi.fn().mockReturnValue(undefined),
   formatPRContext: vi.fn().mockReturnValue(''),
 }));
 
-vi.mock('../services/shutdown.js', () => ({
+vi.mock('../core/shutdown.js', () => ({
   shutdownRequested: vi.fn().mockReturnValue(false),
   getShutdownSignal: vi.fn().mockReturnValue(undefined),
   installSignalHandlers: vi.fn(),
@@ -94,7 +94,7 @@ describe('fixByNumbers — core behavior', () => {
   });
 
   it('fetches each issue by number and calls fix() for each', async () => {
-    const { fetchIssue } = await import('../services/github.js');
+    const { fetchIssue } = await import('../vcs/github.js');
     const { fix } = await import('./fix.js');
 
     await fixByNumbers({
@@ -267,7 +267,7 @@ describe('fixByNumbers — shutdown check', () => {
   });
 
   it('stops when shutdownRequested returns true between issues', async () => {
-    const { shutdownRequested } = await import('../services/shutdown.js');
+    const { shutdownRequested } = await import('../core/shutdown.js');
     const shutdownMock = vi.mocked(shutdownRequested);
 
     // Return false for first issue, true after (stopping before second)
@@ -284,7 +284,7 @@ describe('fixByNumbers — shutdown check', () => {
   });
 
   it('checks shutdownRequested between each issue', async () => {
-    const { shutdownRequested } = await import('../services/shutdown.js');
+    const { shutdownRequested } = await import('../core/shutdown.js');
     const shutdownMock = vi.mocked(shutdownRequested);
     shutdownMock.mockReturnValue(false);
 
@@ -306,7 +306,7 @@ describe('fixByNumbers — PR context', () => {
   });
 
   it('loads open PRs for conflict awareness', async () => {
-    const { fetchOpenPRsDetailed } = await import('../services/pr-context.js');
+    const { fetchOpenPRsDetailed } = await import('../vcs/pr-context.js');
 
     await fixByNumbers({
       repoPath: '/tmp/test',
@@ -319,7 +319,7 @@ describe('fixByNumbers — PR context', () => {
   });
 
   it('passes loaded open PRs to fix() calls', async () => {
-    const { fetchOpenPRsDetailed } = await import('../services/pr-context.js');
+    const { fetchOpenPRsDetailed } = await import('../vcs/pr-context.js');
     const { fix } = await import('./fix.js');
 
     const openPRs = [
@@ -343,7 +343,7 @@ describe('fixByNumbers — PR context', () => {
   });
 
   it('accumulates new PRs from successful fixes and passes them to subsequent calls', async () => {
-    const { extractPRFromResult } = await import('../services/pr-context.js');
+    const { extractPRFromResult } = await import('../vcs/pr-context.js');
     const { fix } = await import('./fix.js');
     const fixMock = vi.mocked(fix);
 
@@ -499,7 +499,7 @@ describe('fixByNumbers — fetchIssue error handling', () => {
   });
 
   it('continues to next issue when fetchIssue throws (e.g., issue deleted)', async () => {
-    const { fetchIssue } = await import('../services/github.js');
+    const { fetchIssue } = await import('../vcs/github.js');
     const { fix } = await import('./fix.js');
     const fetchMock = vi.mocked(fetchIssue);
 

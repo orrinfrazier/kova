@@ -12,15 +12,15 @@ const { mockUpsertChunks, mockChunkFile, mockGetChangedFilesSince } = vi.hoisted
   mockGetChangedFilesSince: vi.fn().mockResolvedValue([]),
 }));
 
-vi.mock('../services/chunker.js', () => ({
+vi.mock('../memory/chunker.js', () => ({
   chunkFile: (...args: unknown[]) => mockChunkFile(...args),
 }));
 
-vi.mock('../services/memory/code-rest.js', () => ({
+vi.mock('../memory/code-rest.js', () => ({
   upsertChunks: (...args: unknown[]) => mockUpsertChunks(...args),
 }));
 
-vi.mock('../services/git-diff.js', () => ({
+vi.mock('../vcs/git-diff.js', () => ({
   getChangedFilesSince: (...args: unknown[]) => mockGetChangedFilesSince(...args),
   getCurrentHeadSha: vi.fn().mockResolvedValue('abc123'),
   getLastIndexedSha: vi.fn().mockResolvedValue(null),

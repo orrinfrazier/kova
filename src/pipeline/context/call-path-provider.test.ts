@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { callPathProvider } from './call-path-provider.js';
 import { makeAssessResult, makeCtx } from './test-helpers.js';
 
-vi.mock('../../services/codegraph/index.js', () => ({
+vi.mock('../../codegraph/index.js', () => ({
   openCodegraph: vi.fn(() => ({ close: () => {} })),
 }));
 
@@ -10,7 +10,7 @@ vi.mock('../call-path-context.js', () => ({
   resolveCallPaths: vi.fn(() => ''),
 }));
 
-import { openCodegraph } from '../../services/codegraph/index.js';
+import { openCodegraph } from '../../codegraph/index.js';
 import { resolveCallPaths } from '../call-path-context.js';
 
 describe('callPathProvider', () => {

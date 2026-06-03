@@ -10,7 +10,7 @@
  *     getDefaultEventBus() so existing CLI/test callers see no behavior change.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { EventBus, getDefaultEventBus } from '../services/event-bus/bus.js';
+import { EventBus, getDefaultEventBus } from '../telemetry/event-bus/bus.js';
 import type { Issue, RepoConfig } from '../types/index.js';
 
 vi.mock('./run-report.js', () => ({
@@ -22,7 +22,7 @@ vi.mock('./run-report.js', () => ({
 const fetchIssuesMock = vi.fn();
 const fetchIssueMock = vi.fn();
 
-vi.mock('../services/github.js', () => ({
+vi.mock('../vcs/github.js', () => ({
   fetchIssues: (...args: unknown[]) => fetchIssuesMock(...args),
   fetchIssue: (...args: unknown[]) => fetchIssueMock(...args),
   fetchMilestoneCounts: vi.fn().mockResolvedValue({ open: 0, closed: 0 }),
@@ -31,7 +31,7 @@ vi.mock('../services/github.js', () => ({
   hasExistingWork: vi.fn().mockResolvedValue(false),
 }));
 
-vi.mock('../services/pr-context.js', () => ({
+vi.mock('../vcs/pr-context.js', () => ({
   fetchOpenPRsDetailed: vi.fn().mockResolvedValue([]),
   extractPRFromResult: vi.fn().mockReturnValue(undefined),
 }));

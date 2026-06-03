@@ -15,7 +15,7 @@ vi.mock('../ai/index.js', async (importOriginal) => {
   };
 });
 
-vi.mock('../services/language-detect.js', () => ({
+vi.mock('../core/language-detect.js', () => ({
   detectTooling: vi.fn().mockResolvedValue({
     language: 'typescript',
     testRunner: 'vitest',

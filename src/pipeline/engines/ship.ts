@@ -22,12 +22,12 @@
 //   - Decide whether ship should run at all — the orchestrator owns `shouldSkip`.
 
 import { $ } from 'zx';
-import { checkForConflicts } from '../../services/conflict-check.js';
-import { resolveConflicts } from '../../services/conflict-resolver.js';
-import { createPR, listOpenPRs } from '../../services/github.js';
-import { scanForSecrets } from '../../services/secrets-scan.js';
-import { commitAndPush, detectDefaultBranch, getChangedFiles, rebaseOnDefault } from '../../services/worktree.js';
+import { scanForSecrets } from '../../core/secrets-scan.js';
 import { log } from '../../utils/logger.js';
+import { checkForConflicts } from '../../vcs/conflict-check.js';
+import { resolveConflicts } from '../../vcs/conflict-resolver.js';
+import { createPR, listOpenPRs } from '../../vcs/github.js';
+import { commitAndPush, detectDefaultBranch, getChangedFiles, rebaseOnDefault } from '../../vcs/worktree.js';
 import type { ShipEngine, ShipEngineContext, ShipEngineInput, ShipEngineResult } from './types.js';
 
 $.verbose = false;

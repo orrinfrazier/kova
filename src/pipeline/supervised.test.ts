@@ -28,7 +28,7 @@ vi.mock('./brainstorm.js', () => ({
 /* ------------------------------------------------------------------ */
 
 const mockApproveIssues = vi.fn();
-vi.mock('../services/approval.js', () => ({
+vi.mock('./approval.js', () => ({
   approveIssues: (...args: unknown[]) => mockApproveIssues(...args),
 }));
 
@@ -38,7 +38,7 @@ vi.mock('../services/approval.js', () => ({
 
 const mockCreateIssue = vi.fn();
 const mockFetchIssues = vi.fn();
-vi.mock('../services/github.js', () => ({
+vi.mock('../vcs/github.js', () => ({
   createIssue: (...args: unknown[]) => mockCreateIssue(...args),
   fetchIssues: (...args: unknown[]) => mockFetchIssues(...args),
 }));

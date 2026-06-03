@@ -2,8 +2,8 @@
 // one at a time with test verification between each merge.
 
 import { $ } from 'zx';
-import { removeSubWorktree, type SubWorktree } from '../services/worktree.js';
 import { log } from '../utils/logger.js';
+import { removeSubWorktree, type SubWorktree } from '../vcs/worktree.js';
 import type { TestRunner } from './loops.js';
 
 $.verbose = false;

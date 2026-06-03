@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { RepoConfig } from '../types/config.js';
 
 // Mock github service
-vi.mock('../services/github.js', () => ({
+vi.mock('../vcs/github.js', () => ({
   fetchKovaPRsWithStatus: vi.fn(),
   mergePR: vi.fn(),
   rebasePROnDefault: vi.fn(),
@@ -11,17 +11,17 @@ vi.mock('../services/github.js', () => ({
 }));
 
 // Mock conflict resolver
-vi.mock('../services/conflict-resolver.js', () => ({
+vi.mock('../vcs/conflict-resolver.js', () => ({
   resolveNonOverlappingConflicts: vi.fn(),
 }));
 
 // Mock worktree (detectDefaultBranch)
-vi.mock('../services/worktree.js', () => ({
+vi.mock('../vcs/worktree.js', () => ({
   detectDefaultBranch: vi.fn().mockResolvedValue('main'),
 }));
 
 // Import mocks and SUT after mock setup
-const githubModule = (await import('../services/github.js')) as unknown as {
+const githubModule = (await import('../vcs/github.js')) as unknown as {
   fetchKovaPRsWithStatus: ReturnType<typeof vi.fn>;
   mergePR: ReturnType<typeof vi.fn>;
   rebasePROnDefault: ReturnType<typeof vi.fn>;
@@ -30,7 +30,7 @@ const githubModule = (await import('../services/github.js')) as unknown as {
 };
 const { fetchKovaPRsWithStatus, mergePR, rebasePROnDefault, fetchPRDependencies, fetchPRReviewState } = githubModule;
 
-const conflictModule = (await import('../services/conflict-resolver.js')) as unknown as {
+const conflictModule = (await import('../vcs/conflict-resolver.js')) as unknown as {
   resolveNonOverlappingConflicts: ReturnType<typeof vi.fn>;
 };
 const { resolveNonOverlappingConflicts } = conflictModule;

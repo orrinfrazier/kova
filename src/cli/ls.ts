@@ -6,7 +6,7 @@
 // most relevant run on the first row for the common "I just started one"
 // workflow.
 
-import { listRuns, type Run } from '../services/run-registry.js';
+import { listRuns, type Run } from '../telemetry/run-registry.js';
 
 export interface LsResult {
   runs: Run[];

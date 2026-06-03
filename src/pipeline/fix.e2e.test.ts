@@ -190,14 +190,14 @@ vi.mock('@earendil-works/pi-coding-agent', async (importOriginal) => {
 const mockCreatePR = vi.fn().mockResolvedValue('https://github.com/test/repo/pull/42');
 const mockListOpenPRs = vi.fn().mockResolvedValue(['#10: Other fix (kova/fix-10)']);
 const mockCommentOnIssue = vi.fn().mockResolvedValue(undefined);
-vi.mock('../services/github.js', () => ({
+vi.mock('../vcs/github.js', () => ({
   listOpenPRs: (...args: unknown[]) => mockListOpenPRs(...args),
   createPR: (...args: unknown[]) => mockCreatePR(...args),
   commentOnIssue: (...args: unknown[]) => mockCommentOnIssue(...args),
 }));
 
 // Mock language-detect — avoid filesystem probing in test tmpdirs
-vi.mock('../services/language-detect.js', () => ({
+vi.mock('../core/language-detect.js', () => ({
   detectTooling: vi.fn().mockResolvedValue({ language: 'typescript', testRunner: 'vitest', linter: 'biome' }),
   formatToolingContext: vi.fn().mockReturnValue('Language: typescript\nTest runner: vitest\nLinter: biome'),
 }));
@@ -209,8 +209,8 @@ const mockCommitAndPush = vi.fn().mockResolvedValue({
   filesStaged: ['src/handler.ts', 'src/handler.test.ts'],
   commitMessage: 'fix: Test issue (#7)',
 });
-vi.mock('../services/worktree.js', async (importOriginal) => {
-  const original = await importOriginal<typeof import('../services/worktree.js')>();
+vi.mock('../vcs/worktree.js', async (importOriginal) => {
+  const original = await importOriginal<typeof import('../vcs/worktree.js')>();
   return {
     ...original,
     createWorktree: (...args: unknown[]) => mockCreateWorktree(...args),
@@ -220,7 +220,7 @@ vi.mock('../services/worktree.js', async (importOriginal) => {
   };
 });
 
-vi.mock('../services/conflict-check.js', () => ({
+vi.mock('../vcs/conflict-check.js', () => ({
   checkForConflicts: vi.fn().mockResolvedValue({
     hasConflicts: false,
     conflictingFiles: [],
@@ -229,12 +229,12 @@ vi.mock('../services/conflict-check.js', () => ({
   }),
 }));
 
-vi.mock('../services/conflict-resolver.js', () => ({
+vi.mock('../vcs/conflict-resolver.js', () => ({
   resolveConflicts: vi.fn().mockResolvedValue({ resolved: true, filesResolved: [] }),
 }));
 
 const { fix } = await import('./fix.js');
-const { loadCheckpoint } = await import('../services/checkpoint.js');
+const { loadCheckpoint } = await import('./checkpoint.js');
 
 // ---------------------------------------------------------------------------
 // Factories

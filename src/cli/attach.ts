@@ -20,8 +20,8 @@
 //     `onEvent` directly; the CLI wrapper handles the --json flag.
 
 import http from 'node:http';
-import type { KovaEvent } from '../services/event-bus/schema.js';
-import { getRun } from '../services/run-registry.js';
+import type { KovaEvent } from '../telemetry/event-bus/schema.js';
+import { getRun } from '../telemetry/run-registry.js';
 
 export interface AttachOptions {
   /** Run id to look up in the RunRegistry. */

@@ -2,12 +2,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { makeConfig, makeCtx } from './test-helpers.js';
 import { vectordbProvider } from './vectordb-provider.js';
 
-vi.mock('../../services/memory/code-rest.js', () => ({
+vi.mock('../../memory/code-rest.js', () => ({
   queryCodeContext: vi.fn(async () => []),
   formatCodeChunks: vi.fn(() => 'CHUNKS'),
 }));
 
-import { formatCodeChunks, queryCodeContext } from '../../services/memory/code-rest.js';
+import { formatCodeChunks, queryCodeContext } from '../../memory/code-rest.js';
 
 describe('vectordbProvider', () => {
   beforeEach(() => vi.clearAllMocks());

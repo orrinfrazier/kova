@@ -12,7 +12,7 @@ vi.mock('../../sandbox/dispatch.js', () => ({
 vi.mock('../prompts.js', () => ({
   loadPrompt: vi.fn(async () => 'SPEC SYSTEM PROMPT'),
 }));
-vi.mock('../../services/prompt-versions.js', () => ({
+vi.mock('../../memory/prompt-versions.js', () => ({
   detectPromptChange: vi.fn(async () => null),
   hashPrompt: vi.fn(() => 'prompt-hash-spec-consensus'),
   recordPromptVersion: vi.fn(async () => undefined),
@@ -20,7 +20,7 @@ vi.mock('../../services/prompt-versions.js', () => ({
 vi.mock('../../ai/parallel-executor.js', () => ({
   spawnConsensusWave: vi.fn(),
 }));
-vi.mock('../../services/consensus-disagreements.js', () => ({
+vi.mock('../../telemetry/consensus-disagreements.js', () => ({
   appendConsensusDisagreement: vi.fn(async () => undefined),
 }));
 vi.mock('../../ai/index.js', () => ({

@@ -129,19 +129,19 @@ vi.mock('./loops.js', () => ({
   runReviewLoop: (...args: unknown[]) => mockRunReviewLoop(...args),
 }));
 
-vi.mock('../services/github.js', () => ({
+vi.mock('../vcs/github.js', () => ({
   listOpenPRs: vi.fn().mockResolvedValue([]),
   createPR: vi.fn().mockResolvedValue('https://github.com/test/repo/pull/1'),
   commentOnIssue: vi.fn().mockResolvedValue(undefined),
 }));
 
-vi.mock('../services/language-detect.js', () => ({
+vi.mock('../core/language-detect.js', () => ({
   detectTooling: vi.fn().mockResolvedValue({ language: 'typescript', testRunner: 'vitest' }),
   formatToolingContext: vi.fn().mockReturnValue('Language: typescript'),
 }));
 
-vi.mock('../services/worktree.js', async (importOriginal) => {
-  const original = await importOriginal<typeof import('../services/worktree.js')>();
+vi.mock('../vcs/worktree.js', async (importOriginal) => {
+  const original = await importOriginal<typeof import('../vcs/worktree.js')>();
   return {
     ...original,
     createWorktree: vi.fn().mockImplementation((_repoPath: string, issueNumber: number) => ({
@@ -158,7 +158,7 @@ vi.mock('../services/worktree.js', async (importOriginal) => {
   };
 });
 
-vi.mock('../services/conflict-check.js', () => ({
+vi.mock('../vcs/conflict-check.js', () => ({
   checkForConflicts: vi.fn().mockResolvedValue({
     hasConflicts: false,
     conflictingFiles: [],
@@ -167,18 +167,18 @@ vi.mock('../services/conflict-check.js', () => ({
   }),
 }));
 
-vi.mock('../services/conflict-resolver.js', () => ({
+vi.mock('../vcs/conflict-resolver.js', () => ({
   resolveConflicts: vi.fn().mockResolvedValue({ resolved: true, filesResolved: [] }),
 }));
 
 // Mock the feedback collector — this is the module under test
 const mockCollectPRFeedback = vi.fn().mockResolvedValue(undefined);
-vi.mock('../services/feedback-collector.js', () => ({
+vi.mock('./feedback-collector.js', () => ({
   collectPRFeedback: (...args: unknown[]) => mockCollectPRFeedback(...args),
 }));
 
 const { fix } = await import('./fix.js');
-const { saveCheckpoint } = await import('../services/checkpoint.js');
+const { saveCheckpoint } = await import('./checkpoint.js');
 
 /* ------------------------------------------------------------------ */
 /*  Default mock setup for happy-path pipeline                         */
@@ -313,7 +313,7 @@ describe('fix — PR feedback collection post-ship', () => {
   });
 
   it('does NOT call collectPRFeedback when no PR was created (no changes)', async () => {
-    const { commitAndPush } = await import('../services/worktree.js');
+    const { commitAndPush } = await import('../vcs/worktree.js');
     vi.mocked(commitAndPush).mockResolvedValueOnce({
       committed: false,
       filesStaged: [],

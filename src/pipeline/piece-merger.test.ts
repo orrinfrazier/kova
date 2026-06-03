@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { $ } from 'zx';
-import type { SubWorktree } from '../services/worktree.js';
+import type { SubWorktree } from '../vcs/worktree.js';
 import type { TestRunner } from './loops.js';
 import { mergePiecesSequentially } from './piece-merger.js';
 

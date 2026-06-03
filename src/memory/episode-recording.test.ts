@@ -1,0 +1,461 @@
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import {
+  type EpisodicMemoryConfig,
+  EpisodicMemoryConfigSchema,
+  type FixState,
+  type WaveName,
+  type WaveResult,
+} from '../types/config.js';
+import { buildEpisodeRecord, type EpisodeRecord, queryEpisodeContext, recordEpisode } from './episode-rest.js';
+
+let tmpRoot: string | null = null;
+
+beforeEach(() => {
+  tmpRoot = mkdtempSync(join(tmpdir(), 'kova-episode-recording-'));
+});
+
+afterEach(() => {
+  if (tmpRoot && existsSync(tmpRoot)) rmSync(tmpRoot, { recursive: true, force: true });
+  tmpRoot = null;
+});
+
+function getTmp(): string {
+  if (!tmpRoot) throw new Error('tmpRoot not initialised');
+  return tmpRoot;
+}
+
+function makeEpisodeConfig(overrides?: Partial<EpisodicMemoryConfig>): EpisodicMemoryConfig {
+  return {
+    enabled: true,
+    max_episodes: 3,
+    cross_repo: true,
+    same_repo_weight: 1.5,
+    language_filter: true,
+    ...overrides,
+  };
+}
+
+function makeWaveResult(wave: string, artifact: unknown, overrides?: Partial<WaveResult>): WaveResult {
+  return {
+    wave: wave as WaveResult['wave'],
+    success: true,
+    artifact,
+    duration: 1000,
+    cost: 0.05,
+    turns: 5,
+    ...overrides,
+  };
+}
+
+function makeFixState(overrides?: Partial<FixState>): FixState {
+  return {
+    issue: { number: 42, title: 'Fix login bug', body: 'body', labels: ['bug', 'auth'], url: 'https://example.com/42' },
+    repo: 'test-repo',
+    repoPath: '/tmp/test',
+    startedAt: '2026-04-07T10:00:00.000Z',
+    completedWaves: ['assess', 'spec', 'test', 'impl', 'quality', 'review', 'ship'],
+    waveResults: {
+      assess: makeWaveResult('assess', {
+        grade: 'A',
+        surface_area: { files: ['src/auth.ts'], estimated_lines: 20, modules_affected: ['auth'] },
+        risk: 'low',
+        reasoning: 'simple fix',
+        should_proceed: true,
+      }),
+      spec: makeWaveResult('spec', {
+        summary: 'Add TTL check in auth middleware',
+        pieces: [
+          { name: 'TTL check', description: 'desc', files: ['src/auth.ts'], acceptance_criteria: ['AC1'], wiring: [] },
+        ],
+        dependency_order: [[0]],
+        constraints: [],
+      }),
+      impl: makeWaveResult('impl', {
+        files_modified: ['src/auth.ts'],
+        files_created: ['src/auth.test.ts'],
+        tests_passing: true,
+      }),
+      quality: makeWaveResult('quality', {
+        lint: 'pass',
+        typecheck: 'pass',
+        tests: 'pass',
+        coverage: 85,
+        audit: 'pass',
+        all_passing: true,
+      }),
+      review: makeWaveResult('review', {
+        verdict: 'pass',
+        findings: [{ category: 'mechanical_fix', file: 'src/auth.ts', severity: 'low', description: 'unused import' }],
+        summary: 'looks good',
+      }),
+      ship: makeWaveResult(
+        'ship',
+        { prUrl: 'https://github.com/test/repo/pull/1' },
+        { cost: 0, turns: 0, duration: 500 },
+      ),
+    },
+    status: 'completed',
+    ...overrides,
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/*  buildEpisodeRecord                                                 */
+/* ------------------------------------------------------------------ */
+
+describe('buildEpisodeRecord', () => {
+  it('extracts issue metadata from state', () => {
+    const record = buildEpisodeRecord(makeFixState());
+    expect(record.issue_number).toBe(42);
+    expect(record.issue_title).toBe('Fix login bug');
+    expect(record.labels).toEqual(['bug', 'auth']);
+    expect(record.repo).toBe('test-repo');
+  });
+
+  it('extracts approach from spec summary', () => {
+    expect(buildEpisodeRecord(makeFixState()).approach).toBe('Add TTL check in auth middleware');
+  });
+
+  it('extracts files changed from impl artifact', () => {
+    expect(buildEpisodeRecord(makeFixState()).files_changed).toEqual(['src/auth.ts', 'src/auth.test.ts']);
+  });
+
+  it('extracts quality gate results', () => {
+    expect(buildEpisodeRecord(makeFixState()).quality_gates).toEqual({
+      lint: 'pass',
+      typecheck: 'pass',
+      tests: 'pass',
+      coverage: 85,
+      audit: 'pass',
+      all_passing: true,
+    });
+  });
+
+  it('extracts review findings', () => {
+    const record = buildEpisodeRecord(makeFixState());
+    expect(record.review_findings).toHaveLength(1);
+    expect(record.review_findings[0]).toEqual({
+      category: 'mechanical_fix',
+      file: 'src/auth.ts',
+      severity: 'low',
+      description: 'unused import',
+    });
+  });
+
+  it('sets outcome to pr_created when ship has prUrl', () => {
+    expect(buildEpisodeRecord(makeFixState()).outcome).toBe('pr_created');
+  });
+
+  it('sets outcome to failed when state.status is failed', () => {
+    const baseWaveResults = makeFixState().waveResults;
+    const waveResults: Partial<Record<WaveName, WaveResult>> = {};
+    if (baseWaveResults.assess) waveResults.assess = baseWaveResults.assess;
+    if (baseWaveResults.spec) waveResults.spec = baseWaveResults.spec;
+    const record = buildEpisodeRecord(
+      makeFixState({
+        status: 'failed',
+        completedWaves: ['assess', 'spec'],
+        waveResults,
+      }),
+    );
+    expect(record.outcome).toBe('failed');
+    expect(record.failed_at_wave).toBe('test');
+  });
+
+  it('sets outcome to skipped when assess says should_not_proceed', () => {
+    const record = buildEpisodeRecord(
+      makeFixState({
+        status: 'completed',
+        completedWaves: ['assess'],
+        waveResults: {
+          assess: makeWaveResult('assess', {
+            grade: 'D',
+            surface_area: { files: [], estimated_lines: 500, modules_affected: [] },
+            risk: 'high',
+            reasoning: 'too complex',
+            should_proceed: false,
+          }),
+        },
+      }),
+    );
+    expect(record.outcome).toBe('skipped');
+  });
+
+  it('aggregates cost, duration, and turns across waves', () => {
+    const record = buildEpisodeRecord(makeFixState());
+    expect(record.total_cost).toBeCloseTo(0.05 * 5 + 0, 4);
+    expect(record.total_turns).toBe(5 * 5 + 0);
+  });
+
+  it('handles missing quality artifact gracefully', () => {
+    const state = makeFixState();
+    delete state.waveResults.quality;
+    expect(buildEpisodeRecord(state).quality_gates).toBeNull();
+  });
+
+  it('handles missing review artifact gracefully', () => {
+    const state = makeFixState();
+    delete state.waveResults.review;
+    expect(buildEpisodeRecord(state).review_findings).toEqual([]);
+  });
+
+  it('handles missing spec artifact — falls back to assess reasoning', () => {
+    const state = makeFixState();
+    delete state.waveResults.spec;
+    expect(buildEpisodeRecord(state).approach).toBe('simple fix');
+  });
+
+  it('handles missing spec AND assess — falls back to issue title', () => {
+    const state = makeFixState();
+    delete state.waveResults.spec;
+    delete state.waveResults.assess;
+    expect(buildEpisodeRecord(state).approach).toBe('Fix login bug');
+  });
+
+  it('failed_at_wave is null for successful fixes', () => {
+    expect(buildEpisodeRecord(makeFixState()).failed_at_wave).toBeNull();
+  });
+
+  it('captures error_message from state.error on failure', () => {
+    const base = makeFixState();
+    const record = buildEpisodeRecord(
+      makeFixState({
+        status: 'failed',
+        error: 'TypeError: Cannot read property x of undefined',
+        completedWaves: ['assess', 'spec'],
+        waveResults: {
+          assess: base.waveResults.assess!,
+          spec: base.waveResults.spec!,
+        },
+      }),
+    );
+    expect(record.error_message).toBe('TypeError: Cannot read property x of undefined');
+  });
+
+  it('error_message is undefined for successful fixes', () => {
+    expect(buildEpisodeRecord(makeFixState()).error_message).toBeUndefined();
+  });
+
+  it('captures learnings from failed pieces diagnosis', () => {
+    const record = buildEpisodeRecord(
+      makeFixState({
+        status: 'failed',
+        error: 'tests failing',
+        completedWaves: ['assess', 'spec', 'test', 'impl'],
+        failedPieces: [
+          {
+            pieceName: 'impl',
+            diagnosis: {
+              category: 'SPEC_WRONG',
+              theory: 'file X should be in piece Y',
+              tests_still_failing: ['test1.ts', 'test2.ts'],
+            },
+          },
+        ],
+        waveResults: {
+          assess: makeFixState().waveResults.assess!,
+          spec: makeFixState().waveResults.spec!,
+          test: makeWaveResult('test', { test_files_created: ['test.ts'], test_count: 3, all_failing: true }),
+          impl: makeWaveResult('impl', { files_modified: [], files_created: [], tests_passing: false }),
+        },
+      }),
+    );
+    expect(record.learnings).toBeDefined();
+    expect(record.learnings).toContain('SPEC_WRONG');
+  });
+
+  it('learnings is undefined for successful fixes', () => {
+    expect(buildEpisodeRecord(makeFixState()).learnings).toBeUndefined();
+  });
+
+  it('captures failed_wave_output from the failing wave artifact', () => {
+    const base = makeFixState();
+    const record = buildEpisodeRecord(
+      makeFixState({
+        status: 'failed',
+        error: 'quality gates failed',
+        completedWaves: ['assess', 'spec', 'test', 'impl', 'quality'],
+        waveResults: {
+          assess: base.waveResults.assess!,
+          spec: base.waveResults.spec!,
+          test: makeWaveResult('test', { test_files_created: ['test.ts'], test_count: 3, all_failing: true }),
+          impl: makeWaveResult('impl', { files_modified: ['src/auth.ts'], files_created: [], tests_passing: true }),
+          quality: makeWaveResult('quality', {
+            lint: 'fail',
+            typecheck: 'fail',
+            tests: 'pass',
+            coverage: 40,
+            audit: 'pass',
+            all_passing: false,
+          }),
+        },
+      }),
+    );
+    expect(record.failed_wave_output).toBeDefined();
+    expect(record.failed_wave_output?.length).toBeLessThanOrEqual(500);
+  });
+
+  it('failed_wave_output is undefined for successful fixes', () => {
+    expect(buildEpisodeRecord(makeFixState()).failed_wave_output).toBeUndefined();
+  });
+
+  it('includes diagnosis when present in state', () => {
+    const record = buildEpisodeRecord(
+      makeFixState({
+        status: 'failed',
+        completedWaves: ['assess', 'spec', 'test', 'impl'],
+        diagnosis: 'APPROACH_WRONG',
+      }),
+    );
+    expect(record.diagnosis).toBe('APPROACH_WRONG');
+  });
+
+  it('includes thrashing_signal when present in state', () => {
+    const record = buildEpisodeRecord(
+      makeFixState({
+        thrashingSignal: 'SAME_FILES',
+      }),
+    );
+    expect(record.thrashing_signal).toBe('SAME_FILES');
+  });
+
+  it('includes retry_attempts when present in state', () => {
+    const record = buildEpisodeRecord(
+      makeFixState({
+        retryAttempts: 3,
+      }),
+    );
+    expect(record.retry_attempts).toBe(3);
+  });
+
+  it('diagnosis fields are undefined when not present in state', () => {
+    const record = buildEpisodeRecord(makeFixState());
+    expect(record.diagnosis).toBeUndefined();
+    expect(record.thrashing_signal).toBeUndefined();
+    expect(record.retry_attempts).toBeUndefined();
+  });
+
+  it('failed_at_wave points to wave after last completed on failure', () => {
+    const baseWaveResults = makeFixState().waveResults;
+    const waveResults: Partial<Record<WaveName, WaveResult>> = {};
+    if (baseWaveResults.assess) waveResults.assess = baseWaveResults.assess;
+    if (baseWaveResults.spec) waveResults.spec = baseWaveResults.spec;
+    if (baseWaveResults.test) waveResults.test = baseWaveResults.test;
+    if (baseWaveResults.impl) waveResults.impl = baseWaveResults.impl;
+    const record = buildEpisodeRecord(
+      makeFixState({
+        status: 'failed',
+        completedWaves: ['assess', 'spec', 'test', 'impl'],
+        waveResults,
+      }),
+    );
+    expect(record.failed_at_wave).toBe('quality');
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/*  recordEpisode                                                      */
+/* ------------------------------------------------------------------ */
+
+describe('recordEpisode (sqlite-vec)', () => {
+  const sampleRecord: EpisodeRecord = {
+    issue_number: 42,
+    issue_title: 'Fix login bug auth middleware',
+    labels: ['bug'],
+    repo: 'test-repo',
+    approach: 'Add TTL check',
+    files_changed: ['src/auth.ts'],
+    quality_gates: { lint: 'pass', typecheck: 'pass', tests: 'pass', coverage: 85, audit: 'pass', all_passing: true },
+    review_findings: [],
+    outcome: 'pr_created',
+    failed_at_wave: null,
+    total_cost: 0.48,
+    total_duration: 20000,
+    total_turns: 32,
+    timestamp: '2026-04-07T10:05:00.000Z',
+  };
+
+  it('persists record to local sqlite-vec store', async () => {
+    const result = await recordEpisode(makeEpisodeConfig(), sampleRecord, getTmp());
+    expect(result).toBe(true);
+
+    // Roundtrip verification — querying the same workDir surfaces the record.
+    const results = await queryEpisodeContext(
+      makeEpisodeConfig(),
+      'login bug auth middleware',
+      { repo: 'test-repo' },
+      getTmp(),
+    );
+    expect(results.some((r) => r.issue_number === 42)).toBe(true);
+  });
+
+  it('returns false when disabled', async () => {
+    const result = await recordEpisode(makeEpisodeConfig({ enabled: false }), sampleRecord, getTmp());
+    expect(result).toBe(false);
+  });
+
+  it('returns false when workDir is missing', async () => {
+    const result = await recordEpisode(makeEpisodeConfig(), sampleRecord);
+    expect(result).toBe(false);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/*  EpisodicMemoryConfigSchema — cross-repo fields                     */
+/* ------------------------------------------------------------------ */
+
+describe('EpisodicMemoryConfigSchema cross-repo fields', () => {
+  it('defaults cross_repo to true', () => {
+    const result = EpisodicMemoryConfigSchema.parse({
+      enabled: true,
+      endpoint: 'http://localhost:8100/query',
+    });
+    expect(result.cross_repo).toBe(true);
+  });
+
+  it('defaults same_repo_weight to 1.5', () => {
+    const result = EpisodicMemoryConfigSchema.parse({
+      enabled: true,
+      endpoint: 'http://localhost:8100/query',
+    });
+    expect(result.same_repo_weight).toBe(1.5);
+  });
+
+  it('defaults language_filter to true', () => {
+    const result = EpisodicMemoryConfigSchema.parse({
+      enabled: true,
+      endpoint: 'http://localhost:8100/query',
+    });
+    expect(result.language_filter).toBe(true);
+  });
+
+  it('accepts explicit cross_repo false', () => {
+    const result = EpisodicMemoryConfigSchema.parse({
+      enabled: true,
+      endpoint: 'http://localhost:8100/query',
+      cross_repo: false,
+    });
+    expect(result.cross_repo).toBe(false);
+  });
+
+  it('accepts custom same_repo_weight', () => {
+    const result = EpisodicMemoryConfigSchema.parse({
+      enabled: true,
+      endpoint: 'http://localhost:8100/query',
+      same_repo_weight: 2.0,
+    });
+    expect(result.same_repo_weight).toBe(2.0);
+  });
+
+  it('accepts explicit language_filter false', () => {
+    const result = EpisodicMemoryConfigSchema.parse({
+      enabled: true,
+      endpoint: 'http://localhost:8100/query',
+      language_filter: false,
+    });
+    expect(result.language_filter).toBe(false);
+  });
+});
