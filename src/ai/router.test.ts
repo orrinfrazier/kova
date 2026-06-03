@@ -139,4 +139,94 @@ describe('router', () => {
       expect(resolveRouterApiKey()).toBeUndefined();
     });
   });
+
+  // --- Pricing lookup (kova#314) ---
+  // Router-proxied requests must carry the upstream provider's pricing so the
+  // user-configured cost cap (KOVA_MAX_COST_USD), cost-report aggregation, and
+  // shared budget tracker all see non-zero per-turn cost.
+  describe('createRouterModel pricing lookup', () => {
+    it('copies pi-ai pricing for "anthropic:claude-opus-4-6"', async () => {
+      process.env.ANTHROPIC_BASE_URL = 'https://my-router.example.com';
+      const { createRouterModel } = await import('./router.js');
+      const { getModel, registerBuiltInApiProviders } = await import('@earendil-works/pi-ai');
+      registerBuiltInApiProviders();
+      const upstream = getModel('anthropic', 'claude-opus-4-6');
+
+      const routed = createRouterModel('anthropic:claude-opus-4-6');
+
+      expect(routed.cost.input).toBe(upstream.cost.input);
+      expect(routed.cost.output).toBe(upstream.cost.output);
+      expect(routed.cost.cacheRead).toBe(upstream.cost.cacheRead);
+      expect(routed.cost.cacheWrite).toBe(upstream.cost.cacheWrite);
+    });
+
+    it('copies pi-ai pricing for "anthropic:claude-haiku-4-5-20251001" — $1/$5 per Mtok', async () => {
+      process.env.ANTHROPIC_BASE_URL = 'https://my-router.example.com';
+      const { createRouterModel } = await import('./router.js');
+
+      const routed = createRouterModel('anthropic:claude-haiku-4-5-20251001');
+
+      // Per pi-ai's published rates (verified at issue write-time): $1 input,
+      // $5 output per million tokens. If pi-ai's rates change upstream, the
+      // assertion can be loosened to "> 0", but pinning catches silent zeroing.
+      expect(routed.cost.input).toBe(1);
+      expect(routed.cost.output).toBe(5);
+    });
+
+    it('uses default ROUTER_DEFAULT when no modelId argument is passed', async () => {
+      process.env.ANTHROPIC_BASE_URL = 'https://my-router.example.com';
+      process.env.ROUTER_DEFAULT = 'anthropic:claude-opus-4-6';
+      const { createRouterModel } = await import('./router.js');
+
+      const routed = createRouterModel();
+
+      // Should pick up pricing from anthropic:claude-opus-4-6 (non-zero).
+      expect(routed.cost.input).toBeGreaterThan(0);
+      expect(routed.cost.output).toBeGreaterThan(0);
+    });
+
+    it('falls back to cost: 0 for unresolvable models and does not throw', async () => {
+      process.env.ANTHROPIC_BASE_URL = 'https://my-router.example.com';
+      const { createRouterModel } = await import('./router.js');
+
+      const routed = createRouterModel('unknown:fake-model');
+
+      // Graceful fallback: zero cost (caller is warned via log), no throw.
+      expect(routed.cost.input).toBe(0);
+      expect(routed.cost.output).toBe(0);
+      expect(routed.id).toBe('fake-model');
+      expect(routed.provider).toBe('router');
+    });
+
+    it('exposes the upstream provider via getRouterUpstreamProvider when resolved', async () => {
+      process.env.ANTHROPIC_BASE_URL = 'https://my-router.example.com';
+      const { createRouterModel, getRouterUpstreamProvider } = await import('./router.js');
+
+      createRouterModel('anthropic:claude-opus-4-6');
+
+      // Lookup by model id (the field cost-report has access to via WaveResult.model).
+      expect(getRouterUpstreamProvider('claude-opus-4-6')).toBe('anthropic');
+    });
+
+    it('getRouterUpstreamProvider returns undefined for unresolved models', async () => {
+      process.env.ANTHROPIC_BASE_URL = 'https://my-router.example.com';
+      const { createRouterModel, getRouterUpstreamProvider } = await import('./router.js');
+
+      createRouterModel('unknown:fake-model');
+
+      expect(getRouterUpstreamProvider('fake-model')).toBeUndefined();
+    });
+
+    it('keeps provider === "router" so resolveApiKey routes through ANTHROPIC_API_KEY', async () => {
+      // Regression guard: do NOT change provider to 'anthropic' — that would
+      // break wave-executor.ts:1008 resolveApiKey routing and any other
+      // isRouterProvider() checks throughout the code.
+      process.env.ANTHROPIC_BASE_URL = 'https://my-router.example.com';
+      const { createRouterModel } = await import('./router.js');
+
+      const routed = createRouterModel('anthropic:claude-opus-4-6');
+
+      expect(routed.provider).toBe('router');
+    });
+  });
 });
