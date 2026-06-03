@@ -55,6 +55,8 @@ import {
 import { createWebhookServer } from '../services/webhook-server.js';
 import type { KovaConfig, PipelineMode, RepoConfig } from '../types/index.js';
 import { log, setLevel } from '../utils/logger.js';
+import { attach, formatEventLine } from './attach.js';
+import { formatLsTable, gatherLs } from './ls.js';
 import { registerOllamaProvidersFromConfig } from './ollama-wiring.js';
 
 /** Parse the `--mode` flag value into a `PipelineMode`, exiting on invalid input.
@@ -455,6 +457,75 @@ program
     }
   });
 
+// Issue #293: kova ls / kova attach <run-id> — discoverable + reattachable runs.
+// Borrowed from tmux: `tmux ls` enumerates sessions, `tmux attach` reconnects.
+program
+  .command('ls')
+  .description('List active and recent fix runs from .kova/runs/')
+  .option('--repo <name-or-path>', 'Repository name (from config) or path', '.')
+  .option('--json', 'Output as JSON')
+  .action(async (opts: { repo?: string; json?: boolean }) => {
+    const kovaConfig = await tryLoadConfig(program.opts().config);
+    const { repoPath } = resolveRepo(opts.repo ?? '.', kovaConfig);
+    const result = await gatherLs(repoPath);
+    if (opts.json) {
+      console.log(JSON.stringify(result, null, 2));
+    } else {
+      console.log(formatLsTable(result));
+    }
+  });
+
+program
+  .command('attach <run-id>')
+  .description('Snapshot then live-tail events for a run (Ctrl+C to detach)')
+  .option('--repo <name-or-path>', 'Repository name (from config) or path', '.')
+  .option('--host <host>', 'Daemon host', '127.0.0.1')
+  .option('--port <number>', 'Daemon port', '3000')
+  .option('--json', 'Output raw event JSON (one event per line)')
+  .action(async (runId: string, opts: { repo?: string; host?: string; port?: string; json?: boolean }) => {
+    const kovaConfig = await tryLoadConfig(program.opts().config);
+    const { repoPath } = resolveRepo(opts.repo ?? '.', kovaConfig);
+    const port = Number.parseInt(opts.port ?? '3000', 10);
+    if (Number.isNaN(port)) {
+      console.error(`Invalid --port value: ${opts.port}`);
+      process.exit(1);
+    }
+
+    // Ctrl+C closes the SSE connection — the daemon's req.on('close') in
+    // event-bus/sse.ts unsubscribes us. The run + daemon are untouched.
+    const controller = new AbortController();
+    const onSignal = (): void => controller.abort();
+    process.once('SIGINT', onSignal);
+    process.once('SIGTERM', onSignal);
+
+    console.error(`Attaching to ${runId} at ${opts.host ?? '127.0.0.1'}:${port}. Press Ctrl+C to detach.`);
+
+    try {
+      await attach({
+        runId,
+        repoPath,
+        host: opts.host ?? '127.0.0.1',
+        port,
+        signal: controller.signal,
+        onEvent: (event) => {
+          if (opts.json) {
+            console.log(JSON.stringify(event));
+          } else {
+            console.log(formatEventLine(event));
+          }
+        },
+      });
+      console.error('Detached.');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`attach failed: ${msg}`);
+      process.exit(1);
+    } finally {
+      process.off('SIGINT', onSignal);
+      process.off('SIGTERM', onSignal);
+    }
+  });
+
 program
   .command('reindex')
   .description('Re-embed changed files in the vector DB')
@@ -592,11 +663,17 @@ program
       return true;
     };
 
+    // Issue #293: expose the process-singleton event bus so `kova attach`
+    // clients can stream live events from this daemon. The bus is the same
+    // one fix.ts publishes to (getDefaultEventBus), so there's no extra
+    // wiring on the publisher side.
+    const { getDefaultEventBus } = await import('../services/event-bus/index.js');
     const server = createWebhookServer({
       secret,
       port,
       enqueue,
       queue,
+      eventBus: getDefaultEventBus(),
     });
 
     installSignalHandlers();
