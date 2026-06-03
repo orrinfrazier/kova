@@ -15,7 +15,6 @@ import type { EventWaveName } from '../services/event-bus/schema.js';
 import { createToolCallCounter, type ToolCallCounts } from '../services/tool-call-counter.js';
 import type { WaveHandoff, WaveModelConfig, WaveName } from '../types/index.js';
 import { log } from '../utils/logger.js';
-import { createTransformContext } from './context-transform.js';
 import { createDestructiveEditGuard, type DestructiveEditGuardOptions } from './destructive-edit-guard.js';
 import { classifyError, isSpendingCapBehavior, KovaError } from './errors.js';
 import { createImportPreservationGuard, type ImportPreservationGuardOptions } from './import-preservation-guard.js';
@@ -25,13 +24,11 @@ import { composeBeforeToolCallHooks, createPieceScopeGuard } from './piece-scope
 import { priceUsage, type TokenUsage } from './pricing.js';
 import { getRouterDefaultModel, isRouterProvider, resolveRouterApiKey } from './router.js';
 import {
-  type AgentMessage,
   type AgentRuntimeFactory,
   type AssistantTurn,
   type CacheRetention,
   defaultAgentRuntimeFactory,
   type RuntimeBeforeToolCallHook,
-  type RuntimeTransformContext,
   type ThinkingLevel,
 } from './runtime/index.js';
 import type { TruncationOptions } from './tool-result-truncate.js';
@@ -445,11 +442,18 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
   // Construct via the AgentRuntime factory (kova#309). The default factory
   // wraps pi-mono Agent; kova#310 will extract a full PiAgentRuntime adapter.
   //
-  // `createTransformContext` and `createDestructiveEditGuard` return
-  // pi-mono-typed functions today. They are structurally compatible with the
-  // kova hooks, but cross the package boundary, so we widen at the call site
-  // (the adapter narrows back to pi-mono types). Cleaned up in kova#310 when
-  // the adapter owns the translation in one place.
+  // `createDestructiveEditGuard` returns a pi-mono-typed function today. It is
+  // structurally compatible with the kova hooks, but crosses the package
+  // boundary, so we widen at the call site (the adapter narrows back to pi-mono
+  // types). Cleaned up in kova#310 when the adapter owns the translation in one
+  // place.
+  //
+  // Issue #296 — no `transformContext` here. The prior `createTransformContext`
+  // hook trimmed tool-result content under context pressure and `aggressiveTrim`
+  // dropped middle messages at 80% — both lossy. Context pressure is now
+  // handled exclusively by the 3-tier degradation below: Tier-1 steer at 70%,
+  // Tier-3 abort at `contextThreshold` (default 90%). The 80% Tier-2 slot is
+  // intentionally a no-op (collapses onto Tier-3) per the issue's cleanup note.
   //
   // Issue #315 — no `afterToolCall` here. Tool-result truncation is applied at
   // tool-execute time via `withTruncatedResult` (see `./tool-result-truncate.ts`).
@@ -461,7 +465,6 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
     thinkingLevel,
     tools,
     getApiKey: resolveApiKey,
-    transformContext: createTransformContext(model.contextWindow) as unknown as RuntimeTransformContext,
     // Issue #297: session affinity + cache retention. Both are optional;
     // omitted when unset so adapters that do not support either field stay
     // unaffected.
@@ -478,7 +481,6 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
   let accumulatedCost = 0;
   let contextExhausted = false;
   let contextSteered = false;
-  let contextTrimmed = false;
   let lastErrorMessage: string | undefined;
   // Issue #297: cache-read telemetry — accumulate input + cacheRead across
   // every assistant turn so we can compute the cache-hit share at completion.
@@ -492,7 +494,6 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
 
   // Fixed thresholds for graceful degradation
   const STEER_THRESHOLD = 0.7;
-  const TRIM_THRESHOLD = 0.8;
 
   const unsubscribe = agent.subscribe((event) => {
     if (event.type === 'turn_end') {
@@ -539,10 +540,13 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
         log.debug(`[${wave}] Skipping non-assistant turn_end message (role=${role})`);
       }
 
-      // Context window monitoring: 3-tier graceful degradation
+      // Context window monitoring: 2-tier graceful degradation
       // Tier 1 (70%): steer agent with focus warning
-      // Tier 2 (80%): set aggressive transformContext trimming
       // Tier 3 (contextThreshold, default 90%): abort as last resort
+      //
+      // Issue #296 — the prior Tier-2 (80%) trim slot reassigned a lossy
+      // `transformContext` that dropped middle messages. That slot is gone;
+      // 80% now collapses onto Tier-3 (acceptable per the issue's cleanup note).
       const inputTokens = isAssistantMessage(msg) ? msg.usage.input : 0;
       if (inputTokens > 0 && model.contextWindow > 0) {
         const usageRatio = inputTokens / model.contextWindow;
@@ -556,32 +560,9 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
           publishEvent({ type: 'steered', wave: wave as EventWaveName, tier: 'abort', usageRatio });
           publishEvent({ type: 'aborted', wave: wave as EventWaveName, reason: 'context_exhausted' });
           agent.abort();
-        } else if (usageRatio >= TRIM_THRESHOLD && !contextTrimmed) {
-          // Tier 2: aggressive trimming via transformContext.
-          // Runtimes that do not support transformContext reassignment will
-          // collapse to Tier-3 abort at contextThreshold (no-op safe).
-          contextTrimmed = true;
-          log.warn(
-            `[${wave}] Context usage ${(usageRatio * 100).toFixed(0)}% hit trim threshold (${inputTokens}/${model.contextWindow} tokens), enabling aggressive context compaction`,
-          );
-          publishEvent({ type: 'steered', wave: wave as EventWaveName, tier: 'trim', usageRatio });
-          // Optional chaining is insufficient for assignment — guard explicitly.
-          if ('transformContext' in agent) {
-            (agent as { transformContext: typeof aggressiveTrimContext }).transformContext = aggressiveTrimContext;
-          }
-          // Also steer if not already done
-          if (!contextSteered) {
-            contextSteered = true;
-            agent.steer?.({
-              role: 'user',
-              content:
-                'Focus on completing the current task. Avoid reading additional files unless absolutely necessary.',
-              timestamp: Date.now(),
-            });
-          }
         } else if (usageRatio >= STEER_THRESHOLD && !contextSteered) {
           // Tier 1: steer with warning. Runtimes without steer() will collapse
-          // to Tier-2 trim or Tier-3 abort (no-op safe).
+          // to Tier-3 abort (no-op safe).
           contextSteered = true;
           log.info(
             `[${wave}] Context usage ${(usageRatio * 100).toFixed(0)}% hit steer threshold (${inputTokens}/${model.contextWindow} tokens), steering agent to focus`,
@@ -1176,37 +1157,6 @@ export function buildRepairTurnMessage(
     'Output ONLY the corrected JSON wrapped in <json>...</json> tags, with no other text before or after.',
   );
   return lines.join('\n');
-}
-
-/**
- * Aggressive context trimmer for when context usage exceeds 80%.
- * Keeps the first user message and the last 3 tool-result/assistant turn pairs,
- * dropping intermediate messages to free context space.
- *
- * SHAPE ASSUMPTION (pi-ai runtime): identical to the caveat on
- * `src/ai/context-transform.ts` — this trimmer treats `AgentMessage[]` as a
- * flat list where tool results are top-level messages (pi-ai's denormalized
- * `ToolResultMessage`). The slice-by-index approach is safe under that shape
- * because each tool result occupies one message slot.
- *
- * Under Anthropic's native Messages API shape, tool results are content
- * blocks inside a user message and one user message can carry multiple tool
- * results plus other blocks. Porting this trimmer to the native shape
- * requires trimming at the content-block level (and joining `tool_use_id`
- * back to the prior assistant `tool_use` block if name-based filtering is
- * ever added here), not at the message level.
- *
- * Planned cleanup: pi-mono's `compact()` / `shouldCompact()` (issue #296)
- * will replace this trimmer and the sibling hook in `context-transform.ts`.
- */
-async function aggressiveTrimContext(messages: AgentMessage[]): Promise<AgentMessage[]> {
-  // Keep at most the first message + last 6 messages (≈ 3 turn pairs)
-  const KEEP_TAIL = 6;
-  if (messages.length <= KEEP_TAIL + 1) return messages;
-
-  const head = messages.slice(0, 1);
-  const tail = messages.slice(-KEEP_TAIL);
-  return [...head, ...tail];
 }
 
 /**
