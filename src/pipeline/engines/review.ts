@@ -40,6 +40,9 @@ export function buildReviewLoopConfig(ctx: EngineContext, input: ReviewEngineInp
     ...(input.reviewFeedbackContext !== undefined && {
       reviewFeedbackContext: input.reviewFeedbackContext,
     }),
+    ...(input.regressionSurfaceContext !== undefined && {
+      regressionSurfaceContext: input.regressionSurfaceContext,
+    }),
     ...(input.prescanRunner !== undefined && { prescanRunner: input.prescanRunner }),
     ...(input.baselineFailures !== undefined && { baselineFailures: input.baselineFailures }),
     ...(input.currentFailures !== undefined && { currentFailures: input.currentFailures }),
