@@ -28,7 +28,7 @@ vi.mock('./feedback-collector.js', () => ({
   collectPRFeedback: mockCollectPRFeedback,
 }));
 
-vi.mock('./vectordb.js', () => ({
+vi.mock('./memory/review-feedback-rest.js', () => ({
   classifyFeedback: mockClassifyFeedback,
 }));
 

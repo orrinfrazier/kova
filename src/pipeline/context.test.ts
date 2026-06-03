@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import type { SymbolHit } from '../ai/codegraph.js';
-import type { CodeChunk } from '../services/vectordb.js';
 import type {
   AssessResult,
   Issue,
@@ -11,6 +10,7 @@ import type {
   SpecResult,
   WaveResult,
 } from '../types/index.js';
+import type { CodeChunk } from '../types/memory.js';
 import {
   buildPieceContext,
   buildWaveContext,

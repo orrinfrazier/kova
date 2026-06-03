@@ -2,8 +2,8 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import type { EpisodeRecord } from '../types/memory.js';
 import { formatPatterns, type PatternRecord, PatternStore, upsertPatternFromEpisode } from './pattern-store.js';
-import type { EpisodeRecord } from './vectordb.js';
 
 describe('PatternStore', () => {
   let tmp: string;

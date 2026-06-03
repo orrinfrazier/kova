@@ -27,7 +27,7 @@ vi.mock('../services/git-diff.js', () => ({
   getChangedFilesSince: getChangedFilesSinceMock,
 }));
 
-vi.mock('../services/vectordb.js', () => ({
+vi.mock('../services/memory/code-rest.js', () => ({
   queryCodeContext: queryCodeContextMock,
   formatCodeChunks: formatCodeChunksMock,
 }));

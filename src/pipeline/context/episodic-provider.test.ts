@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { episodicProvider } from './episodic-provider.js';
 import { makeConfig, makeCtx } from './test-helpers.js';
 
-vi.mock('../../services/vectordb.js', () => ({
+vi.mock('../../services/memory/episode-rest.js', () => ({
   queryEpisodeContext: vi.fn(async () => []),
   formatEpisodes: vi.fn(() => 'EPISODES'),
   formatFailedEpisodes: vi.fn(() => 'FAILED'),
@@ -16,7 +16,7 @@ vi.mock('../../services/episode-fts.js', () => ({
 }));
 
 import { EpisodeFTSStore } from '../../services/episode-fts.js';
-import { formatEpisodes, formatFailedEpisodes, queryEpisodeContext } from '../../services/vectordb.js';
+import { formatEpisodes, formatFailedEpisodes, queryEpisodeContext } from '../../services/memory/episode-rest.js';
 
 describe('episodicProvider', () => {
   beforeEach(() => {

@@ -88,6 +88,18 @@ export {
   WaveHandoffSchema,
 } from './handoffs.js';
 export type {
+  CodeChunk,
+  CrossRepoQueryOptions,
+  EpisodeContext,
+  EpisodeForCluster,
+  EpisodeRecord,
+  PlaybookRecord,
+  ReviewFeedbackInput,
+  ReviewFeedbackItem,
+  ReviewFeedbackRecord,
+  SynthesizeFn,
+} from './memory.js';
+export type {
   CodeEmbeddingInsert,
   EpisodeInsert,
   FeedbackType,

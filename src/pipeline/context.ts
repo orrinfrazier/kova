@@ -2,7 +2,6 @@
 // Each wave gets a focused, formatted summary (not raw JSON) of only the handoffs it needs.
 
 import { type ExecFn, findSymbolDefinitions, findSymbolReferences, type SymbolHit } from '../ai/codegraph.js';
-import type { CodeChunk } from '../services/vectordb.js';
 import type {
   AssessResult,
   Issue,
@@ -14,6 +13,7 @@ import type {
   WaveName,
   WaveResult,
 } from '../types/index.js';
+import type { CodeChunk } from '../types/memory.js';
 
 /** Chars-per-token ratio for code-heavy content (operators, short identifiers). */
 const CODE_CHARS_PER_TOKEN = 3.5;

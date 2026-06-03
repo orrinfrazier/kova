@@ -21,7 +21,7 @@
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import Database, { type Database as DbHandle } from 'better-sqlite3';
-import type { EpisodeRecord } from './vectordb.js';
+import type { EpisodeRecord } from '../types/memory.js';
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS patterns (
