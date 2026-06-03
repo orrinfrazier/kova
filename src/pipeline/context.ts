@@ -44,6 +44,15 @@ export interface ContextOptions {
    * Source: {@link formatCodegraphContext} in `src/ai/codegraph.ts`.
    */
   codegraphContext?: string;
+  /**
+   * Pre-formatted framework-resolved call-path context (#275) — route→handler
+   * bindings (e.g. `app.get('/users', listUsers)` → handler symbol) plus 1-hop
+   * callers/callees for each resolved handler. Injected into spec/impl waves
+   * BELOW {@link codegraphContext} (symbol-level facts come first) and ABOVE
+   * {@link codebaseContext} (framework-resolved beats fuzzy vector chunks).
+   * Source: `formatCallPathContext` in `src/pipeline/call-path-context.ts`.
+   */
+  callPathContext?: string;
   /** Pre-formatted episodic memory context (only for assess/spec waves). */
   episodicContext?: string;
   /**
@@ -270,6 +279,13 @@ function buildSpecContext(issue: Issue, handoffs: Handoffs, options: ContextOpti
     sections.push(options.codegraphContext);
   }
 
+  // Issue #275 — framework-resolved route→handler bindings sit BELOW symbol-level
+  // graph hits (already specific) and ABOVE fuzzy codebase chunks. Keeps the
+  // "most-precise-first" ordering: graph symbol > framework route > vector neighbor.
+  if (options.callPathContext) {
+    sections.push(options.callPathContext);
+  }
+
   if (options.codebaseContext) {
     sections.push(options.codebaseContext);
   }
@@ -320,6 +336,11 @@ function buildImplContext(handoffs: Handoffs, options: ContextOptions): string {
   // Issue #273 — see buildSpecContext for the ordering rationale.
   if (options.codegraphContext) {
     sections.push(options.codegraphContext);
+  }
+
+  // Issue #275 — see buildSpecContext for the ordering rationale.
+  if (options.callPathContext) {
+    sections.push(options.callPathContext);
   }
 
   if (options.codebaseContext) {
