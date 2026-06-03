@@ -79,6 +79,11 @@ export function resolveOutputSchemaName(wave: WaveName, hasOutputFormat: boolean
  * Build the wire input passed to the sandbox executor (docker-exec or
  * `backend.execWave()`). Centralized so both routing paths produce identical
  * shapes — the runner inside the sandbox doesn't care which path the host took.
+ *
+ * Issue #306 — `mcpServers` / `mcpWaveOverrides` ride along when the host
+ * orchestrator resolved them. The runner uses them to start MCP servers
+ * inside the sandbox on /workspace so codegraph (and other MCP servers) are
+ * available to sandboxed waves without any host round-trip.
  */
 function buildSpawnInput(config: SpawnWithFallbackConfig): SandboxWaveInput {
   return {
@@ -96,6 +101,10 @@ function buildSpawnInput(config: SpawnWithFallbackConfig): SandboxWaveInput {
     ...(config.outputFormat != null && {
       outputSchemaName: resolveOutputSchemaName(config.wave, true),
     }),
+    ...(config.mcpServers != null && Object.keys(config.mcpServers).length > 0
+      ? { mcpServers: config.mcpServers }
+      : {}),
+    ...(config.mcpWaveOverrides != null && { mcpWaveOverrides: config.mcpWaveOverrides }),
   };
 }
 
@@ -179,6 +188,13 @@ export async function dispatchExecuteWave(
         ...(options.outputFormat != null && {
           outputSchemaName: resolveOutputSchemaName(options.wave, true),
         }),
+        // Issue #306 — forward MCP server config + wave overrides through the
+        // sandbox boundary so the in-container runner can start codegraph and
+        // friends on /workspace.
+        ...(options.mcpServers != null && Object.keys(options.mcpServers).length > 0
+          ? { mcpServers: options.mcpServers }
+          : {}),
+        ...(options.mcpWaveOverrides != null && { mcpWaveOverrides: options.mcpWaveOverrides }),
       };
 
       const raw = usingBackend
