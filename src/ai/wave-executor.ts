@@ -79,22 +79,49 @@ export function isAssistantMessage(msg: unknown): msg is AssistantTurn {
 }
 
 /**
+ * Map kova's wave-level `CacheRetention` (the runtime-facing knob) onto
+ * pricing's `'5m' | '1h'` axis. Issue #390.
+ *
+ * - `'long'` → `'1h'` (priced at the 1h cacheWrite rate, ~1.6× input on
+ *   Anthropic sonnet/opus).
+ * - `'short'` → `'5m'` (Anthropic's default cacheWrite rate, ~1.25× input).
+ * - `'none'` → `'5m'`. Caching is disabled at the runtime layer, so
+ *   `cacheWrite` tokens are 0 in practice and the retention value is moot;
+ *   `'5m'` keeps the type narrow and matches the explicit mapping called out
+ *   in the issue body.
+ * - `undefined` → `undefined`. `priceUsage` then applies its `'5m'` default —
+ *   no behavior change for short-running waves (assess/spec/review/brainstorm)
+ *   that intentionally leave the retention unset.
+ */
+function cacheRetentionToPricingTtl(retention: CacheRetention | undefined): TokenUsage['cacheRetention'] | undefined {
+  if (retention === undefined) return undefined;
+  return retention === 'long' ? '1h' : '5m';
+}
+
+/**
  * Project an assistant message's `usage` onto the kova-owned `TokenUsage`
  * shape. Defensive against runtimes (or test fixtures) that omit cache
  * fields — those default to 0. Issue #313.
+ *
+ * Issue #390: when the caller threads the wave's resolved `cacheRetention`,
+ * it is mapped onto the pricing TTL axis (`'long'` → `'1h'`, `'short'`/`'none'`
+ * → `'5m'`) so `priceUsage` bills cacheWrite tokens at the correct rate.
+ * Omit `cacheRetention` (default) to keep `priceUsage`'s `'5m'` fallback.
  */
-function toTokenUsage(usage: AssistantTurn['usage']): TokenUsage {
+function toTokenUsage(usage: AssistantTurn['usage'], cacheRetention?: CacheRetention): TokenUsage {
   const u = usage as {
     input?: number;
     output?: number;
     cacheRead?: number;
     cacheWrite?: number;
   };
+  const pricingRetention = cacheRetentionToPricingTtl(cacheRetention);
   return {
     input: u.input ?? 0,
     output: u.output ?? 0,
     cacheRead: u.cacheRead ?? 0,
     cacheWrite: u.cacheWrite ?? 0,
+    ...(pricingRetention != null ? { cacheRetention: pricingRetention } : {}),
   };
 }
 
@@ -517,7 +544,10 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
         // Track cost incrementally from assistant turn_end events.
         // Issue #313: price through kova's table, not pi-ai's `cost.total`
         // (which is $0 for router-mode and won't model #297 cache retention).
-        const turnCost = priceUsage(pricingModelId, toTokenUsage(msg.usage));
+        // Issue #390: thread the wave's resolved `cacheRetention` so the
+        // cacheWrite line is priced at the correct TTL rate (1h for long
+        // retention, 5m otherwise).
+        const turnCost = priceUsage(pricingModelId, toTokenUsage(msg.usage, cacheRetention));
         accumulatedCost += turnCost;
         // Issue #297: accumulate input + cacheRead tokens for the cache-share
         // telemetry line emitted at wave completion. The kova-owned
@@ -639,7 +669,9 @@ export async function spawnWaveAgent<T = unknown>(config: SpawnWaveAgentConfig):
           // Issue #313: re-price via kova's table so the final tally matches
           // the per-turn accumulation. Router-mode in particular reports $0
           // via `cost.total`; pricing through `pricingModelId` fixes that.
-          collected += priceUsage(pricingModelId, toTokenUsage(msg.usage));
+          // Issue #390: thread the wave's resolved `cacheRetention` so the
+          // re-priced total matches the per-turn accumulation above.
+          collected += priceUsage(pricingModelId, toTokenUsage(msg.usage, cacheRetention));
         }
       }
       const last = [...stateMessages].reverse().find((m): m is AssistantTurn => isAssistantMessage(m));
