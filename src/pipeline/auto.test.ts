@@ -59,6 +59,7 @@ function makeRepoConfig(
       brainstorm: 'large',
     },
     isolation: 'none',
+    runtime: 'pi',
     ...overrides,
     auto: makeAutoConfig(overrides?.auto),
   };
@@ -213,6 +214,7 @@ describe('runAuto', () => {
         brainstorm: 'large',
       },
       isolation: 'none',
+      runtime: 'pi',
     };
 
     const result = await runAuto({ repoPath: '/tmp/test', repoName: 'test-repo', config });

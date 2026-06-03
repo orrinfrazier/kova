@@ -1,3 +1,4 @@
+import type { RuntimeKind } from '../ai/runtime/index.js';
 import { fetchIssues } from '../services/github.js';
 import { collectChangedFilesFromPRs, reindexFiles } from '../services/reindex.js';
 import type { Issue, KovaConfig, RepoConfig } from '../types/index.js';
@@ -17,6 +18,8 @@ export interface AutoOptions {
   max?: number | undefined;
   force?: boolean | undefined;
   budgetTracker?: SharedBudgetTracker | undefined;
+  /** Issue #407 — runtime selector forwarded into the loop and onto each fix(). */
+  runtime?: RuntimeKind | undefined;
 }
 
 export interface AutoResult {
@@ -25,7 +28,7 @@ export interface AutoResult {
 }
 
 export async function runAuto(options: AutoOptions): Promise<AutoResult> {
-  const { repoPath, repoName, config, filter, milestone, max, force, budgetTracker } = options;
+  const { repoPath, repoName, config, filter, milestone, max, force, budgetTracker, runtime } = options;
   const autoConfig = config.auto;
 
   const resolvedFilter = filter ?? autoConfig?.filter;
@@ -49,6 +52,7 @@ export async function runAuto(options: AutoOptions): Promise<AutoResult> {
     maxIssues: resolvedMax,
     force,
     budgetTracker,
+    ...(runtime != null ? { runtime } : {}),
   });
 
   const exitCode = loopResult.failed > 0 ? 1 : 0;
@@ -73,6 +77,8 @@ export interface MultiRepoAutoOptions {
   milestone?: string | undefined;
   max?: number | undefined;
   force?: boolean | undefined;
+  /** Issue #407 — runtime selector forwarded into every per-repo runAuto call. */
+  runtime?: RuntimeKind | undefined;
 }
 
 export interface MultiRepoAutoResult {
@@ -82,7 +88,7 @@ export interface MultiRepoAutoResult {
 
 /** Run auto mode across all repos in a KovaConfig, in config order. */
 export async function runAutoMultiRepo(options: MultiRepoAutoOptions): Promise<MultiRepoAutoResult> {
-  const { config, filter, milestone, max, force } = options;
+  const { config, filter, milestone, max, force, runtime } = options;
   const repoEntries = Object.entries(config.repos);
 
   log.info(`[auto] Multi-repo mode: ${repoEntries.length} repos`);
@@ -103,6 +109,7 @@ export async function runAutoMultiRepo(options: MultiRepoAutoOptions): Promise<M
       ...(milestone !== undefined ? { milestone } : {}),
       max,
       force,
+      ...(runtime != null ? { runtime } : {}),
     });
 
     repoResults.push({ repoName: name, loopResult: result.loopResult });
@@ -128,6 +135,8 @@ export interface MultiRepoParallelOptions {
   max?: number | undefined;
   force?: boolean | undefined;
   budgetUsd?: number | undefined;
+  /** Issue #407 — runtime selector forwarded into every per-repo runAuto call. */
+  runtime?: RuntimeKind | undefined;
 }
 
 interface ParallelRepoResult {
@@ -159,7 +168,7 @@ export interface MultiRepoParallelResult {
  * pre-#287 fully-parallel implementation.
  */
 export async function runAutoMultiRepoParallel(options: MultiRepoParallelOptions): Promise<MultiRepoParallelResult> {
-  const { config, filter, milestone, max, force, budgetUsd } = options;
+  const { config, filter, milestone, max, force, budgetUsd, runtime } = options;
   const repoEntries = Object.entries(config.repos);
 
   log.info(`[auto] Multi-repo parallel mode: ${repoEntries.length} repos`);
@@ -224,6 +233,7 @@ export async function runAutoMultiRepoParallel(options: MultiRepoParallelOptions
       max,
       force,
       budgetTracker,
+      ...(runtime != null ? { runtime } : {}),
     });
     return { repoName: name, loopResult: result.loopResult };
   };

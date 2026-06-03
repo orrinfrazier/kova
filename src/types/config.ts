@@ -521,6 +521,20 @@ export const RepoConfigSchema = z.object({
       brainstorm: 'large' as const,
     })),
   isolation: IsolationModeSchema.default('worktree'),
+  /**
+   * Agent runtime selector (issue #407). Controls which `AgentRuntimeFactory`
+   * the fix/auto/loop/brainstorm/supervised pipelines use.
+   *   - `'pi'` (default) — runs in-process via pi-mono `Agent`. Supports
+   *     in-process `AgentTool[]` implementations passed to spawnWaveAgent.
+   *   - `'claude-cli'` — runs as a `claude -p` subprocess. The CLI does NOT
+   *     accept in-process tool implementations — only the static tool
+   *     allowlist + MCP servers — so a swap loses any custom `tools` surface.
+   *     See `src/ai/runtime/claude-cli-runtime.ts` and the CLAUDE.md "Runtime
+   *     selection" section for details.
+   *
+   * Resolution precedence at the CLI: `--runtime` flag > this field > `'pi'`.
+   */
+  runtime: z.enum(['pi', 'claude-cli']).default('pi'),
   providers: ProvidersSchema,
   mcp: MCPConfigSchema.optional(),
 });

@@ -1,4 +1,5 @@
 import { $ } from 'zx';
+import type { RuntimeKind } from '../ai/runtime/index.js';
 import { type EventBus, getDefaultEventBus } from '../services/event-bus/index.js';
 import { fetchIssue, fetchIssues, fetchMilestoneCounts } from '../services/github.js';
 import * as metrics from '../services/metrics.js';
@@ -45,6 +46,12 @@ export interface LoopOptions {
    * (#291) to inject their own bus per run.
    */
   eventBus?: EventBus | undefined;
+  /**
+   * Per-invocation runtime selector (issue #407). Forwarded verbatim to each
+   * `fix()` call in the loop. Overrides `config.runtime`. Undefined → fix()
+   * falls back to `config.runtime` (default `'pi'`).
+   */
+  runtime?: RuntimeKind | undefined;
 }
 
 /**
@@ -221,6 +228,7 @@ export async function fixLoop(options: LoopOptions): Promise<LoopResult> {
       config,
       pendingPRs: [...pendingPRs],
       eventBus: sharedEventBus,
+      ...(options.runtime != null ? { runtime: options.runtime } : {}),
     });
 
     const waveCosts = aggregateWaveCosts(result.state.waveResults);
@@ -404,6 +412,8 @@ export interface FixByNumbersOptions {
    * callers see no behavior change.
    */
   eventBus?: EventBus | undefined;
+  /** Issue #407 — per-invocation runtime selector. Forwarded to fix(). */
+  runtime?: RuntimeKind | undefined;
 }
 
 export async function fixByNumbers(options: FixByNumbersOptions): Promise<LoopResult> {
@@ -501,6 +511,7 @@ export async function fixByNumbers(options: FixByNumbersOptions): Promise<LoopRe
         config,
         pendingPRs: [...pendingPRs],
         eventBus: sharedEventBus,
+        ...(options.runtime != null ? { runtime: options.runtime } : {}),
       });
 
       const waveCosts = aggregateWaveCosts(result.state.waveResults);

@@ -97,6 +97,7 @@ function makeConfig() {
       brainstorm: 'large' as const,
     },
     isolation: 'none' as const,
+    runtime: 'pi' as const,
   };
 }
 

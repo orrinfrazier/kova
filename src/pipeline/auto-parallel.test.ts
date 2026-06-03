@@ -51,6 +51,7 @@ function makeRepoConfig(
       brainstorm: 'large',
     },
     isolation: 'none',
+    runtime: 'pi',
     ...overrides,
     auto: {
       source: 'open_issues' as const,
