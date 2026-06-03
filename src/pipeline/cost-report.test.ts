@@ -296,6 +296,65 @@ describe('per-provider cost breakdown', () => {
     expect(report.providerCosts.unknown).toBeCloseTo(0.12, 4);
   });
 
+  // --- Router aggregation (kova#314) ---
+  // When a wave was executed through the router, the per-provider aggregate
+  // must bucket under the upstream provider (e.g. 'anthropic'), not 'router'.
+  // The per-wave breakdown still shows provider: 'router' for transparency.
+  it('aggregates router-proxied waves under the upstream provider', async () => {
+    process.env.ANTHROPIC_BASE_URL = 'https://my-router.example.com';
+    // Populate the upstream-provider map by constructing a router model.
+    const { createRouterModel } = await import('../ai/router.js');
+    createRouterModel('anthropic:claude-opus-4-6');
+
+    const state = makeState({
+      waveResults: {
+        assess: makeWaveResult('assess', {
+          cost: 0.12,
+          provider: 'router',
+          model: 'claude-opus-4-6',
+        }),
+        spec: makeWaveResult('spec', { cost: 0.08, provider: 'anthropic', model: 'claude-sonnet-4-6' }),
+        test: makeWaveResult('test', { cost: 0, turns: 0 }),
+        impl: makeWaveResult('impl', { cost: 0, turns: 0 }),
+        quality: makeWaveResult('quality', { cost: 0, turns: 0 }),
+        review: makeWaveResult('review', { cost: 0, turns: 0 }),
+        ship: makeWaveResult('ship', { cost: 0, turns: 0 }),
+      },
+    });
+    const report = buildCostReport(state);
+
+    // Aggregate bucket: router cost should land under 'anthropic', not 'router'.
+    expect(report.providerCosts.anthropic).toBeCloseTo(0.2, 4);
+    expect(report.providerCosts.router).toBeUndefined();
+
+    // Per-wave row still labels provider as 'router' (transparency).
+    const assessWave = report.waves.find((w) => w.wave === 'assess');
+    expect(assessWave?.provider).toBe('router');
+
+    delete process.env.ANTHROPIC_BASE_URL;
+  });
+
+  it('keeps router waves bucketed under "router" when upstream provider is unknown', () => {
+    // No createRouterModel call → no upstream mapping → bucket stays as 'router'.
+    const state = makeState({
+      waveResults: {
+        assess: makeWaveResult('assess', {
+          cost: 0.05,
+          provider: 'router',
+          model: 'totally-unknown-model',
+        }),
+        spec: makeWaveResult('spec', { cost: 0, turns: 0 }),
+        test: makeWaveResult('test', { cost: 0, turns: 0 }),
+        impl: makeWaveResult('impl', { cost: 0, turns: 0 }),
+        quality: makeWaveResult('quality', { cost: 0, turns: 0 }),
+        review: makeWaveResult('review', { cost: 0, turns: 0 }),
+        ship: makeWaveResult('ship', { cost: 0, turns: 0 }),
+      },
+    });
+    const report = buildCostReport(state);
+    expect(report.providerCosts.router).toBeCloseTo(0.05, 4);
+  });
+
   it('returns empty object when no waves completed', () => {
     const state = makeState({
       waveResults: {},
