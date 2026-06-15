@@ -1,4 +1,5 @@
 import { getModel, getProviders, type Model, registerBuiltInApiProviders } from '@earendil-works/pi-ai';
+import { CODEX_ACCESS_TOKEN_ENV, CODEX_PROVIDER, hasCodexCredentials } from '../auth/codex/index.js';
 import type {
   ModelTier,
   OllamaProvider,
@@ -278,11 +279,18 @@ const PROVIDER_API_KEY_ENV: Readonly<Record<string, readonly string[]>> = {
   google: ['GEMINI_API_KEY', 'GOOGLE_API_KEY'],
   'amazon-bedrock': ['AWS_ACCESS_KEY_ID'],
   'vertex-ai': ['GOOGLE_APPLICATION_CREDENTIALS'],
+  // ChatGPT Pro/Plus (Codex) subscription auth. The env var is a CI escape
+  // hatch holding a pre-extracted access_token; the normal path is the OAuth
+  // file at ~/.kova/auth/openai.json (see src/auth/codex). Both are accepted
+  // — hasApiKey overrides the default env-only check below for this provider.
+  [CODEX_PROVIDER]: [CODEX_ACCESS_TOKEN_ENV],
 };
 
 /** Check whether the required API key is available for a provider.
- *  A provider with multiple accepted env vars passes if ANY of them is set. */
+ *  A provider with multiple accepted env vars passes if ANY of them is set.
+ *  openai-codex additionally accepts a logged-in OAuth credentials file. */
 function hasApiKey(provider: string): boolean {
+  if (provider === CODEX_PROVIDER) return hasCodexCredentials();
   const envVars = PROVIDER_API_KEY_ENV[provider];
   if (!envVars) return true; // Unknown provider — assume key is handled elsewhere
   return envVars.some((v) => !!process.env[v]);
@@ -291,6 +299,7 @@ function hasApiKey(provider: string): boolean {
 /** Human-readable description of the env var(s) a provider accepts.
  *  "GEMINI_API_KEY or GOOGLE_API_KEY" for google, "OPENAI_API_KEY" for openai. */
 function describeApiKeyEnv(provider: string): string {
+  if (provider === CODEX_PROVIDER) return `${CODEX_ACCESS_TOKEN_ENV} or run \`kova auth login\``;
   const envVars = PROVIDER_API_KEY_ENV[provider];
   if (!envVars || envVars.length === 0) return 'the appropriate env var';
   if (envVars.length === 1) return envVars[0] as string;
