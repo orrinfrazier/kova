@@ -57,6 +57,8 @@ import type { KovaConfig, PipelineMode, RepoConfig } from '../types/index.js';
 import { log, setLevel } from '../utils/logger.js';
 import { createIssue, fetchIssue, hasExistingWork } from '../vcs/github.js';
 import { attach, formatEventLine } from './attach.js';
+import { authLoginCodex, authStatusCodex } from './auth.js';
+import { prepareSubscriptionAuth } from './auth-wiring.js';
 import { formatLsTable, gatherLs } from './ls.js';
 import { registerOllamaProvidersFromConfig } from './ollama-wiring.js';
 
@@ -265,6 +267,16 @@ program
           waves: consensusWaves,
         });
         log.info(formatConsensusActivationLog({ pool: consensusPool, waves: consensusWaves }));
+      }
+
+      // Refresh subscription-billed credentials (Codex etc.) BEFORE
+      // validateModelConfig so a stale-but-refreshable token doesn't
+      // fail startup validation. See src/cli/auth-wiring.ts.
+      try {
+        await prepareSubscriptionAuth(effectiveConfig);
+      } catch (err) {
+        log.error(err instanceof Error ? err.message : String(err));
+        process.exit(1);
       }
 
       // Validate configured models and API keys before starting
@@ -1047,6 +1059,33 @@ program
 
     shutdownMetrics();
     process.exit(result.errors.length > 0 ? 1 : 0);
+  });
+
+const auth = program.command('auth').description('Manage authentication for subscription-billed AI providers');
+
+auth
+  .command('login')
+  .description('Authorize a subscription-billed provider (currently: ChatGPT/Codex)')
+  .option('--codex', 'Authorize ChatGPT Pro/Plus (Codex) — default and currently the only option', true)
+  .option('--headless', 'Use device-code flow (for SSH / no-browser environments)')
+  .action(async (opts: { codex?: boolean; headless?: boolean }) => {
+    // Today `--codex` is the only path; the flag exists so the UX is stable
+    // when we add Gemini Code Assist / Claude Max later. Ignore the value
+    // until other providers land — the only thing we currently do is codex.
+    void opts.codex;
+    try {
+      await authLoginCodex(opts.headless ? { headless: true } : {});
+    } catch (e) {
+      log.error(`Login failed: ${e instanceof Error ? e.message : e}`);
+      process.exit(1);
+    }
+  });
+
+auth
+  .command('status')
+  .description('Show the current Codex login state')
+  .action(() => {
+    authStatusCodex();
   });
 
 const sandbox = program.command('sandbox').description('Manage sandbox Docker images');

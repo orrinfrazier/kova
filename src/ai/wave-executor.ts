@@ -11,6 +11,12 @@
 // OpenAI Assistants, …) plug in via the same `AgentRuntimeFactory` seam.
 
 import type { z } from 'zod';
+import {
+  CODEX_ACCESS_TOKEN_ENV,
+  CODEX_PROVIDER,
+  getCachedCodexAccessToken,
+  readCodexCredentials,
+} from '../auth/codex/index.js';
 import type { EventBus } from '../telemetry/event-bus/bus.js';
 import type { EventWaveName } from '../telemetry/event-bus/schema.js';
 import { createToolCallCounter, type ToolCallCounts } from '../telemetry/tool-call-counter.js';
@@ -1209,6 +1215,7 @@ export async function executeWaveWithRetry(options: WaveOptions, maxRetries = 2)
 export function resolveApiKey(provider: string): string | undefined {
   if (isRouterProvider(provider)) return resolveRouterApiKey();
   if (isOllamaProvider(provider)) return resolveOllamaApiKey();
+  if (provider === CODEX_PROVIDER) return resolveCodexAccessToken();
   switch (provider) {
     case 'google':
       return process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY;
@@ -1218,6 +1225,25 @@ export function resolveApiKey(provider: string): string | undefined {
       return process.env.ANTHROPIC_API_KEY;
     default:
       return process.env.ANTHROPIC_API_KEY;
+  }
+}
+
+/** Resolve the Codex (ChatGPT subscription) access token. Order:
+ *    1. `OPENAI_CODEX_API_KEY` env var (CI escape hatch — pre-extracted JWT).
+ *    2. In-memory cache populated by `ensureFreshCodexToken` at CLI startup.
+ *    3. Last-resort sync read from `~/.kova/auth/openai.json`. No refresh here
+ *       — refresh is async and runs at startup; if a fix outlives the
+ *       access_token's ~1h lifetime, pi-ai will 401 on the next wave.
+ *  Returns `undefined` when no path yields a token. */
+function resolveCodexAccessToken(): string | undefined {
+  const fromEnv = process.env[CODEX_ACCESS_TOKEN_ENV];
+  if (fromEnv) return fromEnv;
+  const cached = getCachedCodexAccessToken();
+  if (cached) return cached;
+  try {
+    return readCodexCredentials()?.access;
+  } catch {
+    return undefined;
   }
 }
 
